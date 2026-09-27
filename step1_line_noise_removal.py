@@ -77,7 +77,7 @@ def remove_line_noise_inplace(raw, raw_prep, clean):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-03"
+    subject_id = "sub-02"
     project_dir = Path(__file__).resolve().parents[2]
     set_file = (project_dir / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
@@ -135,13 +135,13 @@ if __name__ == "__main__":
     plt.show()
 
     # %% Apply line-noise removal
-    clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    clean = ZapLine_notch(clean, line_freq=90.0)
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    # clean = ZapLine_notch(clean, line_freq=90.0)
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
 
     # sub-02 - when ZapLine fails, use SpectrumInterpolation for 30 Hz and 90 Hz as well
-    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
 
     # Remove the estimated noise from the original data without high-pass filtering it
     remove_line_noise_inplace(raw, raw_prep, clean)
