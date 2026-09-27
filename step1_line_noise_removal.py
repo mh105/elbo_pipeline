@@ -4,9 +4,7 @@ import mne
 import numpy as np
 from mne_denoise.zapline import ZapLine
 from mne_denoise.spectrum_interpolation import SpectrumInterpolation
-from somata.multitaper.multitaper_spectrogram_python import (
-    multitaper_spectrogram,
-)
+from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
 
 
 def ZapLine_notch(raw_prep, line_freq):
@@ -43,7 +41,7 @@ def ZapLine_notch(raw_prep, line_freq):
     return clean
 
 
-def IntSpec(raw_prep, line_freq, n_harmonics=1, bandwidth=1.0):
+def Interpolate_fft(raw_prep, line_freq, n_harmonics=1, bandwidth=1.0):
     """Return a Raw copy cleaned by amplitude-spectrum interpolation.
 
     line_freq is the fundamental frequency in Hz, or a list of explicit targets.
@@ -79,7 +77,7 @@ def remove_line_noise_inplace(raw, raw_prep, clean):
 
 # %% Load example data
 """Load and crop the development EEG recording."""
-subject_id = "sub-02"
+subject_id = "sub-03"
 
 project_dir = Path(__file__).resolve().parents[2]
 set_file = (
@@ -145,14 +143,14 @@ plt.show()
 
 
 # %% Apply line-noise removal
-# clean = ZapLine_notch(raw_prep, line_freq=30.0)
-# clean = ZapLine_notch(clean, line_freq=90.0)
-# clean = IntSpec(clean, line_freq=60.0, bandwidth=1.5)
+clean = ZapLine_notch(raw_prep, line_freq=30.0)
+clean = ZapLine_notch(clean, line_freq=90.0)
+clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
 
 
 # sub-02 - when ZapLine fails, use SpectrumInterpolation for 30 Hz and 90 Hz as well
-clean = IntSpec(raw_prep, line_freq=30.0, n_harmonics=3)
-clean = IntSpec(clean, line_freq=60.0, bandwidth=4.5)
+# clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+# clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
 
 
 # Remove the estimated noise from the original data without high-pass filtering it
