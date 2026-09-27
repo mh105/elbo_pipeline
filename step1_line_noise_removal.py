@@ -29,7 +29,7 @@ def ZapLine_notch(raw_prep, line_freq):
     )
     raw_notched = raw_prep.copy().load_data()
     raw_notched.notch_filter(
-        freqs=[line_freq], picks=picks, method="fir", phase="zero"
+        freqs=[line_freq], picks=picks, method="fir", phase="zero", verbose=False,
     )
     notched = raw_notched.get_data(picks=picks)
     residual = raw_prep.get_data(picks=picks) - notched
@@ -96,7 +96,7 @@ if __name__ == "__main__":
 
     # For line noise removal, first highpass filter at 1.0 Hz to remove slow drifts
     raw_prep = raw.copy()
-    raw_prep.filter(l_freq=1.0, h_freq=None)
+    raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
 
     # %% Some manual inspection of the data before line-noise removal
     # Inspect the spectra across channels
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     # Need to re-apply the 1 Hz high-pass filter to the modified raw data without
     # line noise for comparison, since the original raw was not high-pass filtered.
     raw_prep = raw.copy()
-    raw_prep.filter(l_freq=1.0, h_freq=None)
+    raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
 
     # Inspect the spectra across channels
     psd_after = raw_prep.compute_psd(fmax=fmax)
