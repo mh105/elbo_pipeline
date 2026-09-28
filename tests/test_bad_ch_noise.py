@@ -1,0 +1,364 @@
+import sys
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+import mne
+import numpy as np
+
+
+pipeline_dir = Path(__file__).resolve().parents[1]
+if str(pipeline_dir) not in sys.path:
+    sys.path.insert(0, str(pipeline_dir))
+
+import step2_bad_ch_time_detection as step2
+
+
+def make_raw(data, sfreq=250, first_samp=0, meas_date=None, average=False):
+    """Use a native reference or opposite-polarity pairs with zero channel mean."""
+    data = np.asarray(data, dtype=float)
+    names = [f"E{i}" for i in range(len(data))]
+    if average:
+        names += [f"M{i}" for i in range(len(data))]
+        data = np.vstack([data, -data])
+    else:
+        names += ["Cz"]
+        data = np.vstack([data, np.zeros(data.shape[1])])
+    info = mne.create_info(names, sfreq, "eeg")
+    info.set_meas_date(meas_date)
+    return mne.io.RawArray(
+        data, info,
+        first_samp=first_samp, verbose=False,
+    )
+
+
+def std_raw(n_bad=2, sfreq=250, window_length=2):
+    samples = int(sfreq * window_length)
+    amplitudes = np.array([0.01, 10, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7])
+    windows = np.tile(amplitudes, (4, 1))
+    windows[:n_bad, -1] = 100
+    wave = np.tile([-1, 1], samples // 2)
+    data = (windows.T[..., None] * wave).reshape(len(amplitudes), -1) * 1e-6
+    return make_raw(data, sfreq, average=True)
+
+
+def hf_raw(n_bad=2, sfreq=250, window_length=2):
+    samples = int(sfreq * window_length)
+    t = np.arange(4 * samples) / sfreq
+    data = np.array([
+        (10 + i / 10) * np.sin(2 * np.pi * 10 * t)
+        + (1 + i / 100) * np.sin(2 * np.pi * 80 * t)
+        for i in range(9)
+    ]) * 1e-6
+    data[0] += 100e-6 * np.sin(2 * np.pi * 10 * t)  # Strong LF alone is not HF noise.
+    data[-1, :n_bad * samples] += 20e-6 * np.sin(2 * np.pi * 80 * t[:n_bad * samples])
+    return make_raw(data, sfreq)
+
+
+def bb_raw(n_bad=2, sfreq=250, window_length=2):
+    samples = int(sfreq * window_length)
+    rng = np.random.default_rng(42)
+    data = rng.normal(size=(13, 4 * samples)) * np.linspace(1, 1.3, 13)[:, None] * 1e-6
+    t = np.arange(4 * samples) / sfreq
+    data[0] += 80e-6 * np.sin(2 * np.pi * 10 * t)  # Narrowband outlier.
+    data[-2:, :n_bad * samples] *= 30
+    return make_raw(data, sfreq, average=True)
+
+
+WINDOW_DETECTORS = (
+    (step2.bad_ch_by_std, std_raw, ["E8", "M8"]),
+    (step2.bad_ch_by_HFnoise, hf_raw, ["E8"]),
+    (step2.bad_ch_by_BBnoise, bb_raw, ["E11", "E12", "M11", "M12"]),
+)
+
+
+class TestVoltageMask(unittest.TestCase):
+    def test_strict_thresholds_merge_partial_tail_and_channel_exclusions(self):
+        data = np.ones((6, 45)) * 1e-6
+        data[0, 1] = 501e-6  # Exactly one of four eligible channels: do not mask.
+        data[1, 2] = -500e-6  # Equality is not an exceedance.
+        data[0, 11] = 501e-6
+        data[1, 18] = -501e-6  # Exceedances need not be simultaneous.
+        data[:2, 21] = 501e-6
+        data[:2, 41] = 501e-6
+        data[4:] = 1e-3
+        raw = make_raw(data, sfreq=100)
+        raw.info["bads"] = ["E4"]
+        raw.set_channel_types({"E5": "eog"})
+        raw.set_annotations(mne.Annotations([0.35], [0], ["event"]))
+        original = raw.get_data().copy()
+        self.assertIsNone(step2.mask_segment_by_voltage(raw))
+        mask = raw.annotations.description == "BAD_voltage_mask"
+        np.testing.assert_allclose(raw.annotations.onset[mask], [0.1, 0.4])
+        np.testing.assert_allclose(raw.annotations.duration[mask], [0.2, 0.05])
+        self.assertIn("event", raw.annotations.description)
+        self.assertEqual(raw.info["bads"], ["E4"])
+        np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_cropped_time_base_with_and_without_measurement_date(self):
+        for meas_date in (None, datetime(2026, 9, 27, tzinfo=timezone.utc)):
+            with self.subTest(meas_date=meas_date):
+                data = np.ones((4, 200)) * 1e-6
+                data[:2, 71] = 501e-6
+                raw = make_raw(data, sfreq=100, first_samp=250, meas_date=meas_date)
+                raw.crop(tmin=0.5)
+                step2.mask_segment_by_voltage(raw)
+                np.testing.assert_allclose(raw.annotations.onset, [3.2])
+                np.testing.assert_allclose(raw.annotations.duration, [0.1])
+                self.assertEqual(raw.annotations.orig_time, meas_date)
+                kept = raw.get_data(picks=[0], reject_by_annotation="omit", verbose=False)
+                self.assertEqual(kept.shape[1], 140)
+
+    def test_mask_parameters_and_invalid_data(self):
+        raw = make_raw(np.ones((4, 100)) * 1e-6, sfreq=100)
+        raw._data[0, 60] = 101e-6
+        step2.mask_segment_by_voltage(
+            raw, voltage_threshold_uv=100, channel_fraction_cutoff=0.2, window_length=0.5
+        )
+        np.testing.assert_allclose(raw.annotations.onset, [0.5])
+        np.testing.assert_allclose(raw.annotations.duration, [0.5])
+        for kwargs in (
+            {"voltage_threshold_uv": 0}, {"voltage_threshold_uv": np.inf},
+            {"channel_fraction_cutoff": -0.1}, {"channel_fraction_cutoff": 1.1},
+            {"window_length": 0.001}, {"window_length": np.nan},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                step2.mask_segment_by_voltage(raw, **kwargs)
+        raw._data[0, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
+            step2.mask_segment_by_voltage(raw)
+
+
+class TestVoltageDetection(unittest.TestCase):
+    def test_sample_occurrence_and_signed_voltage_boundaries(self):
+        raw = make_raw(np.ones((5, 100)) * 1e-6, sfreq=100)
+        raw._data[0, :26] = 201e-6
+        raw._data[1, :25] = -201e-6
+        raw._data[2] = np.tile([-200e-6, 200e-6], 50)
+        raw._data[4] = np.nan
+        raw.info["bads"] = ["E4"]
+        original = raw.get_data().copy()
+        result = step2.bad_ch_by_voltage(raw)
+        self.assertEqual(result, {"voltage": ["E0"]})
+        self.assertEqual(step2.bad_ch_by_voltage(raw), {"voltage": []})
+        self.assertEqual(raw.info["bads"], ["E4", "E0"])
+        np.testing.assert_array_equal(raw.get_data(), original)
+        self.assertEqual(len(raw.annotations), 0)
+
+    def test_temporary_and_existing_annotations_change_sample_denominator(self):
+        raw = make_raw(np.ones((4, 100)) * 1e-6, sfreq=100, first_samp=300)
+        raw._data[:4, :20] = 600e-6  # Temporary mask.
+        raw._data[0, 40:56] = 201e-6  # 16 of 60 retained samples exceed.
+        raw._data[1, 40:55] = -201e-6  # 15 of 60: exactly 25%, accepted.
+        raw._data[2, 20:40] = 400e-6
+        raw.set_annotations(mne.Annotations([0.2], [0.2], ["bad_existing"]))
+        annotations = raw.annotations.copy()
+        original = raw.get_data().copy()
+        self.assertEqual(step2.bad_ch_by_voltage(raw), {"voltage": ["E0"]})
+        self.assertEqual(raw.info["bads"], ["E0"])
+        self.assertEqual(raw.annotations, annotations)
+        np.testing.assert_array_equal(raw.get_data(), original)
+
+
+class TestRobustMetrics(unittest.TestCase):
+    def test_hf_details_preserve_masked_times_and_extract_flagged_waveforms(self):
+        raw = hf_raw(n_bad=2)
+        raw.info["bads"] = ["E1"]
+        raw.set_annotations(mne.Annotations([2.25], [0.01], ["BAD_existing"]))
+        raw._data[:4, 1000:1005] = 600e-6  # Temporary mask in the third window.
+        original = raw.get_data().copy()
+        annotations = raw.annotations.copy()
+        expected = step2.bad_ch_by_HFnoise(raw.copy())
+        report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+        self.assertEqual(report, expected)
+        self.assertEqual(report, {"HFnoise": ["E8"]})
+        self.assertEqual(raw.info["bads"], ["E1", "E8"])
+        self.assertNotIn("E1", details["ch_names"])
+        self.assertNotIn("Cz", details["ch_names"])
+        np.testing.assert_array_equal(details["start_s"], [0, 2, 4, 6])
+        np.testing.assert_array_equal(details["stop_s"], [2, 4, 6, 8])
+        np.testing.assert_array_equal(details["retained"], [True, False, False, True])
+        i = details["ch_names"].index("E8")
+        np.testing.assert_array_equal(details["violates"][i], [1, np.nan, np.nan, 0])
+        for name in details["ch_names"]:
+            channel = details["ch_names"].index(name)
+            windows = np.flatnonzero(details["violates"][channel] == 1)
+            extracted = details["flagged_data_uv"][name]
+            self.assertEqual(extracted.shape, (len(windows), 500))
+            for waveform, window in zip(extracted, windows):
+                np.testing.assert_allclose(
+                    waveform, original[raw.ch_names.index(name), window * 500:(window + 1) * 500] * 1e6
+                )
+        self.assertTrue(np.isnan(details["robust_z"][:, [1, 2]]).all())
+        np.testing.assert_allclose(
+            details["ratio"][:, details["retained"]],
+            (details["hf_mad_uv"] / details["lf_mad_uv"])[:, details["retained"]],
+        )
+        np.testing.assert_array_equal(raw.get_data(), original)
+        self.assertEqual(raw.annotations, annotations)
+
+    def test_matlab_iqr_and_distinct_cross_channel_scales(self):
+        self.assertEqual(step2._iqr(np.arange(1, 9)), 4)
+        values = np.array([0, 1, 2, 3, 7, 8])
+        np.testing.assert_allclose(
+            step2._robust_channel_z(values, use_iqr=True), (values - 2.5) / (0.7413 * 6)
+        )
+        np.testing.assert_allclose(
+            step2._robust_channel_z(values), (values - 2.5) / (1.4826 * 2)
+        )
+        np.testing.assert_array_equal(step2._robust_channel_z(np.ones(8)), np.zeros(8))
+        np.testing.assert_array_equal(
+            step2._robust_channel_z(np.ones(8), use_iqr=True), np.zeros(8)
+        )
+
+    def test_std_and_hf_use_strict_positive_z_threshold(self):
+        for detector, factory, _ in WINDOW_DETECTORS[:2]:
+            with self.subTest(detector=detector.__name__):
+                raw = factory()
+                z = np.zeros(18 if detector is step2.bad_ch_by_std else 9)
+                z[:3] = [-10, 5, 5.001]
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                with patch.object(step2, "_robust_channel_z", return_value=z):
+                    self.assertEqual(detector(raw), {criterion: ["E2"]})
+                self.assertEqual(raw.info["bads"], ["E2"])
+
+    def test_hf_ratio_tracks_hf_relative_to_lf_and_ignores_dc_offset(self):
+        sfreq = 1000
+        t = np.arange(2 * sfreq) / sfreq
+        low = 10e-6 * np.sin(2 * np.pi * 10 * t)
+        high = 2e-6 * np.sin(2 * np.pi * 100 * t)
+        ratios = step2._prep_hf_ratio(np.array([low + high, low + 5 * high, 5 * low + high]), sfreq)
+        self.assertGreater(ratios[1], 4 * ratios[0])
+        self.assertLess(ratios[2], ratios[0] / 4)
+        shifted = step2._prep_hf_ratio(np.array([low + high + 100e-6]), sfreq)
+        np.testing.assert_allclose(shifted, ratios[:1], rtol=1e-8)
+        np.testing.assert_array_equal(step2._prep_hf_ratio(np.zeros((2, len(t))), sfreq), [0, 0])
+
+
+class TestWindowedNoiseDetection(unittest.TestCase):
+    def test_report_keeps_separate_criteria_while_bads_accumulate(self):
+        raw = std_raw()
+        raw._data[1, 5] = np.nan
+        report = {}
+        report.update(step2.bad_ch_by_nan(raw))
+        raw.set_eeg_reference("average", projection=False, verbose=False)
+        report.update(step2.bad_ch_by_std(raw))
+        self.assertEqual(report, {"nan": ["E1"], "std": ["E8", "M8"]})
+        self.assertEqual(raw.info["bads"], ["E1", "E8", "M8"])
+        # Report lists are independent of the accumulated labels on Raw.
+        report["std"].append("E2")
+        self.assertEqual(raw.info["bads"], ["E1", "E8", "M8"])
+
+    def test_actual_metrics_strict_occurrence_and_multiple_bb_outliers(self):
+        for detector, factory, expected in WINDOW_DETECTORS:
+            for n_bad in (1, 2):
+                with self.subTest(detector=detector.__name__, n_bad=n_bad):
+                    raw = factory(n_bad)
+                    original = raw.get_data().copy()
+                    criterion = detector.__name__.removeprefix("bad_ch_by_")
+                    self.assertEqual(detector(raw), {criterion: expected if n_bad == 2 else []})
+                    self.assertEqual(raw.info["bads"], expected if n_bad == 2 else [])
+                    np.testing.assert_array_equal(raw.get_data(), original)
+                    self.assertEqual(len(raw.annotations), 0)
+
+    def test_any_mask_overlap_removes_whole_window_from_denominator(self):
+        for detector, factory, expected in WINDOW_DETECTORS:
+            with self.subTest(detector=detector.__name__):
+                raw = factory(n_bad=1)
+                # A burst starting exactly at the second window masks only that window.
+                raw._data[:4, 500:505] = 600e-6
+                if detector is not step2.bad_ch_by_HFnoise:
+                    mirrors = [raw.ch_names.index(f"M{i}") for i in range(4)]
+                    raw._data[mirrors, 500:505] = -600e-6
+                raw.set_annotations(mne.Annotations([7], [0], ["event"]))
+                original = raw.get_data().copy()
+                annotations = raw.annotations.copy()
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                # One bad window / three retained, not one / four.
+                self.assertEqual(detector(raw), {criterion: expected})
+                self.assertEqual(raw.info["bads"], expected)
+                np.testing.assert_array_equal(raw.get_data(), original)
+                self.assertEqual(raw.annotations, annotations)
+
+    def test_existing_bad_annotation_omits_offending_window(self):
+        for detector, factory, _ in WINDOW_DETECTORS:
+            with self.subTest(detector=detector.__name__):
+                raw = factory(n_bad=1)
+                raw.set_annotations(mne.Annotations([0.5], [0.01], ["BAD_previous"]))
+                annotations = raw.annotations.copy()
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                self.assertEqual(detector(raw), {criterion: []})
+                self.assertEqual(raw.info["bads"], [])
+                self.assertEqual(raw.annotations, annotations)
+
+    def test_custom_window_and_occurrence_cutoff(self):
+        for detector, factory, expected in WINDOW_DETECTORS:
+            for cutoff in (0.25, 0.5):
+                with self.subTest(detector=detector.__name__, cutoff=cutoff):
+                    raw = factory(window_length=1)
+                    criterion = detector.__name__.removeprefix("bad_ch_by_")
+                    self.assertEqual(
+                        detector(raw, window_length=1, occurrence_cutoff=cutoff),
+                        {criterion: expected if cutoff == 0.25 else []},
+                    )
+                    self.assertEqual(raw.info["bads"], expected if cutoff == 0.25 else [])
+
+    def test_existing_bads_and_non_eeg_excluded_and_labels_preserved(self):
+        for detector, factory, expected in WINDOW_DETECTORS:
+            with self.subTest(detector=detector.__name__):
+                raw = factory()
+                raw.info["bads"] = ["E1"]
+                raw._data[1] = np.nan
+                raw.set_channel_types({"E2": "eog"})
+                raw._data[2] = np.inf
+                if detector is not step2.bad_ch_by_HFnoise:
+                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                self.assertEqual(detector(raw, reference_channel="Cz"), {criterion: expected})
+                self.assertEqual(raw.info["bads"], ["E1"] + expected)
+                self.assertEqual(len(raw.annotations), 0)
+
+    def test_bb_band_requirement_is_configurable(self):
+        raw = bb_raw()
+        result = step2.bad_ch_by_BBnoise(raw, min_bad_bands=1)
+        self.assertIn("E0", result["BBnoise"])
+        self.assertEqual(raw.info["bads"], result["BBnoise"])
+
+    def test_fully_masked_recording_raises_without_input_changes(self):
+        for detector in (step2.bad_ch_by_voltage,) + tuple(x[0] for x in WINDOW_DETECTORS):
+            with self.subTest(detector=detector.__name__):
+                average = detector in (step2.bad_ch_by_std, step2.bad_ch_by_BBnoise)
+                raw = make_raw(np.full((5, 1000), 600e-6), average=average)
+                raw.info["bads"] = ["E0"]
+                if average:
+                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                original = raw.get_data().copy()
+                with self.assertRaisesRegex(ValueError, "No .*unmasked"):
+                    detector(raw)
+                self.assertEqual(raw.info["bads"], ["E0"])
+                self.assertEqual(len(raw.annotations), 0)
+                np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_invalid_parameters(self):
+        for detector, factory, _ in WINDOW_DETECTORS:
+            for kwargs in (
+                {"robust_z_cutoff": 0}, {"robust_z_cutoff": np.nan},
+                {"occurrence_cutoff": -0.1}, {"occurrence_cutoff": 1.1},
+                {"window_length": 0}, {"window_length": 20},
+            ):
+                with self.subTest(detector=detector.__name__, kwargs=kwargs):
+                    raw = factory()
+                    with self.assertRaises(ValueError):
+                        detector(raw, **kwargs)
+                    self.assertEqual(raw.info["bads"], [])
+                    self.assertEqual(len(raw.annotations), 0)
+        with self.assertRaisesRegex(ValueError, "above 100"):
+            step2.bad_ch_by_HFnoise(std_raw(sfreq=100))
+        for bands in (0, 6, 3.5):
+            with self.subTest(bands=bands), self.assertRaisesRegex(ValueError, "min_bad_bands"):
+                step2.bad_ch_by_BBnoise(bb_raw(), min_bad_bands=bands)
+
+
+if __name__ == "__main__":
+    unittest.main()

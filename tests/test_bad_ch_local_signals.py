@@ -1,0 +1,253 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import mne
+import numpy as np
+
+
+pipeline_dir = Path(__file__).resolve().parents[1]
+if str(pipeline_dir) not in sys.path:
+    sys.path.insert(0, str(pipeline_dir))
+
+from step2_bad_ch_time_detection import (
+    _resolve_reference_channel,
+    bad_ch_by_flatline,
+    bad_ch_by_nan,
+    bad_ch_by_smallness,
+)
+
+
+def make_raw(variances, window_samples=200, first_samp=0, average=False):
+    """Make prescribed variances with a native reference or balanced channel pairs."""
+    variances = np.asarray(variances, dtype=float)
+    n_windows, n_channels = variances.shape
+    wave = np.tile([-1.0, 1.0], window_samples // 2)
+    data = (2 + np.sqrt(variances.T)[..., None] * wave) * 1e-6
+    data = data.reshape(n_channels, n_windows * window_samples)
+    names = [f"E{i}" for i in range(n_channels)]
+    if average:
+        data = np.vstack([data, -data])
+        names += [f"M{i}" for i in range(n_channels)]
+    else:
+        data = np.vstack([data, np.zeros(data.shape[1])])
+        names += ["Cz"]
+    info = mne.create_info(names, 100, "eeg")
+    return mne.io.RawArray(data, info, first_samp=first_samp, verbose=False)
+
+
+class TestBadChByNan(unittest.TestCase):
+    def test_single_invalid_samples_any_channel_and_annotation(self):
+        raw = make_raw(np.ones((1, 5)))
+        raw.set_channel_types({"E4": "eog"})
+        raw._data[0, 0] = np.nan
+        raw._data[1, -1] = np.inf
+        raw._data[2, 50] = -np.inf
+        raw._data[4, 50] = np.nan
+        raw._data[5, 50] = np.inf
+        raw.set_annotations(mne.Annotations([0.4], [0.2], ["BAD_test"]))
+        raw.info["bads"] = ["E3", "E0"]
+        original = raw.get_data().copy()
+        result = bad_ch_by_nan(raw)
+        self.assertEqual(result, {"nan": ["E0", "E1", "E2", "E4", "Cz"]})
+        self.assertEqual(bad_ch_by_nan(raw), result)
+        self.assertEqual(raw.info["bads"], ["E3", "E0", "E1", "E2", "E4", "Cz"])
+        np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_finite_data_do_not_add_bads(self):
+        raw = make_raw(np.ones((1, 2)))
+        raw.info["bads"] = ["E1"]
+        self.assertEqual(bad_ch_by_nan(raw), {"nan": []})
+        self.assertEqual(raw.info["bads"], ["E1"])
+
+
+class TestReferenceChannel(unittest.TestCase):
+    def test_auto_reference_includes_existing_bads_but_not_auxiliary_channels(self):
+        raw = make_raw(np.ones((1, 3)))
+        raw._data[0] = 0
+        raw.set_channel_types({"E0": "eog"})
+        raw.info["bads"] = ["Cz"]
+        self.assertEqual(_resolve_reference_channel(raw, None), "Cz")
+
+    def test_missing_or_multiple_candidates_raise(self):
+        for candidates in (0, 2):
+            with self.subTest(candidates=candidates):
+                raw = make_raw(np.ones((1, 3)))
+                if candidates == 0:
+                    raw._data[-1] = 1e-6
+                else:
+                    raw._data[0] = 0
+                    raw.info["bads"] = ["E0"]
+                with self.assertRaisesRegex(ValueError, "exactly one"):
+                    _resolve_reference_channel(raw, None, require_reference=True)
+
+    def test_explicit_reference_checks_only_that_channel(self):
+        raw = make_raw(np.ones((1, 3)))
+        raw._data[0] = 0
+        with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
+            self.assertEqual(_resolve_reference_channel(raw, "Cz"), "Cz")
+        get_data.assert_called_once_with(picks=[3], reject_by_annotation=None)
+        raw.set_channel_types({"E0": "eog"})
+        for name in ("missing", "E0"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "EEG channel"):
+                _resolve_reference_channel(raw, name)
+
+
+class TestBadChBySmallness(unittest.TestCase):
+    def test_upper_outlier_removal_and_strict_occurrence_cutoff(self):
+        for low_windows, expected in ((1, []), (2, ["E0", "M0"])):
+            with self.subTest(low_windows=low_windows):
+                variances = np.ones((4, 9))
+                variances[:low_windows, 0] = 0.01
+                variances[:, -1] = 100
+                raw = make_raw(variances, average=True)
+                original = raw.get_data().copy()
+                self.assertEqual(bad_ch_by_smallness(raw), {"smallness": expected})
+                self.assertEqual(raw.info["bads"], expected)
+                np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_custom_parameters(self):
+        variances = np.ones((4, 9))
+        variances[:2, 0] = 0.01
+        variances[:, -1] = 100
+        for kwargs, expected in (
+            ({"window_length": 1.0}, ["E0", "M0"]),
+            ({"window_length": 1.0, "occurrence_cutoff": 0.5}, []),
+            ({"window_length": 1.0, "std_cutoff": 3.0}, []),
+        ):
+            with self.subTest(kwargs=kwargs):
+                raw = make_raw(variances, window_samples=100, average=True)
+                self.assertEqual(bad_ch_by_smallness(raw, **kwargs), {"smallness": expected})
+                self.assertEqual(raw.info["bads"], expected)
+
+    def test_bads_auxiliary_and_reference_are_excluded(self):
+        variances = np.ones((2, 11))
+        variances[:, 0] = 0.01
+        raw = make_raw(variances, average=True)
+        raw.info["bads"] = ["E9"]
+        raw._data[9] = np.nan
+        raw.set_channel_types({"E10": "eog"})
+        raw._data[10] = np.inf
+        raw.set_eeg_reference("average", projection=False, verbose=False)
+        result = bad_ch_by_smallness(raw)
+        self.assertEqual(result, {"smallness": ["E0", "M0"]})
+        raw.set_eeg_reference("average", projection=False, verbose=False)
+        self.assertEqual(bad_ch_by_smallness(raw), {"smallness": []})
+        self.assertEqual(raw.info["bads"], ["E9", "E0", "M0"])
+
+
+class TestBadChByFlatline(unittest.TestCase):
+    def test_constant_nonzero_and_strict_occurrence_cutoff(self):
+        for flat_windows, expected in ((1, []), (2, ["E0"])):
+            with self.subTest(flat_windows=flat_windows):
+                variances = np.ones((4, 5))
+                variances[:flat_windows, 0] = 0
+                raw = make_raw(variances)
+                original = raw.get_data().copy()
+                self.assertEqual(bad_ch_by_flatline(raw), {"flatline": expected})
+                self.assertEqual(raw.info["bads"], expected)
+                np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_half_of_other_channels_suppresses_including_exact_boundary(self):
+        for flat_channels, expected in ((2, ["E0", "E1"]), (3, []), (5, [])):
+            with self.subTest(flat_channels=flat_channels):
+                variances = np.ones((4, 5))
+                variances[:, :flat_channels] = 0
+                raw = make_raw(variances)
+                self.assertEqual(bad_ch_by_flatline(raw), {"flatline": expected})
+                self.assertEqual(raw.info["bads"], expected)
+
+    def test_suppressed_windows_stay_in_occurrence_denominator(self):
+        variances = np.ones((4, 5))
+        variances[:3] = 0
+        variances[3, 0] = 0
+        raw = make_raw(variances)
+        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": []})
+        self.assertEqual(raw.info["bads"], [])
+
+    def test_bads_and_auxiliary_do_not_change_other_channel_fraction(self):
+        # With five eligible channels, two flat peers are exactly 50% of others.
+        raw = make_raw([[0, 0, 0, 1, 1, 1, 1]])
+        raw.info["bads"] = ["E5"]
+        raw.set_channel_types({"E6": "eog"})
+        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": []})
+        self.assertEqual(raw.info["bads"], ["E5"])
+
+    def test_custom_parameters_and_tiny_variation_is_not_flat(self):
+        variances = np.ones((4, 5))
+        variances[:2, 0] = 0
+        for cutoff, expected in ((0.25, ["E0"]), (0.5, [])):
+            with self.subTest(cutoff=cutoff):
+                raw = make_raw(variances, window_samples=100)
+                raw._data[1] = 2e-6
+                raw._data[1, ::100] += 1e-15
+                self.assertEqual(
+                    bad_ch_by_flatline(raw, window_length=1.0, occurrence_cutoff=cutoff),
+                    {"flatline": expected},
+                )
+                self.assertEqual(raw.info["bads"], expected)
+
+
+class TestWindowRules(unittest.TestCase):
+    def test_partial_tail_ignored_annotations_included_and_raw_start_respected(self):
+        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+            with self.subTest(detector=detector.__name__):
+                variances = np.ones((5, 9))
+                variances[0, 0] = 0
+                variances[4, 0] = 0
+                average = detector is bad_ch_by_smallness
+                raw = make_raw(variances, first_samp=500, average=average)
+                raw.crop(tmax=8.99)  # Four complete windows and one 1-second tail.
+                raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                # Only one of four full windows violates the rule.
+                self.assertEqual(detector(raw), {criterion: []})
+                self.assertEqual(raw.info["bads"], [])
+                expected = ["E0", "M0"] if average else ["E0"]
+                self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: expected})
+                self.assertEqual(raw.info["bads"], expected)
+
+    def test_invalid_values_need_nan_detection_first(self):
+        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+            with self.subTest(detector=detector.__name__):
+                raw = make_raw(np.ones((1, 9)), average=detector is bad_ch_by_smallness)
+                raw._data[0, 50] = np.nan
+                with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
+                    detector(raw)
+                self.assertEqual(raw.info["bads"], [])
+                self.assertEqual(bad_ch_by_nan(raw), {"nan": ["E0"]})
+                if detector is bad_ch_by_smallness:
+                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                criterion = detector.__name__.removeprefix("bad_ch_by_")
+                self.assertEqual(detector(raw), {criterion: []})
+                self.assertEqual(raw.info["bads"], ["E0"])
+
+    def test_invalid_parameters_and_insufficient_data(self):
+        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+            for kwargs in (
+                {"window_length": 0}, {"window_length": np.inf},
+                {"window_length": 0.01}, {"window_length": 3},
+                {"occurrence_cutoff": -0.1}, {"occurrence_cutoff": 1.1},
+                {"occurrence_cutoff": np.nan},
+            ):
+                with self.subTest(detector=detector.__name__, kwargs=kwargs):
+                    raw = make_raw(np.ones((1, 2)))
+                    with self.assertRaises(ValueError):
+                        detector(raw, **kwargs)
+                    self.assertEqual(raw.info["bads"], [])
+            with self.subTest(detector=detector.__name__), self.assertRaisesRegex(
+                ValueError, "At least two"
+            ):
+                raw = make_raw([[1]])
+                if detector is bad_ch_by_smallness:
+                    raw.info["bads"] = ["Cz"]
+                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                detector(raw)
+        for cutoff in (0, -1, np.nan, np.inf):
+            with self.subTest(cutoff=cutoff), self.assertRaisesRegex(ValueError, "std_cutoff"):
+                bad_ch_by_smallness(make_raw([[1, 1]]), std_cutoff=cutoff)
+
+
+if __name__ == "__main__":
+    unittest.main()
