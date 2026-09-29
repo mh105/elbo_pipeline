@@ -521,11 +521,18 @@ def bad_ch_by_HFnoise(
     """Return {"HFnoise": names} for persistently high PREP HF-noise ratios.
 
     Use MAD(signal - lowpass) / MAD(lowpass) per channel, then subtract the
-    cross-channel median and divide by 1.4826 * cross-channel MAD. Flag only
-    z > robust_z_cutoff. Each retained window is filtered separately to keep
-    masked bursts out of neighboring windows. Accept an all-zero native
-    reference, otherwise verify average reference. Temporary masking and the
-    occurrence denominator follow bad_ch_by_std. Require sfreq > 100 Hz
+    cross-channel median and divide by 1.4826 * cross-channel MAD. A window
+    violates when z > robust_z_cutoff. A channel must violate in strictly more
+    than occurrence_cutoff of retained windows. Then compare the median HF
+    and LF MADs in its violating (F) versus non-violating (N) windows: require
+    log(H_F / H_N) > max(0, -log(L_F / L_N)). Numerical ties do not confirm
+    the flag. Floor MADs at machine epsilon before taking log ratios.
+    Keep candidates that violate in every retained window, since no
+    non-violating baseline is available.
+    Each retained window is filtered separately to keep masked bursts out of
+    neighboring windows. Accept an all-zero native reference, otherwise verify
+    average reference. Temporary masking and the occurrence denominator follow
+    bad_ch_by_std. Require sfreq > 100 Hz
     to evaluate noise above 50 Hz. Add detections to raw.info["bads"], preserving
     existing labels without duplicates. Input data/annotations are unchanged.
 
@@ -536,6 +543,8 @@ def bad_ch_by_HFnoise(
     channel, flagged_data_uv contains its original window waveforms in
     chronological order, matching the windows where violates == 1. The
     diagnostics describe this pass's channel set, before its new bad labels.
+    Window violations remain the initial z flags, including for channels that
+    do not pass the channel-level HF/LF confirmation.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -547,6 +556,7 @@ def bad_ch_by_HFnoise(
     )
     counts = np.zeros(len(picks), dtype=int)
     n_retained = 0
+    hf_mads, lf_mads, window_violations = [], [], []
     if return_details:
         names = [raw.ch_names[i] for i in picks]
         details = {
@@ -561,14 +571,14 @@ def bad_ch_by_HFnoise(
     for start, data in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
-        if return_details:
-            ratios, hf_mad, lf_mad = _prep_hf_ratio(data, raw.info["sfreq"], return_mads=True)
-        else:
-            ratios = _prep_hf_ratio(data, raw.info["sfreq"])
+        ratios, hf_mad, lf_mad = _prep_hf_ratio(data, raw.info["sfreq"], return_mads=True)
         z = _robust_channel_z(ratios)
         violates = z > robust_z_cutoff
         counts += violates
         n_retained += 1
+        hf_mads.append(hf_mad)
+        lf_mads.append(lf_mad)
+        window_violations.append(violates)
         if return_details:
             window = start // window_samples
             details["retained"][window] = True
@@ -580,7 +590,30 @@ def bad_ch_by_HFnoise(
                 details[metric][:, window] = values
             for i in np.flatnonzero(violates):
                 details["flagged_data_uv"][names[i]].append(data[i] * 1e6)
-    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    candidates = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    hf_mads = np.asarray(hf_mads).T
+    lf_mads = np.asarray(lf_mads).T
+    window_violations = np.asarray(window_violations).T
+    bad_names = []
+    eps = np.finfo(float).eps
+    for i, pick in enumerate(picks):
+        name = raw.ch_names[pick]
+        if name not in candidates:
+            continue
+        flagged = window_violations[i]
+        if flagged.all():
+            bad_names.append(name)
+            continue
+        hf_flagged = np.median(hf_mads[i, flagged])
+        hf_baseline = np.median(hf_mads[i, ~flagged])
+        lf_flagged = np.median(lf_mads[i, flagged])
+        lf_baseline = np.median(lf_mads[i, ~flagged])
+        hf_log_change = np.log(max(hf_flagged, eps) / max(hf_baseline, eps))
+        lf_log_change = np.log(max(lf_flagged, eps) / max(lf_baseline, eps))
+        required_increase = max(0.0, -lf_log_change)
+        if (hf_log_change > required_increase
+                and not np.isclose(hf_log_change, required_increase, rtol=1e-12, atol=0.0)):
+            bad_names.append(name)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"HFnoise": bad_names}
     if return_details:

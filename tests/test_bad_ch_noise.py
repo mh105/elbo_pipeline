@@ -162,6 +162,78 @@ class TestVoltageDetection(unittest.TestCase):
 
 
 class TestRobustMetrics(unittest.TestCase):
+    def test_hf_confirmation_compares_log_hf_increase_with_log_lf_decrease(self):
+        for hf_factor, lf_factor, expected in (
+            (0.9, 0.5, []),
+            (1.0, 0.5, []),
+            (1.1, 1.08, ["E8"]),
+            (1.1, 0.92, ["E8"]),
+            (1.1, 0.89, []),
+            (1.1, 0.9, []),
+            (1.125, 0.875, []),
+            (1.125001, 0.875, []),
+            (1.1, 1.2, ["E8"]),
+            (1.1, 1 / 1.1, []),
+            (1.100001, 1 / 1.1, ["E8"]),
+            (2.0, 0.5, []),  # Equal multiplicative changes are a tie.
+            (2.000001, 0.5, ["E8"]),
+            (1.1, 0.0, []),
+        ):
+            with self.subTest(hf_factor=hf_factor, lf_factor=lf_factor):
+                raw = hf_raw()
+                metrics = []
+                for window in range(4):
+                    hf = np.r_[np.linspace(1, 3, 8), 2.0] * 1e-6
+                    lf = np.full(9, 10e-6)
+                    if window < 2:
+                        # LF elsewhere shifts the cross-channel ratio baseline.
+                        lf[:8] *= 10
+                        hf[-1] *= hf_factor
+                        lf[-1] *= lf_factor
+                    metrics.append((hf / np.maximum(lf, np.finfo(float).eps), hf, lf))
+                with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+                    report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+                np.testing.assert_array_equal(details["violates"][-1], [1, 1, 0, 0])
+                self.assertEqual(report, {"HFnoise": expected})
+                self.assertEqual(raw.info["bads"], expected)
+                with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+                    self.assertEqual(step2.bad_ch_by_HFnoise(hf_raw()), report)
+
+    def test_hf_confirmation_keeps_candidates_without_passing_windows(self):
+        for masked_baseline in (False, True):
+            with self.subTest(masked_baseline=masked_baseline):
+                raw = hf_raw(n_bad=2 if masked_baseline else 4)
+                if masked_baseline:
+                    raw.set_annotations(mne.Annotations([4], [4], ["BAD_baseline"]))
+                report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+                self.assertEqual(report, {"HFnoise": ["E8"]})
+                flags = details["violates"][-1, details["retained"]]
+                np.testing.assert_array_equal(flags, np.ones(2 if masked_baseline else 4))
+
+    def test_hf_confirmation_rejects_lf_driven_ratio_in_filtered_signal(self):
+        raw = hf_raw(n_bad=0)
+        t = np.arange(1000) / raw.info["sfreq"]
+        raw._data[8, :1000] -= 9.8e-6 * np.sin(2 * np.pi * 10 * t)
+        report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+        np.testing.assert_array_equal(details["violates"][8], [1, 1, 0, 0])
+        self.assertEqual(report, {"HFnoise": []})
+        self.assertEqual(raw.info["bads"], [])
+
+    def test_hf_confirmation_uses_medians_not_means(self):
+        raw = hf_raw(window_length=3)  # Six 2-second windows.
+        metrics = []
+        for window in range(6):
+            hf = np.r_[np.linspace(1, 3, 8), 2.0] * 1e-6
+            lf = np.full(9, 10e-6)
+            if window < 3:
+                lf[:8] *= 10
+                hf[-1] = (20 if window == 0 else 1.8) * 1e-6
+            metrics.append((hf / lf, hf, lf))
+        with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+            report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+        np.testing.assert_array_equal(details["violates"][-1], [1, 1, 1, 0, 0, 0])
+        self.assertEqual(report, {"HFnoise": []})
+
     def test_hf_details_preserve_masked_times_and_extract_flagged_waveforms(self):
         raw = hf_raw(n_bad=2)
         raw.info["bads"] = ["E1"]
