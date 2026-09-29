@@ -222,7 +222,7 @@ def plot_sensor_locations(raw, sphere, selected=()):
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-03"
-    project_dir = Path(__file__).resolve().parents[2]
+    project_dir = Path(__file__).resolve().parents[3]
     set_file = (project_dir / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = mne.io.read_raw_eeglab(set_file, preload=True)

@@ -484,7 +484,8 @@ def bad_ch_by_voltage(
     Show all channels over the full time range, including existing bads,
     the reference, and masked samples. Plot in microvolts with dotted cutoff
     lines and a different color per channel. Highlight and label only this
-    call's detections in the legend.
+    call's detections in the legend. Shade temporary voltage masks in light
+    gray and scale the y-axis from finite samples outside all BAD annotations.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -507,12 +508,26 @@ def bad_ch_by_voltage(
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
     times = raw.times
     colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(raw.ch_names)))
+    ymin, ymax = np.inf, -np.inf
     for i, name in enumerate(raw.ch_names):
         data_uv = raw.get_data(picks=[i], reject_by_annotation=None)[0] * 1e6
+        retained_uv = masked.get_data(
+            picks=[i], reject_by_annotation="omit", verbose=False
+        )[0] * 1e6
+        retained_uv = retained_uv[np.isfinite(retained_uv)]
+        if retained_uv.size:
+            ymin = min(ymin, retained_uv.min())
+            ymax = max(ymax, retained_uv.max())
         if name in bad_names:
             ax.plot(times, data_uv, color=colors[i], linewidth=0.8, label=name, zorder=2)
         else:
             ax.plot(times, data_uv, color=colors[i], linewidth=0.5, alpha=0.7, zorder=1)
+    for annotation in masked.annotations:
+        if annotation["description"] == "BAD_voltage_mask":
+            start = annotation["onset"] - masked.first_time
+            ax.axvspan(start, start + annotation["duration"], color="lightgray", zorder=0)
+    padding = 0.05 * (ymax - ymin) if ymax > ymin else 1.0
+    ax.set_ylim(ymin - padding, ymax + padding)
     for cutoff in (-voltage_threshold_uv, voltage_threshold_uv):
         ax.axhline(cutoff, color="black", linestyle=":", linewidth=1, zorder=3)
     ax.set(xlabel="Time (s)", ylabel="Voltage (µV)", title="Bad channels by voltage")
@@ -862,14 +877,12 @@ def plot_bad_ch_report(raw, bad_ch_report):
 
 
 # %% Part 2: Definitive bad-time detection (to be developed)
-# TODO: Investigate and address the large, shared slow-frequency fluctuations.
-# Deferred while inspecting E26's high-frequency noise.
 
 
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-02"
-    project_dir = Path(__file__).resolve().parents[2]
+    project_dir = Path(__file__).resolve().parents[3]
     set_file = (project_dir / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = mne.io.read_raw_eeglab(set_file, preload=True)
