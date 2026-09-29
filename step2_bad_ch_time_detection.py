@@ -18,7 +18,7 @@ import mne
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.signal import lfilter
-from step1_line_noise_removal import Interpolate_fft, remove_line_noise_inplace
+from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace
 
 
 # %% Part 1: Bad-channel detection
@@ -646,8 +646,12 @@ def bad_ch_by_HFnoise(
     Use MAD(signal - lowpass) / MAD(lowpass) per channel, then subtract the
     cross-channel median and divide by 1.4826 * cross-channel MAD. A window
     violates when z > robust_z_cutoff. A channel must violate in strictly more
-    than occurrence_cutoff of retained windows. Then compare the median HF
-    and LF MADs in its violating (F) versus non-violating (N) windows: require
+    than occurrence_cutoff of retained windows. Take each eligible channel's
+    median HF MAD over this candidate's violating windows. Keep the candidate
+    if its median is at or above the cross-channel median of those values,
+    including the candidate. Only candidates below that median need HF/LF
+    confirmation: compare their median HF and LF MADs in violating (F) versus
+    non-violating (N) windows and require
     log(H_F / H_N) > max(0, -log(L_F / L_N)). Numerical ties do not confirm
     the flag. Floor MADs at machine epsilon before taking log ratios.
     Keep candidates that violate in every retained window, since no
@@ -728,6 +732,10 @@ def bad_ch_by_HFnoise(
             bad_names.append(name)
             continue
         hf_flagged = np.median(hf_mads[i, flagged])
+        hf_channel_median = np.median(np.median(hf_mads[:, flagged], axis=1))
+        if hf_flagged >= hf_channel_median:
+            bad_names.append(name)
+            continue
         hf_baseline = np.median(hf_mads[i, ~flagged])
         lf_flagged = np.median(lf_mads[i, flagged])
         lf_baseline = np.median(lf_mads[i, ~flagged])
@@ -881,7 +889,7 @@ def plot_bad_ch_report(raw, bad_ch_report):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-02"
+    subject_id = "sub-03"
     project_dir = Path(__file__).resolve().parents[3]
     set_file = (project_dir / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
@@ -899,8 +907,11 @@ if __name__ == "__main__":
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    clean = ZapLine_notch(clean, line_freq=90.0)
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
     # Remove the estimated noise from the original data without high-pass filtering it
     remove_line_noise_inplace(raw, raw_prep, clean)
 
