@@ -10,6 +10,15 @@ Signal data and input annotations are unchanged.
 
 The 2-second window detectors accept return_details=True to return
 (report, details), including window metrics and original flagged waveforms.
+bad_ch_by_pop counts individual electrode pops instead; its details include
+each channel's pop times and step sizes.
+
+pca_cleaning modifies the data in place: after the initial bad-channel pass, it
+removes the PC1 of each 1-second window where PC1 explains at least 90% of the
+variance, on the input or on 2 Hz high-passed data, and exceeds 100 µV on some
+channel, suppressing large artifacts shared across channels. With
+return_removed=True, remove_pca_signal can subtract the same removed signals from
+a copy high-passed at a lower cutoff (filter first, then subtract).
 """
 
 from pathlib import Path
@@ -18,7 +27,7 @@ import mne
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.signal import lfilter
-from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace
+from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
 
 
 # %% Part 1: Bad-channel detection
@@ -369,7 +378,7 @@ def mask_segment_by_voltage(
     their exceedances are not simultaneous. Merge adjacent masked windows;
     include the final partial window with its actual duration.
 
-    These annotations are temporary when called by the four noisy-channel
+    These annotations are temporary when called by the five noisy-channel
     detectors below, which pass a copy of their input Raw.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
@@ -841,6 +850,137 @@ def bad_ch_by_BBnoise(
     return report
 
 
+def _level_change(data, jumps, gap, width):
+    """Mean over width samples after each jump minus before, skipping gap samples on each side.
+
+    A jump at t lies between samples t and t + 1. data has time on the last axis;
+    the result has shape data.shape[:-1] + (len(jumps),).
+    """
+    after = jumps[:, None] + 1 + gap + np.arange(width)
+    before = jumps[:, None] - gap - width + np.arange(width)
+    return data[..., after].mean(axis=-1) - data[..., before].mean(axis=-1)
+
+
+def bad_ch_by_pop(
+    raw,
+    jump_sd_cutoff=20.0,
+    step_floor_uv=30.0,
+    neighbor_ratio=3.0,
+    sharpness_cutoff=0.7,
+    rate_cutoff=1.0,
+    reference_channel=None,
+    *,
+    return_details=False,
+):
+    """Return {"pop": names} for EEG channels with frequent electrode pops.
+
+    A pop is a sharp, sustained voltage step on a single electrode. A candidate
+    is a single-sample jump |x(t + 1) - x(t)| above both 20 uV and
+    jump_sd_cutoff times the channel's robust SD of sample differences
+    (1.4826 * MAD over retained samples). Its level change is the mean over
+    10-60 ms after the jump minus the mean over 10-60 ms before it. Confirm the
+    candidate when the level change (1) exceeds step_floor_uv in magnitude, so
+    brief spikes that return to baseline do not count; (2) exceeds
+    neighbor_ratio times the median magnitude of the same level change on the
+    6 nearest eligible sensors (3D positions in raw.info), so shared artifacts
+    do not count; and (3) is mostly complete within about 20 ms: the level
+    change over 10-20 ms windows is at least sharpness_cutoff times the
+    10-60 ms one, so slow drifts do not count. Confirmed jumps no more than
+    100 ms apart form one pop.
+
+    Flag channels with strictly more than rate_cutoff pops per minute of
+    retained data. Accept an all-zero native reference, otherwise verify
+    average reference. Exclude existing bads, the reference, and non-EEG
+    channels. Apply the temporary voltage mask on a copy, as in bad_ch_by_std;
+    masked and BAD-annotated samples are not retained, and candidates whose
+    evaluation spans touch them are skipped. Require sfreq >= 100 Hz. Add
+    detections to raw.info["bads"], preserving existing labels without
+    duplicates. Input data and annotations are unchanged.
+
+    With return_details=True, return (report, details): ch_names, neighbors
+    (name -> 6 nearest eligible names), retained_min, per-channel arrays
+    jump_sd_uv, n_pops, and pops_per_min, and dicts pop_times_s and
+    pop_steps_uv keyed by channel name. Each pop is described by its first
+    confirmed jump: crop-relative time of the sample before it, and its signed
+    10-60 ms level change in microvolts.
+    """
+    for name, value in (("jump_sd_cutoff", jump_sd_cutoff), ("step_floor_uv", step_floor_uv),
+                        ("neighbor_ratio", neighbor_ratio)):
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and greater than 0.")
+    if not np.isfinite(sharpness_cutoff) or not 0 <= sharpness_cutoff <= 1:
+        raise ValueError("sharpness_cutoff must be between 0 and 1.")
+    if not np.isfinite(rate_cutoff) or rate_cutoff < 0:
+        raise ValueError("rate_cutoff must be finite and nonnegative (pops per minute).")
+    sfreq = raw.info["sfreq"]
+    if sfreq < 100:
+        raise ValueError("bad_ch_by_pop requires a sampling rate of at least 100 Hz.")
+    gap, width, short, merge = (int(round(s * sfreq)) for s in (0.01, 0.05, 0.01, 0.1))
+    masked, reference_channel = _temporary_voltage_mask(raw, reference_channel)
+    exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
+    picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
+    if len(picks) < 7:
+        raise ValueError("At least seven non-bad EEG channels after reference exclusion "
+                         "are required.")
+    positions = np.array([raw.info["chs"][i]["loc"][:3] for i in picks])
+    if not np.isfinite(positions).all() or not np.abs(positions).sum(axis=1).all():
+        raise ValueError("Eligible EEG channels need sensor positions; set a montage first.")
+    distances = np.linalg.norm(positions[:, None] - positions[None], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    neighbors = np.argsort(distances, axis=1)[:, :6]
+    # The voltage mask already verified finite data, so NaN marks annotated samples.
+    retained = ~np.isnan(
+        masked.get_data(picks=picks[:1], reject_by_annotation="NaN", verbose=False)[0]
+    )
+    retained_min = retained.sum() / sfreq / 60
+    if retained_min == 0:
+        raise ValueError("No unmasked samples remain for channel detection.")
+
+    names = [raw.ch_names[i] for i in picks]
+    jump_sd = np.empty(len(picks))
+    n_pops = np.zeros(len(picks), dtype=int)
+    pop_times, pop_steps = {}, {}
+    for row, pick in enumerate(picks):
+        # Row 0 is the channel, rows 1-6 its neighbors.
+        data = raw.get_data(picks=[pick, *picks[neighbors[row]]], reject_by_annotation=None)
+        data[:, ~retained] = np.nan
+        diffs = np.diff(data[0])
+        jump_sd[row] = max(1.4826 * _mad(diffs[np.isfinite(diffs)]), np.finfo(float).eps)
+        jumps = np.flatnonzero(
+            (np.abs(diffs) > jump_sd_cutoff * jump_sd[row]) & (np.abs(diffs) > 20e-6)
+        )
+        jumps = jumps[(jumps >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)]
+        step = _level_change(data, jumps, gap, width)
+        sharp_step = _level_change(data[0], jumps, gap, short)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            confirmed = (
+                (np.abs(step[0]) > step_floor_uv / 1e6)
+                & (np.abs(step[0]) > neighbor_ratio * np.median(np.abs(step[1:]), axis=0))
+                & (sharp_step / step[0] >= sharpness_cutoff)
+            )
+        first = np.diff(jumps[confirmed], prepend=-np.inf) > merge
+        n_pops[row] = first.sum()
+        pop_times[names[row]] = jumps[confirmed][first] / sfreq
+        pop_steps[names[row]] = step[0, confirmed][first] * 1e6
+    pops_per_min = n_pops / retained_min
+    bad_names = [name for name, rate in zip(names, pops_per_min) if rate > rate_cutoff]
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"pop": bad_names}
+    if return_details:
+        return report, {
+            "ch_names": names,
+            "neighbors": {name: [names[j] for j in neighbors[row]]
+                          for row, name in enumerate(names)},
+            "retained_min": retained_min,
+            "jump_sd_uv": jump_sd * 1e6,
+            "n_pops": n_pops,
+            "pops_per_min": pops_per_min,
+            "pop_times_s": pop_times,
+            "pop_steps_uv": pop_steps,
+        }
+    return report
+
+
 def plot_bad_ch_report(raw, bad_ch_report):
     """Show bad-channel categories on an EEG sensor topoplot; return the figure.
 
@@ -884,12 +1024,233 @@ def plot_bad_ch_report(raw, bad_ch_report):
     return fig
 
 
+# %% Shared-artifact removal by local PCA
+
+def pca_cleaning(
+    raw, window_length=1.0, variance_cutoff=0.9, fade_length=0.25, highpass_freq=2.0,
+    amplitude_floor_uv=100.0, reference_channel=None, *, return_removed=False,
+):
+    """Remove dominant local PC1s from preloaded raw in place; return details.
+
+    Split the recording into non-overlapping windows from the first sample of
+    this Raw; window_length is in seconds, rounded to samples, and the trailing
+    partial window joins the last complete window. Each window gets two PCA
+    passes across every non-bad EEG channel, each channel mean-centered: one on
+    the input data ("input") and one on a copy high-passed at highpass_freq
+    ("highpass"), where brief shared spikes stand out from slow activity. A pass
+    flags the window when its PC1 explains at least variance_cutoff of the
+    variance. The pass qualifies only if the back-projection u u^T x(t) in its
+    own data exceeds amplitude_floor_uv on at least one channel, so small shared
+    signals, such as rhythms under the reference, are kept.
+
+    Removal always acts on the original input data and removes one PC1 per
+    cleaned window: the input pass's weights u when that pass qualifies,
+    otherwise the high-pass weights, as u u^T x(t). Window means are not
+    subtracted, so the artifact's average level is removed with its waveform.
+    Consecutive cleaned windows form runs. A run's removal fades in (raised
+    cosine) over the fade_length seconds before its first window and out over
+    the fade_length seconds after its last. Between consecutive cleaned windows,
+    the removal hands over from one window's u u^T to the next over
+    +/- fade_length around their shared edge; the two weights sum to one, so the
+    total removal weight never exceeds one. fade_length may be 0 (hard edges)
+    up to half of window_length.
+
+    Exclude existing bads, non-EEG channels, and any all-zero reference, which
+    stay unchanged; otherwise verify average reference as in bad_ch_by_smallness.
+    Run before average referencing, so noise in the recording reference is
+    shared by every channel. Bad labels and annotations are unchanged.
+
+    Return ch_names, crop-relative start_s/stop_s, first_samp, n_times, sfreq,
+    cleaned (bool), removed_pass ("input", "highpass", or "" per window), and for
+    each pass ("input", "highpass") a dict of per-window pc1_variance_fraction,
+    pc1_peak_uv, flagged and qualified (bool), plus pc1_loadings with shape
+    (windows, channels): unit norm, arbitrary sign, computed before cleaning.
+    With return_removed=True, also return removed_spans: one (start, stop,
+    signal) per run including its fades, in samples from the Raw start, with the
+    subtracted signal in volts, shape (len(ch_names), stop - start). Pass the
+    details to remove_pca_signal to subtract the same signal from other data.
+    """
+    if not np.isfinite(variance_cutoff) or not 0 < variance_cutoff < 1:
+        raise ValueError("variance_cutoff must be between 0 and 1.")
+    if not np.isfinite(fade_length) or not 0 <= fade_length <= window_length / 2:
+        raise ValueError("fade_length must be between 0 and half of window_length (seconds).")
+    if not np.isfinite(highpass_freq) or not 0 < highpass_freq < raw.info["sfreq"] / 2:
+        raise ValueError("highpass_freq must be between 0 Hz and the Nyquist frequency.")
+    if not np.isfinite(amplitude_floor_uv) or amplitude_floor_uv < 0:
+        raise ValueError("amplitude_floor_uv must be finite and nonnegative (microvolts).")
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    picks, window_samples, n_windows = _prepare_channel_windows(
+        raw, reference_channel, window_length, 0.25
+    )
+    fade = int(round(fade_length * raw.info["sfreq"]))
+    starts = np.arange(n_windows) * window_samples
+    stops = np.append(starts[1:], raw.n_times)
+    highpassed = raw._data[picks]
+    if not np.isfinite(highpassed).all():
+        raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
+    highpassed = mne.filter.filter_data(
+        highpassed, raw.info["sfreq"], highpass_freq, None, copy=False, verbose=False
+    )
+    details = {
+        "ch_names": [raw.ch_names[i] for i in picks],
+        "start_s": starts / raw.info["sfreq"], "stop_s": stops / raw.info["sfreq"],
+        "first_samp": raw.first_samp, "n_times": raw.n_times, "sfreq": raw.info["sfreq"],
+    }
+    if return_removed:
+        details["removed_spans"] = []
+    for name in ("input", "highpass"):
+        details[name] = {
+            "pc1_variance_fraction": np.empty(n_windows),
+            "pc1_peak_uv": np.empty(n_windows),
+            "pc1_loadings": np.empty((n_windows, len(picks))),
+        }
+    for window, (start, stop) in enumerate(zip(starts, stops)):
+        for name, data in (("input", raw._data[picks, start:stop]),
+                           ("highpass", highpassed[:, start:stop])):
+            loadings, singular, _ = np.linalg.svd(
+                data - data.mean(axis=1, keepdims=True), full_matrices=False
+            )
+            pc1 = loadings[:, 0]
+            details[name]["pc1_variance_fraction"][window] = singular[0] ** 2 / np.sum(singular ** 2)
+            details[name]["pc1_peak_uv"][window] = np.abs(np.outer(pc1, pc1 @ data)).max() * 1e6
+            details[name]["pc1_loadings"][window] = pc1
+    del highpassed
+    for name in ("input", "highpass"):
+        passed = details[name]
+        passed["flagged"] = passed["pc1_variance_fraction"] >= variance_cutoff
+        passed["qualified"] = passed["flagged"] & (passed["pc1_peak_uv"] > amplitude_floor_uv)
+    cleaned = details["input"]["qualified"] | details["highpass"]["qualified"]
+    details["cleaned"] = cleaned
+    details["removed_pass"] = np.where(
+        details["input"]["qualified"], "input", np.where(cleaned, "highpass", "")
+    )
+    print(f"PC1 removed in {cleaned.sum()} of {cleaned.size} {window_length:g}-s windows")
+
+    def ramp(samples, onset, length):
+        """Raised cosine rising from 0 to 1 over length samples from onset."""
+        if length == 0:
+            return (samples >= onset).astype(float)
+        return 0.5 - 0.5 * np.cos(np.pi * np.clip((samples - onset + 0.5) / length, 0, 1))
+
+    # Runs are separated by at least one uncleaned window, so their fades never
+    # overlap and each run can be cleaned from its own copy of the original data.
+    edges = np.flatnonzero(np.diff(np.r_[False, cleaned, False])).reshape(-1, 2)
+    for first, last in edges - [0, 1]:
+        span_start = max(starts[first] - fade, 0)
+        span_stop = min(stops[last] + fade, raw.n_times)
+        samples = np.arange(span_start, span_stop)
+        data = raw._data[picks, span_start:span_stop]
+        removal = np.zeros_like(data)
+        for window in range(first, last + 1):
+            rise = (starts[window] - fade, fade if window == first else 2 * fade)
+            fall = (stops[window] if window == last else stops[window] - fade,
+                    fade if window == last else 2 * fade)
+            weight = ramp(samples, *rise) * (1 - ramp(samples, *fall))
+            pc1 = details[details["removed_pass"][window]]["pc1_loadings"][window]
+            removal += weight * np.outer(pc1, pc1 @ data)
+        raw._data[picks, span_start:span_stop] = data - removal
+        if return_removed:
+            details["removed_spans"].append((span_start, span_stop, removal))
+    return details
+
+
+def remove_pca_signal(raw, pca_details):
+    """Subtract pca_cleaning's removed signals from another preloaded Raw in place.
+
+    Use this for a copy of the same recording high-passed at or below the cutoff
+    of the data pca_cleaning saw (e.g., 0.1 Hz when it saw 0.3 Hz): filter first,
+    then subtract. Subtracting after the same cutoff reproduces the cleaned data
+    exactly; after a lower cutoff, the result is the cleaned data plus the
+    recording's own band between the two cutoffs. For higher cutoffs (e.g., 1 Hz
+    for ICA), filter the cleaned data instead of calling this.
+
+    pca_details must come from pca_cleaning(..., return_removed=True) on data
+    covering the same samples (first_samp, n_times, sfreq) and containing the
+    same channel names. Only those channels within the cleaned runs change. The
+    stored signals are subtracted as computed, not re-projected from this Raw.
+    Return None.
+    """
+    if "removed_spans" not in pca_details:
+        raise ValueError("Run pca_cleaning with return_removed=True.")
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    if (raw.first_samp, raw.n_times, raw.info["sfreq"]) != (
+        pca_details["first_samp"], pca_details["n_times"], pca_details["sfreq"]
+    ):
+        raise ValueError("raw must cover the same samples as the data passed to pca_cleaning.")
+    picks = [raw.ch_names.index(name) for name in pca_details["ch_names"]]
+    for start, stop, removal in pca_details["removed_spans"]:
+        raw._data[picks, start:stop] -= removal
+
+
+def plot_pca_cleaning(raw, cleaned_raw, pca_details, channels=("E7", "E23", "E26", "E106")):
+    """Show the whole recording before and after pca_cleaning; return both figures.
+
+    The first figure overlays the channels that entered the PCA (non-bad EEG,
+    reference excluded; one color each) before and after cleaning on a shared
+    voltage axis. Each trace is drawn as its min/max envelope in 20-ms bins, so
+    brief peaks survive at full-recording scale without millions of vertices.
+    The second figure shows the named channels after cleaning at full resolution,
+    one panel each; bad channels are labeled and were not cleaned. Blue shading
+    marks runs of cleaned windows; each run's removal also fades in and out just
+    outside it. Times are relative to the cropped Raw.
+    """
+    sfreq = raw.info["sfreq"]
+    names = pca_details["ch_names"]
+    cleaned = pca_details["cleaned"]
+    edges = np.flatnonzero(np.diff(np.r_[False, cleaned, False])).reshape(-1, 2)
+    runs = [(pca_details["start_s"][first], pca_details["stop_s"][stop - 1])
+            for first, stop in edges]
+    window_length = pca_details["stop_s"][0] - pca_details["start_s"][0]
+
+    def shade(ax):
+        for start, stop in runs:
+            ax.axvspan(start, stop, color="lightsteelblue", alpha=0.5, zorder=0)
+
+    bin_samples = int(round(0.02 * sfreq))
+    n_bins = raw.n_times // bin_samples
+    envelope_times = np.repeat(np.arange(n_bins) * bin_samples / sfreq, 2)
+    overview, axes = plt.subplots(
+        2, 1, figsize=(16, 9), sharex=True, sharey=True, layout="constrained"
+    )
+    colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(names)))
+    for ax, inst, stage in zip(axes, (raw, cleaned_raw), ("Before", "After")):
+        for color, name in zip(colors, names):
+            data = inst.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
+            binned = data[:n_bins * bin_samples].reshape(n_bins, bin_samples)
+            envelope = np.column_stack([binned.min(axis=1), binned.max(axis=1)]).ravel()
+            ax.plot(envelope_times, envelope, color=color, linewidth=0.4, alpha=0.7)
+        shade(ax)
+        ax.set_ylabel(f"{stage} PCA cleaning\nVoltage (µV)")
+    axes[-1].set(xlabel="Time from cropped recording start (s)", xlim=(0, raw.times[-1]))
+    overview.suptitle(
+        f"{len(names)} channels in the PCA (bad channels and the reference not shown); "
+        f"blue = {cleaned.sum()} cleaned {window_length:g}-s windows in {len(runs)} runs"
+    )
+
+    traces, axes = plt.subplots(
+        len(channels), 1, figsize=(16, 2.4 * len(channels)), sharex=True,
+        squeeze=False, layout="constrained",
+    )
+    for row, (ax, name) in enumerate(zip(axes[:, 0], channels)):
+        data = cleaned_raw.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
+        ax.plot(cleaned_raw.times, data, color=f"C{row % 10}", linewidth=0.5)
+        shade(ax)
+        status = " (bad, not cleaned)" if name in cleaned_raw.info["bads"] else ""
+        ax.set_ylabel(f"{name}{status}\nVoltage (µV)")
+    axes[-1, 0].set(xlabel="Time from cropped recording start (s)", xlim=(0, raw.times[-1]))
+    traces.suptitle("After PCA cleaning, full resolution; blue = cleaned windows")
+    plt.show(block=False)
+    return overview, traces
+
+
 # %% Part 2: Definitive bad-time detection (to be developed)
 
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-03"
+    subject_id = "sub-02"
     project_dir = Path(__file__).resolve().parents[3]
     set_file = (project_dir / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
@@ -907,21 +1268,48 @@ if __name__ == "__main__":
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    clean = ZapLine_notch(clean, line_freq=90.0)
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    # clean = ZapLine_notch(clean, line_freq=90.0)
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
     # Remove the estimated noise from the original data without high-pass filtering it
     remove_line_noise_inplace(raw, raw_prep, clean)
 
-    # %% Bad-channel detection
+    # %% High-pass filter at 0.3 Hz
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
+    # %% Initial bad channels: nonfinite values and flat lines
     bad_ch_report = {}
     bad_ch_report.update(bad_ch_by_nan(raw_bads))
     bad_ch_report.update(bad_ch_by_flatline(raw_bads))
+
+    # %% Bad channels by voltage, high-frequency noise, and electrode pops
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads))
+    bad_ch_report.update(bad_ch_by_pop(raw_bads))
+
+    # %% Local PCA cleaning of shared artifacts, excluding the bad channels above.
+    # Rerun the detectors on the cleaned data; if they flag new channels, add them
+    # to the bads and redo the cleaning on the pre-cleaning data.
+    while True:
+        raw_pca = raw_bads.copy()
+        pca_details = pca_cleaning(raw_pca,
+                                   window_length=1.0, variance_cutoff=0.9, fade_length=0.25,
+                                   highpass_freq=2.0, amplitude_floor_uv=100.0)
+        new_bads = {}
+        new_bads.update(bad_ch_by_voltage(raw_pca))
+        new_bads.update(bad_ch_by_HFnoise(raw_pca))
+        new_bads.update(bad_ch_by_pop(raw_pca))
+        print(f"New bad channels after PCA cleaning: {new_bads}")
+        if not any(new_bads.values()):
+            break
+        for criterion, names in new_bads.items():
+            bad_ch_report[criterion] = bad_ch_report[criterion] + names
+        raw_bads.info["bads"] = list(raw_pca.info["bads"])
+    print(bad_ch_report)
     plot_bad_ch_report(raw_bads, bad_ch_report)
+
+    # %% Whole-recording traces before and after PCA cleaning
+    pca_overview_figure, pca_channel_figure = plot_pca_cleaning(raw_bads, raw_pca, pca_details)

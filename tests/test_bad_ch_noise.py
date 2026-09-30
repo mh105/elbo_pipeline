@@ -162,6 +162,58 @@ class TestVoltageDetection(unittest.TestCase):
 
 
 class TestRobustMetrics(unittest.TestCase):
+    def test_hf_rank_preserves_candidates_at_or_above_median(self):
+        for hf_uv, n_flagged, expected in (
+            (1.9, 2, []),
+            (2.0, 2, ["E8"]),
+            (2.1, 2, ["E8"]),
+            (1.9, 4, ["E8"]),  # No non-violating baseline: retain the candidate.
+        ):
+            with self.subTest(hf_uv=hf_uv, n_flagged=n_flagged):
+                raw = hf_raw()
+                metrics = []
+                for window in range(4):
+                    hf = np.r_[np.full(8, 2.0), hf_uv] * 1e-6
+                    lf = hf / np.linspace(0.1, 0.3, 9)
+                    lf[-1] = hf[-1] / (10 if window < n_flagged else 0.2)
+                    metrics.append((hf / lf, hf, lf))
+                with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+                    report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+                np.testing.assert_array_equal(
+                    details["violates"][-1], np.arange(4) < n_flagged
+                )
+                self.assertEqual(report, {"HFnoise": expected})
+                self.assertEqual(raw.info["bads"], expected)
+
+    def test_hf_rank_uses_only_candidate_violating_windows(self):
+        metrics = []
+        for window in range(4):
+            hf = np.r_[np.full(8, 2.0 if window < 2 else 200.0), 3.0] * 1e-6
+            lf = hf / np.linspace(0.1, 0.3, 9)
+            lf[-1] = hf[-1] / (10 if window < 2 else 0.2)
+            metrics.append((hf / lf, hf, lf))
+        with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+            report, details = step2.bad_ch_by_HFnoise(hf_raw(), return_details=True)
+        np.testing.assert_array_equal(details["violates"][-1], [1, 1, 0, 0])
+        self.assertEqual(report, {"HFnoise": ["E8"]})
+
+    def test_hf_rank_compares_channel_medians(self):
+        metrics = []
+        for window in range(6):
+            # Over the candidate's three violating windows, five channels have
+            # median HF=1; pooling channel/window values would give median HF=100.
+            hf = np.r_[np.full(5, 1.0 if window < 2 else 100.0),
+                       np.full(3, 100.0), 3.0] * 1e-6
+            lf = hf / np.linspace(0.1, 0.3, 9)
+            lf[-1] = hf[-1] / (10 if window < 3 else 0.2)
+            metrics.append((hf / lf, hf, lf))
+        with patch.object(step2, "_prep_hf_ratio", side_effect=metrics):
+            report, details = step2.bad_ch_by_HFnoise(
+                hf_raw(window_length=3), return_details=True
+            )
+        np.testing.assert_array_equal(details["violates"][-1], [1, 1, 1, 0, 0, 0])
+        self.assertEqual(report, {"HFnoise": ["E8"]})
+
     def test_hf_confirmation_compares_log_hf_increase_with_log_lf_decrease(self):
         for hf_factor, lf_factor, expected in (
             (0.9, 0.5, []),
@@ -185,6 +237,9 @@ class TestRobustMetrics(unittest.TestCase):
                 for window in range(4):
                     hf = np.r_[np.linspace(1, 3, 8), 2.0] * 1e-6
                     lf = np.full(9, 10e-6)
+                    # Keep the candidate below the HF median so confirmation applies.
+                    hf[:8] *= 10
+                    lf[:8] *= 10
                     if window < 2:
                         # LF elsewhere shifts the cross-channel ratio baseline.
                         lf[:8] *= 10
@@ -212,6 +267,7 @@ class TestRobustMetrics(unittest.TestCase):
 
     def test_hf_confirmation_rejects_lf_driven_ratio_in_filtered_signal(self):
         raw = hf_raw(n_bad=0)
+        raw._data[8] -= 0.7e-6 * np.sin(2 * np.pi * 80 * raw.times)
         t = np.arange(1000) / raw.info["sfreq"]
         raw._data[8, :1000] -= 9.8e-6 * np.sin(2 * np.pi * 10 * t)
         report, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
