@@ -145,21 +145,22 @@ class TestPCACleaning(unittest.TestCase):
         np.testing.assert_allclose(weight[hand_over], 1, atol=1e-3)
         self.assertLessEqual(weight.max(), 1 + 1e-3)
 
-    def test_remove_pca_signal_reproduces_cleaning_and_checks_inputs(self):
+    def test_remove_pca_signal_inplace_reproduces_cleaning_and_checks_inputs(self):
         data = noise() + burst(int(10.5 * SFREQ), [3, 7])
         raw = pca_raw(data)
         raw.info["bads"] = ["E7"]
         copy = raw.copy()
         details = step2.pca_cleaning(raw, return_removed=True)
-        self.assertIsNone(step2.remove_pca_signal(copy, details))
+        self.assertIsNone(step2.remove_pca_signal_inplace(copy, details))
         np.testing.assert_allclose(copy.get_data(), raw.get_data(), rtol=0, atol=1e-18)
         np.testing.assert_array_equal(copy.get_data(picks=["E7", "Cz"]),
                                       pca_raw(data).get_data(picks=["E7", "Cz"]))
 
         with self.assertRaisesRegex(ValueError, "return_removed"):
-            step2.remove_pca_signal(pca_raw(data), step2.pca_cleaning(pca_raw(data)))
+            step2.remove_pca_signal_inplace(pca_raw(data),
+                                            step2.pca_cleaning(pca_raw(data)))
         with self.assertRaisesRegex(ValueError, "same samples"):
-            step2.remove_pca_signal(pca_raw(data).crop(tmax=9.0), details)
+            step2.remove_pca_signal_inplace(pca_raw(data).crop(tmax=9.0), details)
 
     def test_invalid_inputs(self):
         data = noise()

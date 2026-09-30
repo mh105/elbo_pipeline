@@ -17,8 +17,8 @@ pca_cleaning modifies the data in place: after the initial bad-channel pass, it
 removes the PC1 of each 1-second window where PC1 explains at least 90% of the
 variance, on the input or on 2 Hz high-passed data, and exceeds 100 µV on some
 channel, suppressing large artifacts shared across channels. With
-return_removed=True, remove_pca_signal can subtract the same removed signals from
-a copy high-passed at a lower cutoff (filter first, then subtract).
+return_removed=True, remove_pca_signal_inplace can subtract the same removed
+signals from a copy high-passed at a lower cutoff (filter first, then subtract).
 """
 
 from pathlib import Path
@@ -1068,7 +1068,8 @@ def pca_cleaning(
     With return_removed=True, also return removed_spans: one (start, stop,
     signal) per run including its fades, in samples from the Raw start, with the
     subtracted signal in volts, shape (len(ch_names), stop - start). Pass the
-    details to remove_pca_signal to subtract the same signal from other data.
+    details to remove_pca_signal_inplace to subtract the same signal from other
+    data.
     """
     if not np.isfinite(variance_cutoff) or not 0 < variance_cutoff < 1:
         raise ValueError("variance_cutoff must be between 0 and 1.")
@@ -1155,7 +1156,7 @@ def pca_cleaning(
     return details
 
 
-def remove_pca_signal(raw, pca_details):
+def remove_pca_signal_inplace(raw, pca_details):
     """Subtract pca_cleaning's removed signals from another preloaded Raw in place.
 
     Use this for a copy of the same recording high-passed at or below the cutoff
