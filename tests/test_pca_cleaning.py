@@ -183,20 +183,43 @@ class TestPCACleaning(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "preloaded"):
                 step2.pca_cleaning(mne.io.read_raw_fif(path, preload=False, verbose=False))
 
-    def test_plot_pca_cleaning_returns_overview_and_channel_figures(self):
+    def test_plot_pca_cleaning_shows_frontal_middle_posterior_and_one_bad_channel(self):
         raw = pca_raw(noise() + burst(int(10.5 * SFREQ), [4]))
-        raw.info["bads"] = ["E7"]
+        # Unit directions (+x right, +y anterior, +z superior); bad E7 is nearest the vertex.
+        directions = {
+            "E0": [0, 0.8, 0.6], "E1": [-0.6, 0.6, 0.53], "E2": [0.2, 0.1, 0.97],
+            "E3": [-0.8, 0, 0.6], "E4": [0.8, 0, 0.6], "E5": [0, -0.8, 0.6],
+            "E6": [0.6, -0.6, 0.53], "E7": [0, -0.05, 1], "Cz": [0, 0, 1],
+        }
+        raw.set_montage(mne.channels.make_dig_montage(
+            {name: 0.09 * np.array(d) / np.linalg.norm(d) for name, d in directions.items()},
+            coord_frame="head",
+        ))
+        for bads, expected in (
+            (["E7", "E3"], ["E0 (frontal)", "E2 (middle)", "E5 (posterior)",
+                            "E7 (bad, not cleaned)"]),
+            ([], ["E0 (frontal)", "E7 (middle)", "E5 (posterior)"]),
+        ):
+            with self.subTest(bads=bads):
+                raw.info["bads"] = bads
+                cleaned = raw.copy()
+                details = step2.pca_cleaning(cleaned)
+                with patch.object(step2.plt, "show"):
+                    overview, traces = step2.plot_pca_cleaning(raw, cleaned, details)
+                try:
+                    self.assertEqual(len(overview.axes), 2)
+                    self.assertEqual([ax.get_ylabel().split("\n")[0] for ax in traces.axes],
+                                     expected)
+                finally:
+                    plt.close(overview)
+                    plt.close(traces)
+
+    def test_plot_pca_cleaning_requires_sensor_positions(self):
+        raw = pca_raw(noise())
         cleaned = raw.copy()
         details = step2.pca_cleaning(cleaned)
-        with patch.object(step2.plt, "show"):
-            overview, traces = step2.plot_pca_cleaning(raw, cleaned, details, channels=("E0", "E7"))
-        try:
-            self.assertEqual(len(overview.axes), 2)
-            self.assertEqual(len(traces.axes), 2)
-            self.assertIn("bad, not cleaned", traces.axes[1].get_ylabel())
-        finally:
-            plt.close(overview)
-            plt.close(traces)
+        with self.assertRaisesRegex(ValueError, "sensor positions"):
+            step2.plot_pca_cleaning(raw, cleaned, details)
 
 
 if __name__ == "__main__":

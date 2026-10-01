@@ -1194,20 +1194,38 @@ def remove_pca_signal_inplace(raw, pca_details):
         raw._data[picks, start:stop] -= removal
 
 
-def plot_pca_cleaning(raw, cleaned_raw, pca_details, channels=("E7", "E23", "E26", "E106")):
+def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     """Show the whole recording before and after pca_cleaning; return both figures.
 
     The first figure overlays the channels that entered the PCA (non-bad EEG,
     reference excluded; one color each) before and after cleaning on a shared
     voltage axis. Each trace is drawn as its min/max envelope in 20-ms bins, so
     brief peaks survive at full-recording scale without millions of vertices.
-    The second figure shows the named channels after cleaning at full resolution,
-    one panel each; bad channels are labeled and were not cleaned. Blue shading
-    marks runs of cleaned windows; each run's removal also fades in and out just
-    outside it. Times are relative to the cropped Raw.
+    The second figure shows channels after cleaning at full resolution, one panel
+    each: the three PCA channels whose directions from the head origin are
+    nearest midline targets about 53 degrees in front of, at, and behind the
+    vertex (frontal, middle, posterior), then the first bad EEG channel in
+    cleaned_raw.info["bads"], which was not cleaned, if there is one. Blue
+    shading marks runs of cleaned windows; each run's removal also fades in and
+    out just outside it. Times are relative to the cropped Raw.
     """
     sfreq = raw.info["sfreq"]
     names = pca_details["ch_names"]
+    positions = np.array([cleaned_raw.info["chs"][cleaned_raw.ch_names.index(name)]["loc"][:3]
+                          for name in names])
+    if not np.isfinite(positions).all() or not np.abs(positions).sum(axis=1).all():
+        raise ValueError("PCA channels need sensor positions; set a montage first.")
+    directions = positions / np.linalg.norm(positions, axis=1, keepdims=True)
+    available = list(range(len(names)))
+    channels = []
+    # MNE head coordinates: +y anterior, +z superior.
+    for region, target in (("frontal", [0, 0.8, 0.6]), ("middle", [0, 0, 1]),
+                           ("posterior", [0, -0.8, 0.6])):
+        pick = available[int(np.argmax(directions[available] @ target))]
+        available.remove(pick)
+        channels.append((names[pick], region))
+    eeg_info = mne.pick_info(cleaned_raw.info, mne.pick_types(cleaned_raw.info, eeg=True, exclude=[]))
+    channels += [(name, "bad, not cleaned") for name in eeg_info["bads"][:1]]
     cleaned = pca_details["cleaned"]
     edges = np.flatnonzero(np.diff(np.r_[False, cleaned, False])).reshape(-1, 2)
     runs = [(pca_details["start_s"][first], pca_details["stop_s"][stop - 1])
@@ -1243,12 +1261,11 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details, channels=("E7", "E23", "E26
         len(channels), 1, figsize=(16, 2.4 * len(channels)), sharex=True,
         squeeze=False, layout="constrained",
     )
-    for row, (ax, name) in enumerate(zip(axes[:, 0], channels)):
+    for row, (ax, (name, label)) in enumerate(zip(axes[:, 0], channels)):
         data = cleaned_raw.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
         ax.plot(cleaned_raw.times, data, color=f"C{row % 10}", linewidth=0.5)
         shade(ax)
-        status = " (bad, not cleaned)" if name in cleaned_raw.info["bads"] else ""
-        ax.set_ylabel(f"{name}{status}\nVoltage (µV)")
+        ax.set_ylabel(f"{name} ({label})\nVoltage (µV)")
     axes[-1, 0].set(xlabel="Time from cropped recording start (s)", xlim=(0, raw.times[-1]))
     traces.suptitle("After PCA cleaning, full resolution; blue = cleaned windows")
     plt.show(block=False)
@@ -1266,6 +1283,9 @@ if __name__ == "__main__":
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = mne.io.read_raw_eeglab(set_file, preload=True)
     assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
+    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
+    with raw.info._unlock():
+        raw.info["lowpass"] = 100.0
 
     enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
     encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
