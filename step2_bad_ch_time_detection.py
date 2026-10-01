@@ -1306,9 +1306,7 @@ if __name__ == "__main__":
     # to the bads and redo the cleaning on the pre-cleaning data.
     while True:
         raw_pca = raw_bads.copy()
-        pca_details = pca_cleaning(raw_pca,
-                                   window_length=1.0, variance_cutoff=0.9, fade_length=0.25,
-                                   highpass_freq=2.0, amplitude_floor_uv=100.0)
+        pca_details = pca_cleaning(raw_pca)
         new_bads = {}
         new_bads.update(bad_ch_by_voltage(raw_pca))
         new_bads.update(bad_ch_by_HFnoise(raw_pca))
