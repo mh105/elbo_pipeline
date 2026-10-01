@@ -72,7 +72,7 @@ class TestPCACleaning(unittest.TestCase):
         raw.info["bads"] = ["E7"]
         raw.set_annotations(mne.Annotations([1.0], [0.5], ["BAD_existing"]))
         original = raw.get_data().copy()
-        details = step2.pca_cleaning(raw)
+        details = step2.pca_cleaning_inplace(raw)
 
         self.assertEqual(details["ch_names"], [f"E{i}" for i in range(7)])
         np.testing.assert_array_equal(details["cleaned"], np.arange(10) == 4)
@@ -102,16 +102,16 @@ class TestPCACleaning(unittest.TestCase):
     def test_amplitude_floor_and_inclusive_variance_cutoff(self):
         background = noise(scale=1e-6)
         data = background + burst(background.shape[1], [4], amplitude=30e-6)
-        details = step2.pca_cleaning(pca_raw(data))  # Peak ~60 uV: flagged, not qualified.
+        details = step2.pca_cleaning_inplace(pca_raw(data))  # Peak ~60 uV: flagged, not qualified.
         self.assertTrue(details["input"]["flagged"][4])
         self.assertFalse(details["cleaned"].any())
-        details = step2.pca_cleaning(pca_raw(data), amplitude_floor_uv=20.0)
+        details = step2.pca_cleaning_inplace(pca_raw(data), amplitude_floor_uv=20.0)
         self.assertTrue(details["cleaned"][4])
 
         fraction = details["input"]["pc1_variance_fraction"][4]
         for cutoff, flagged in ((fraction, True), (np.nextafter(fraction, 1), False)):
             with self.subTest(cutoff=cutoff):
-                details = step2.pca_cleaning(
+                details = step2.pca_cleaning_inplace(
                     pca_raw(data), variance_cutoff=cutoff, amplitude_floor_uv=20.0
                 )
                 self.assertEqual(details["input"]["flagged"][4], flagged)
@@ -123,7 +123,7 @@ class TestPCACleaning(unittest.TestCase):
         highpassed = spike + noise(scale=1e-9, seed=1)  # Only the spike survives the filter.
         with patch.object(step2.mne.filter, "filter_data", return_value=highpassed):
             raw = pca_raw(data)
-            details = step2.pca_cleaning(raw, return_removed=True)
+            details = step2.pca_cleaning_inplace(raw, return_removed=True)
         self.assertLess(details["input"]["pc1_variance_fraction"][2], 0.9)
         self.assertTrue(details["highpass"]["qualified"][2])
         self.assertEqual(details["removed_pass"][2], "highpass")
@@ -143,7 +143,7 @@ class TestPCACleaning(unittest.TestCase):
         n_times = background.shape[1]
         offset = PATTERN[:, None] * np.full(n_times, 50e-6)  # Shared level, never flagged.
         data = background + offset + burst(n_times, [4, 5, 8])
-        details = step2.pca_cleaning(pca_raw(data), return_removed=True)
+        details = step2.pca_cleaning_inplace(pca_raw(data), return_removed=True)
         np.testing.assert_array_equal(details["cleaned"], np.isin(np.arange(10), [4, 5, 8]))
         self.assertEqual(len(details["removed_spans"]), 2)
         fade = int(0.25 * SFREQ)
@@ -168,7 +168,7 @@ class TestPCACleaning(unittest.TestCase):
         raw = pca_raw(data)
         raw.info["bads"] = ["E7"]
         copy = raw.copy()
-        details = step2.pca_cleaning(raw, return_removed=True)
+        details = step2.pca_cleaning_inplace(raw, return_removed=True)
         self.assertIsNone(step2.remove_pca_signal_inplace(copy, details))
         np.testing.assert_allclose(copy.get_data(), raw.get_data(), rtol=0, atol=1e-18)
         np.testing.assert_array_equal(copy.get_data(picks=["E7", "Cz"]),
@@ -176,7 +176,7 @@ class TestPCACleaning(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "return_removed"):
             step2.remove_pca_signal_inplace(pca_raw(data),
-                                            step2.pca_cleaning(pca_raw(data)))
+                                            step2.pca_cleaning_inplace(pca_raw(data)))
         with self.assertRaisesRegex(ValueError, "same samples"):
             step2.remove_pca_signal_inplace(pca_raw(data).crop(tmax=9.0), details)
 
@@ -188,15 +188,15 @@ class TestPCACleaning(unittest.TestCase):
             {"highpass_freq": SFREQ / 2}, {"amplitude_floor_uv": -1},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
-                step2.pca_cleaning(pca_raw(data), **kwargs)
+                step2.pca_cleaning_inplace(pca_raw(data), **kwargs)
         average = pca_raw(data).set_eeg_reference("average", projection=False, verbose=False)
-        with self.assertRaisesRegex(ValueError, "entirely zero EEG reference"):
-            step2.pca_cleaning(average)
+        with self.assertRaisesRegex(ValueError, "native reference"):
+            step2.pca_cleaning_inplace(average)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test_raw.fif"
             pca_raw(data).save(path, verbose=False)
             with self.assertRaisesRegex(ValueError, "preloaded"):
-                step2.pca_cleaning(mne.io.read_raw_fif(path, preload=False, verbose=False))
+                step2.pca_cleaning_inplace(mne.io.read_raw_fif(path, preload=False, verbose=False))
 
     def test_plot_pca_cleaning_shows_frontal_middle_posterior_and_one_bad_channel(self):
         raw = with_positions(pca_raw(noise() + burst(int(10.5 * SFREQ), [4])))
@@ -208,7 +208,7 @@ class TestPCACleaning(unittest.TestCase):
             with self.subTest(bads=bads):
                 raw.info["bads"] = bads
                 cleaned = raw.copy()
-                details = step2.pca_cleaning(cleaned)
+                details = step2.pca_cleaning_inplace(cleaned)
                 with patch.object(step2.plt, "show"):
                     overview, traces = step2.plot_pca_cleaning(raw, cleaned, details)
                 try:
@@ -231,7 +231,7 @@ class TestPCACleaning(unittest.TestCase):
         raw = with_positions(pca_raw(data))
         raw.info["bads"] = ["E7"]
         cleaned = raw.copy()
-        details = step2.pca_cleaning(cleaned)
+        details = step2.pca_cleaning_inplace(cleaned)
         with patch.object(step2.plt, "show"):
             overview, traces = step2.plot_pca_cleaning(raw, cleaned, details)
         try:
@@ -251,7 +251,7 @@ class TestPCACleaning(unittest.TestCase):
     def test_plot_pca_cleaning_requires_sensor_positions(self):
         raw = pca_raw(noise())
         cleaned = raw.copy()
-        details = step2.pca_cleaning(cleaned)
+        details = step2.pca_cleaning_inplace(cleaned)
         with self.assertRaisesRegex(ValueError, "sensor positions"):
             step2.plot_pca_cleaning(raw, cleaned, details)
 

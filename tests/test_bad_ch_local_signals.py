@@ -12,7 +12,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 from step2_bad_ch_time_detection import (
-    _resolve_reference_channel,
+    _reference_channel,
     bad_ch_by_flatline,
     bad_ch_by_nan,
     bad_ch_by_smallness,
@@ -45,14 +45,13 @@ class TestBadChByNan(unittest.TestCase):
         raw._data[1, -1] = np.inf
         raw._data[2, 50] = -np.inf
         raw._data[4, 50] = np.nan
-        raw._data[5, 50] = np.inf
         raw.set_annotations(mne.Annotations([0.4], [0.2], ["BAD_test"]))
         raw.info["bads"] = ["E3", "E0"]
         original = raw.get_data().copy()
         result = bad_ch_by_nan(raw)
-        self.assertEqual(result, {"nan": ["E0", "E1", "E2", "E4", "Cz"]})
+        self.assertEqual(result, {"nan": ["E0", "E1", "E2", "E4"]})
         self.assertEqual(bad_ch_by_nan(raw), result)
-        self.assertEqual(raw.info["bads"], ["E3", "E0", "E1", "E2", "E4", "Cz"])
+        self.assertEqual(raw.info["bads"], ["E3", "E0", "E1", "E2", "E4"])
         np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_finite_data_do_not_add_bads(self):
@@ -62,13 +61,16 @@ class TestBadChByNan(unittest.TestCase):
         self.assertEqual(raw.info["bads"], ["E1"])
 
 
-class TestReferenceChannel(unittest.TestCase):
-    def test_auto_reference_includes_existing_bads_but_not_auxiliary_channels(self):
+class TestNativeReferenceChannel(unittest.TestCase):
+    def test_auto_reference_ignores_bads_and_auxiliary_channels(self):
         raw = make_raw(np.ones((1, 3)))
-        raw._data[0] = 0
+        raw._data[0:2] = 0
         raw.set_channel_types({"E0": "eog"})
-        raw.info["bads"] = ["Cz"]
-        self.assertEqual(_resolve_reference_channel(raw, None), "Cz")
+        raw.info["bads"] = ["E1"]
+        self.assertEqual(_reference_channel(raw, "native"), "Cz")
+        raw.info["bads"] = ["E1", "Cz"]
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            _reference_channel(raw, "native")
 
     def test_missing_or_multiple_candidates_raise(self):
         for candidates in (0, 2):
@@ -78,20 +80,22 @@ class TestReferenceChannel(unittest.TestCase):
                     raw._data[-1] = 1e-6
                 else:
                     raw._data[0] = 0
-                    raw.info["bads"] = ["E0"]
                 with self.assertRaisesRegex(ValueError, "exactly one"):
-                    _resolve_reference_channel(raw, None, require_reference=True)
+                    _reference_channel(raw, "native")
 
     def test_explicit_reference_checks_only_that_channel(self):
         raw = make_raw(np.ones((1, 3)))
         raw._data[0] = 0
+        raw.info["bads"] = ["Cz"]
         with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
-            self.assertEqual(_resolve_reference_channel(raw, "Cz"), "Cz")
+            self.assertEqual(_reference_channel(raw, "native", "Cz"), "Cz")
         get_data.assert_called_once_with(picks=[3], reject_by_annotation=None)
+        with self.assertRaisesRegex(ValueError, "not entirely zero"):
+            _reference_channel(raw, "native", "E1")
         raw.set_channel_types({"E0": "eog"})
         for name in ("missing", "E0"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "EEG channel"):
-                _resolve_reference_channel(raw, name)
+                _reference_channel(raw, "native", name)
 
 
 class TestBadChBySmallness(unittest.TestCase):
@@ -222,9 +226,10 @@ class TestWindowRules(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
                     detector(raw)
                 self.assertEqual(raw.info["bads"], [])
-                self.assertEqual(bad_ch_by_nan(raw), {"nan": ["E0"]})
                 if detector is bad_ch_by_smallness:
-                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                    raw.info["bads"] = ["E0"]  # bad_ch_by_nan needs the native reference.
+                else:
+                    self.assertEqual(bad_ch_by_nan(raw), {"nan": ["E0"]})
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
                 self.assertEqual(detector(raw), {criterion: []})
                 self.assertEqual(raw.info["bads"], ["E0"])
@@ -245,10 +250,9 @@ class TestWindowRules(unittest.TestCase):
             with self.subTest(detector=detector.__name__), self.assertRaisesRegex(
                 ValueError, "At least two"
             ):
-                raw = make_raw([[1]])
+                raw = make_raw([[1]], average=detector is bad_ch_by_smallness)
                 if detector is bad_ch_by_smallness:
-                    raw.info["bads"] = ["Cz"]
-                    raw.set_eeg_reference("average", projection=False, verbose=False)
+                    raw.info["bads"] = ["M0"]
                 detector(raw)
         for cutoff in (0, -1, np.nan, np.inf):
             with self.subTest(cutoff=cutoff), self.assertRaisesRegex(ValueError, "std_cutoff"):

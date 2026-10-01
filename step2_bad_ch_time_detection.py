@@ -13,12 +13,22 @@ The 2-second window detectors accept return_details=True to return
 bad_ch_by_pop counts individual electrode pops instead; its details include
 each channel's pop times and step sizes.
 
-pca_cleaning modifies the data in place: after the initial bad-channel pass, it
-removes the PC1 of each 1-second window where PC1 explains at least 90% of the
-variance, on the input or on 2 Hz high-passed data, and exceeds 100 µV on some
-channel, suppressing large artifacts shared across channels. With
+The native reference is the one EEG channel whose samples are all exactly
+zero. bad_ch_by_nan, bad_ch_by_flatline, and pca_cleaning_inplace require it;
+bad_ch_by_smallness, bad_ch_by_std, and bad_ch_by_BBnoise require re-referenced
+data, with no entirely zero EEG channel; bad_ch_by_voltage, bad_ch_by_HFnoise,
+and bad_ch_by_pop accept either and exclude the native reference if present.
+
+pca_cleaning_inplace modifies the data in place: after the initial bad-channel
+pass, it removes the PC1 of each 1-second window where PC1 explains at least 90%
+of the variance, on the input or on 2 Hz high-passed data, and exceeds 100 µV on
+some channel, suppressing large artifacts shared across channels. With
 return_removed=True, remove_pca_signal_inplace can subtract the same removed
 signals from a copy high-passed at a lower cutoff (filter first, then subtract).
+
+robust_average_reference_inplace then iterates bad-channel detection under a
+robust average reference (the mean with bad channels interpolated), interpolates
+the bad channels, and subtracts the final robust mean.
 """
 
 from pathlib import Path
@@ -89,13 +99,15 @@ def bad_ch_by_impedance(
     return {"impedance": bad_names}
 
 
-def bad_ch_by_nan(raw):
+def bad_ch_by_nan(raw, reference_channel=None):
     """Return {"nan": names} for every channel with any NaN or +/-inf sample.
 
-    Check all channel types and all samples, including annotated spans and
-    the reference channel. Add detections to raw.info["bads"], preserving
-    existing labels without duplicates. Data and annotations are unchanged.
+    Require the native reference, as in bad_ch_by_flatline. Check all channel
+    types and all samples, including annotated spans. Add detections to
+    raw.info["bads"], preserving existing labels without duplicates. Data and
+    annotations are unchanged.
     """
+    _reference_channel(raw, "native", reference_channel)
     bad_names = []
     for i, name in enumerate(raw.ch_names):
         data = raw.get_data(picks=[i], reject_by_annotation=None)
@@ -105,58 +117,63 @@ def bad_ch_by_nan(raw):
     return {"nan": bad_names}
 
 
-def _check_average_reference(raw):
-    """Require the non-bad EEG mean to be within 0.1 nV of zero at every sample."""
-    picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
-    if len(picks) == 0:
-        raise ValueError("No non-bad EEG channels remain to check the average reference.")
-    mean = np.zeros(raw.n_times)
+def _zero_eeg_channels(raw, picks):
+    """Names of the picked channels whose samples are all exactly zero."""
+    names = []
     for i in picks:
-        data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
-        if not np.isfinite(data).all():
-            raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
-        mean += data / len(picks)
-    if not np.allclose(mean, 0, rtol=0, atol=1e-10):
-        raise ValueError(
-            "Non-bad EEG channels are not common-average referenced: their sample-wise "
-            f"mean reaches {np.max(np.abs(mean)) * 1e6:g} uV (tolerance 0.0001 uV). "
-            "Apply the average reference over the current non-bad EEG channels."
-        )
-
-
-def _resolve_reference_channel(raw, reference_channel, *, require_reference=False):
-    """Return an all-zero EEG reference, or None after verifying average reference.
-
-    A supplied name limits the zero-signal search to that EEG channel. If it
-    is no longer zero (e.g., after re-referencing), check the average reference
-    instead and do not exclude it. Without a name, search all EEG channels,
-    including existing bads. require_reference keeps flatline detection strict.
-    """
-    eeg_picks = mne.pick_types(raw.info, eeg=True, exclude=[])
-    if reference_channel is not None:
-        if reference_channel not in [raw.ch_names[i] for i in eeg_picks]:
-            raise ValueError("reference_channel must name an EEG channel in raw.")
-        eeg_picks = [raw.ch_names.index(reference_channel)]
-
-    candidates = []
-    for i in eeg_picks:
         data = raw.get_data(picks=[i], reject_by_annotation=None)
         if data.size and np.all(data == 0):
-            candidates.append(raw.ch_names[i])
-    if len(candidates) == 1:
-        return candidates[0]
-    if require_reference:
-        raise ValueError("Expected exactly one entirely zero EEG reference channel; "
-                         f"found {candidates}. Supply reference_channel explicitly.")
-    _check_average_reference(raw)
-    return None
+            names.append(raw.ch_names[i])
+    return names
+
+
+def _reference_channel(raw, reference, reference_channel=None):
+    """Check the reference a method needs; return the native reference to exclude.
+
+    "native": a supplied reference_channel must be an entirely zero EEG
+    channel, bad or not, and other all-zero channels are then ordinary
+    channels; without a name, exactly one non-bad EEG channel must be entirely
+    zero. Return its name. "average": no EEG channel, bad or not, may be
+    entirely zero; return None. "either": return the one entirely zero non-bad
+    EEG channel, or None if there is none; raise if there are several.
+    """
+    eeg_all = mne.pick_types(raw.info, eeg=True, exclude=[])
+    eeg_good = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    if reference == "native":
+        if reference_channel is not None:
+            if reference_channel not in [raw.ch_names[i] for i in eeg_all]:
+                raise ValueError("reference_channel must name an EEG channel in raw.")
+            if not _zero_eeg_channels(raw, [raw.ch_names.index(reference_channel)]):
+                raise ValueError(f"reference_channel {reference_channel} is not entirely "
+                                 "zero; this method requires the native reference.")
+            return reference_channel
+        zeros = _zero_eeg_channels(raw, eeg_good)
+        if len(zeros) != 1:
+            raise ValueError("Expected exactly one entirely zero non-bad EEG channel (the "
+                             f"native reference); found {zeros}. Supply reference_channel "
+                             "explicitly.")
+        return zeros[0]
+    if reference == "average":
+        zeros = _zero_eeg_channels(raw, eeg_all)
+        if zeros:
+            raise ValueError(f"EEG channels {zeros} are entirely zero, as the native "
+                             "reference is; re-reference every EEG channel first, e.g., "
+                             "with robust_average_reference_inplace.")
+        return None
+    zeros = _zero_eeg_channels(raw, eeg_good)
+    if len(zeros) > 1:
+        raise ValueError(f"Several non-bad EEG channels are entirely zero: {zeros}. "
+                         "Run bad_ch_by_flatline first.")
+    return zeros[0] if zeros else None
 
 
 def _prepare_channel_windows(
-    raw, reference_channel, window_length, occurrence_cutoff, *,
-    require_reference=False, require_average=False,
+    raw, window_length, occurrence_cutoff, reference, reference_channel=None,
 ):
-    """Select eligible EEG channels and complete, non-overlapping sample windows."""
+    """Select eligible EEG channels and complete, non-overlapping sample windows.
+
+    reference and reference_channel are checked by _reference_channel.
+    """
     if not np.isfinite(window_length) or window_length <= 0:
         raise ValueError("window_length must be finite and greater than 0 (seconds).")
     if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
@@ -167,13 +184,7 @@ def _prepare_channel_windows(
     n_windows = raw.n_times // window_samples
     if n_windows == 0:
         raise ValueError("Data must contain at least one complete window.")
-    if require_average:
-        _check_average_reference(raw)
-        reference_channel = None
-    else:
-        reference_channel = _resolve_reference_channel(
-            raw, reference_channel, require_reference=require_reference
-        )
+    reference_channel = _reference_channel(raw, reference, reference_channel)
     exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
     picks = mne.pick_types(
         raw.info, eeg=True, exclude=exclude
@@ -224,19 +235,16 @@ def bad_ch_by_smallness(
     window_length=2.0,
     std_cutoff=2.0,
     occurrence_cutoff=0.25,
-    reference_channel=None,
     *,
     return_details=False,
 ):
     """Return {"smallness": names} for persistently low-variance EEG channels.
 
-    Require the mean over currently non-bad EEG channels to be within 0.1 nV
-    of zero at every sample, even if an all-zero native reference exists.
-    Exclude existing bads and non-EEG channels. reference_channel is retained
-    for call compatibility but does not bypass the check or exclude a channel.
-    Use complete non-overlapping windows, starting at the first sample of
-    this Raw; window_length is in seconds, rounded to samples. Ignore the trailing
-    partial window; annotations do not exclude any samples.
+    Require re-referenced data: raise if any EEG channel, bad or not, is
+    entirely zero, as the native reference is. Exclude existing bads and
+    non-EEG channels. Use complete non-overlapping windows, starting at the
+    first sample of this Raw; window_length is in seconds, rounded to samples.
+    Ignore the trailing partial window; annotations do not exclude any samples.
 
     In each window, compute each channel's variance (ddof=0) and its robust z
     across channels, (variance - median) / (1.4826 * MAD), flooring a zero
@@ -259,7 +267,7 @@ def bad_ch_by_smallness(
     if not np.isfinite(std_cutoff) or std_cutoff <= 0:
         raise ValueError("std_cutoff must be finite and greater than 0.")
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, reference_channel, window_length, occurrence_cutoff, require_average=True
+        raw, window_length, occurrence_cutoff, "average"
     )
     counts = np.zeros(len(picks), dtype=int)
     if return_details:
@@ -306,9 +314,12 @@ def bad_ch_by_flatline(
 ):
     """Return {"flatline": names} for persistently flat EEG channels.
 
-    Require a supplied or uniquely detected all-zero EEG reference: run this
-    before average referencing. Channel selection and complete-window rules
-    otherwise follow bad_ch_by_smallness. A window is flat if all samples are
+    Require the native reference: run this before re-referencing. A supplied
+    reference_channel must be entirely zero, bad or not; other entirely zero
+    channels are then evaluated like any other. Without a name, exactly one
+    non-bad EEG channel must be entirely zero. Channel selection and
+    complete-window rules otherwise follow bad_ch_by_smallness, also excluding
+    the reference. A window is flat if all samples are
     exactly equal, including constant nonzero signals. Suppress its flag if
     at least 50% of the other eligible EEG channels are also flat in that
     window. The target channel is excluded from this comparison, as are
@@ -327,7 +338,7 @@ def bad_ch_by_flatline(
     flagged_data_uv includes only windows where violates == 1.
     """
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, reference_channel, window_length, occurrence_cutoff, require_reference=True
+        raw, window_length, occurrence_cutoff, "native", reference_channel
     )
     counts = np.zeros(len(picks), dtype=int)
     if return_details:
@@ -364,16 +375,14 @@ def mask_segment_by_voltage(
     voltage_threshold_uv=500.0,
     channel_fraction_cutoff=0.25,
     window_length=0.1,
-    reference_channel=None,
     *,
     require_average=False,
 ):
     """Append BAD_voltage_mask annotations to raw in place; return None.
 
-    Exclude existing bads, non-EEG channels, and any all-zero reference. If
-    no reference is identified, verify average reference as in bad_ch_by_smallness.
-    With require_average=True, always verify average reference and do not
-    exclude any channel by its reference name or all-zero signal.
+    Exclude existing bads and non-EEG channels. Accept the native reference,
+    excluded as in bad_ch_by_voltage, or re-referenced data. With
+    require_average=True, require re-referenced data as in bad_ch_by_smallness.
     A channel exceeds the threshold in a window if any sample is strictly outside
     +/-voltage_threshold_uv. Annotate the entire window when strictly more
     than channel_fraction_cutoff of eligible channels exceed it, even if
@@ -393,11 +402,7 @@ def mask_segment_by_voltage(
     window_samples = int(round(window_length * sfreq))
     if window_samples < 1:
         raise ValueError("window_length must cover at least one sample.")
-    if require_average:
-        _check_average_reference(raw)
-        reference_channel = None
-    else:
-        reference_channel = _resolve_reference_channel(raw, reference_channel)
+    reference_channel = _reference_channel(raw, "average" if require_average else "either")
     exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
     picks = mne.pick_types(
         raw.info, eeg=True, exclude=exclude
@@ -425,17 +430,11 @@ def mask_segment_by_voltage(
     )
 
 
-def _temporary_voltage_mask(raw, reference_channel, *, require_average=False):
-    """Mask a copy after checking for a native or average reference."""
-    if require_average:
-        _check_average_reference(raw)
-        reference_channel = None
-    else:
-        reference_channel = _resolve_reference_channel(raw, reference_channel)
+def _temporary_voltage_mask(raw, *, require_average=False):
+    """Check the reference, then mask a copy; return it and any native reference."""
+    reference_channel = _reference_channel(raw, "average" if require_average else "either")
     masked = raw.copy()
-    mask_segment_by_voltage(
-        masked, reference_channel=reference_channel, require_average=require_average
-    )
+    mask_segment_by_voltage(masked, require_average=require_average)
     return masked, reference_channel
 
 
@@ -485,7 +484,8 @@ def bad_ch_by_voltage(
     raw,
     voltage_threshold_uv=200.0,
     occurrence_cutoff=0.25,
-    reference_channel=None,
+    *,
+    plot=True,
 ):
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
@@ -494,21 +494,22 @@ def bad_ch_by_voltage(
     channels, existing BAD annotations, and the temporary 0.1-second voltage
     mask. Add detections to raw.info["bads"], preserving existing labels
     without duplicates. Input data and annotations are unchanged.
-    Accept an all-zero native reference, otherwise verify average reference
-    as in bad_ch_by_smallness.
+    Accept the native reference or re-referenced data: exclude the one
+    entirely zero non-bad EEG channel, the native reference, if present, and
+    raise if there are several (run bad_ch_by_flatline first).
 
-    Show all channels except existing bads over the full time range, including
-    the reference and masked samples. Plot in microvolts with dotted cutoff
-    lines and a different color per channel. Highlight and label only this
-    call's detections in the legend. Shade temporary voltage masks in light
-    gray and scale the y-axis from the plotted channels' finite samples outside
-    all BAD annotations.
+    With plot=True, show all channels except existing bads over the full time
+    range, including the reference and masked samples. Plot in microvolts with
+    dotted cutoff lines and a different color per channel. Highlight and label
+    only this call's detections in the legend. Shade temporary voltage masks in
+    light gray and scale the y-axis from the plotted channels' finite samples
+    outside all BAD annotations.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
     if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
         raise ValueError("occurrence_cutoff must be between 0 and 1.")
-    masked, reference_channel = _temporary_voltage_mask(raw, reference_channel)
+    masked, reference_channel = _temporary_voltage_mask(raw)
     exclude = masked.info["bads"] + ([] if reference_channel is None else [reference_channel])
     picks = mne.pick_types(
         masked.info, eeg=True, exclude=exclude
@@ -521,6 +522,8 @@ def bad_ch_by_voltage(
         if np.mean(np.abs(data) > voltage_threshold_uv / 1e6) > occurrence_cutoff:
             bad_names.append(raw.ch_names[i])
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    if not plot:
+        return {"voltage": bad_names}
 
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
     times = raw.times
@@ -561,7 +564,6 @@ def bad_ch_by_std(
     window_length=2.0,
     robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
-    reference_channel=None,
     *,
     return_details=False,
 ):
@@ -571,7 +573,7 @@ def bad_ch_by_std(
     z = (d - median(d)) / (0.7413 * IQR(d)) across channels. Use z strictly
     above robust_z_cutoff, never abs(z). Compute a fresh baseline once per
     complete window; exclude existing bads and non-EEG channels. Require
-    average reference as in bad_ch_by_smallness; reference_channel is ignored.
+    re-referenced data as in bad_ch_by_smallness.
 
     Apply the temporary 0.1-second voltage mask on a copy. Omit every window
     overlapping any BAD annotation and the trailing partial window. Flag
@@ -587,11 +589,9 @@ def bad_ch_by_std(
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    masked, reference_channel = _temporary_voltage_mask(
-        raw, reference_channel, require_average=True
-    )
+    masked, _ = _temporary_voltage_mask(raw, require_average=True)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, reference_channel, window_length, occurrence_cutoff, require_average=True
+        masked, window_length, occurrence_cutoff, "average"
     )
     counts = np.zeros(len(picks), dtype=int)
     n_retained = 0
@@ -656,7 +656,6 @@ def bad_ch_by_HFnoise(
     window_length=2.0,
     robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
-    reference_channel=None,
     *,
     return_details=False,
 ):
@@ -676,8 +675,8 @@ def bad_ch_by_HFnoise(
     Keep candidates that violate in every retained window, since no
     non-violating baseline is available.
     Each retained window is filtered separately to keep masked bursts out of
-    neighboring windows. Accept an all-zero native reference, otherwise verify
-    average reference. Temporary masking and the occurrence denominator follow
+    neighboring windows. Accept the native reference or re-referenced data as
+    in bad_ch_by_voltage. Temporary masking and the occurrence denominator follow
     bad_ch_by_std. Require sfreq > 100 Hz
     to evaluate noise above 50 Hz. Add detections to raw.info["bads"], preserving
     existing labels without duplicates. Input data/annotations are unchanged.
@@ -696,9 +695,9 @@ def bad_ch_by_HFnoise(
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
     if raw.info["sfreq"] <= 100:
         raise ValueError("bad_ch_by_HFnoise requires a sampling rate above 100 Hz.")
-    masked, reference_channel = _temporary_voltage_mask(raw, reference_channel)
+    masked, _ = _temporary_voltage_mask(raw)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, reference_channel, window_length, occurrence_cutoff
+        masked, window_length, occurrence_cutoff, "either"
     )
     counts = np.zeros(len(picks), dtype=int)
     n_retained = 0
@@ -781,7 +780,6 @@ def bad_ch_by_BBnoise(
     robust_z_cutoff=3.0,
     min_bad_bands=3,
     occurrence_cutoff=0.25,
-    reference_channel=None,
     *,
     return_details=False,
 ):
@@ -793,10 +791,10 @@ def bad_ch_by_BBnoise(
     separately for each band. Flag every channel with z > robust_z_cutoff in
     at least min_bad_bands, in a single pass with no iterative removal.
 
-    Require average reference as in bad_ch_by_smallness; reference_channel is
-    ignored. Selection, temporary masking, and occurrence denominator follow
-    bad_ch_by_std. Add detections to raw.info["bads"], preserving existing labels
-    without duplicates. Input data and annotations are unchanged.
+    Require re-referenced data as in bad_ch_by_smallness. Selection, temporary
+    masking, and occurrence denominator follow bad_ch_by_std. Add detections to
+    raw.info["bads"], preserving existing labels without duplicates. Input data
+    and annotations are unchanged.
 
     With return_details=True, return (report, details), with the common fields
     described in bad_ch_by_HFnoise. bands_hz gives the five open intervals.
@@ -814,11 +812,9 @@ def bad_ch_by_BBnoise(
         raise ValueError("min_bad_bands must be an integer between 1 and 5.")
     if raw.info["sfreq"] / 2 < SPECTRAL_BANDS[-1][1]:
         raise ValueError("Sampling rate must cover all spectral bands through 45 Hz.")
-    masked, reference_channel = _temporary_voltage_mask(
-        raw, reference_channel, require_average=True
-    )
+    masked, _ = _temporary_voltage_mask(raw, require_average=True)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, reference_channel, window_length, occurrence_cutoff, require_average=True
+        masked, window_length, occurrence_cutoff, "average"
     )
     counts = np.zeros(len(picks), dtype=int)
     n_retained = 0
@@ -878,7 +874,6 @@ def bad_ch_by_pop(
     neighbor_ratio=3.0,
     sharpness_cutoff=0.7,
     rate_cutoff=1.0,
-    reference_channel=None,
     *,
     return_details=False,
 ):
@@ -899,8 +894,8 @@ def bad_ch_by_pop(
     100 ms apart form one pop.
 
     Flag channels with strictly more than rate_cutoff pops per minute of
-    retained data. Accept an all-zero native reference, otherwise verify
-    average reference. Exclude existing bads, the reference, and non-EEG
+    retained data. Accept the native reference or re-referenced data as in
+    bad_ch_by_voltage. Exclude existing bads, the reference, and non-EEG
     channels. Apply the temporary voltage mask on a copy, as in bad_ch_by_std;
     masked and BAD-annotated samples are not retained, and candidates whose
     evaluation spans touch them are skipped. Require sfreq >= 100 Hz. Add
@@ -926,7 +921,7 @@ def bad_ch_by_pop(
     if sfreq < 100:
         raise ValueError("bad_ch_by_pop requires a sampling rate of at least 100 Hz.")
     gap, width, short, merge = (int(round(s * sfreq)) for s in (0.01, 0.05, 0.01, 0.1))
-    masked, reference_channel = _temporary_voltage_mask(raw, reference_channel)
+    masked, reference_channel = _temporary_voltage_mask(raw)
     exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
     picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
     if len(picks) < 7:
@@ -1038,7 +1033,7 @@ def plot_bad_ch_report(raw, bad_ch_report):
 
 # %% Shared-artifact removal by local PCA
 
-def pca_cleaning(
+def pca_cleaning_inplace(
     raw, window_length=1.0, variance_cutoff=0.9, fade_length=0.25, highpass_freq=2.0,
     amplitude_floor_uv=100.0, reference_channel=None, *, return_removed=False,
 ):
@@ -1069,9 +1064,9 @@ def pca_cleaning(
     total removal weight never exceeds one. fade_length may be 0 (hard edges)
     up to half of window_length.
 
-    Require a supplied or uniquely detected all-zero EEG reference: run this
-    before average referencing, which changes PC1 variance fractions and peaks,
-    so the cutoffs apply to native-reference data only. Exclude existing bads,
+    Require the native reference, as in bad_ch_by_flatline: run this before
+    re-referencing, which changes PC1 variance fractions and peaks, so the
+    cutoffs apply to native-reference data only. Exclude existing bads,
     non-EEG channels, and the reference, which stay unchanged. Bad labels and
     annotations are unchanged.
 
@@ -1097,7 +1092,7 @@ def pca_cleaning(
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, reference_channel, window_length, 0.25, require_reference=True
+        raw, window_length, 0.25, "native", reference_channel
     )
     fade = int(round(fade_length * raw.info["sfreq"]))
     starts = np.arange(n_windows) * window_samples
@@ -1173,36 +1168,37 @@ def pca_cleaning(
 
 
 def remove_pca_signal_inplace(raw, pca_details):
-    """Subtract pca_cleaning's removed signals from another preloaded Raw in place.
+    """Subtract pca_cleaning_inplace's removed signals from another preloaded Raw in place.
 
     Use this for a copy of the same recording high-passed at or below the cutoff
-    of the data pca_cleaning saw (e.g., 0.1 Hz when it saw 0.3 Hz): filter first,
-    then subtract. Subtracting after the same cutoff reproduces the cleaned data
-    exactly; after a lower cutoff, the result is the cleaned data plus the
-    recording's own band between the two cutoffs. For higher cutoffs (e.g., 1 Hz
-    for ICA), filter the cleaned data instead of calling this.
+    of the data pca_cleaning_inplace saw (e.g., 0.1 Hz when it saw 0.3 Hz):
+    filter first, then subtract. Subtracting after the same cutoff reproduces
+    the cleaned data exactly; after a lower cutoff, the result is the cleaned
+    data plus the recording's own band between the two cutoffs. For higher
+    cutoffs (e.g., 1 Hz for ICA), filter the cleaned data instead of calling this.
 
-    pca_details must come from pca_cleaning(..., return_removed=True) on data
+    pca_details must come from pca_cleaning_inplace(..., return_removed=True) on data
     covering the same samples (first_samp, n_times, sfreq) and containing the
     same channel names. Only those channels within the cleaned runs change. The
     stored signals are subtracted as computed, not re-projected from this Raw.
     Return None.
     """
     if "removed_spans" not in pca_details:
-        raise ValueError("Run pca_cleaning with return_removed=True.")
+        raise ValueError("Run pca_cleaning_inplace with return_removed=True.")
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     if (raw.first_samp, raw.n_times, raw.info["sfreq"]) != (
         pca_details["first_samp"], pca_details["n_times"], pca_details["sfreq"]
     ):
-        raise ValueError("raw must cover the same samples as the data passed to pca_cleaning.")
+        raise ValueError("raw must cover the same samples as the data passed to "
+                         "pca_cleaning_inplace.")
     picks = [raw.ch_names.index(name) for name in pca_details["ch_names"]]
     for start, stop, removal in pca_details["removed_spans"]:
         raw._data[picks, start:stop] -= removal
 
 
 def plot_pca_cleaning(raw, cleaned_raw, pca_details):
-    """Show the whole recording before and after pca_cleaning; return both figures.
+    """Show the whole recording before and after pca_cleaning_inplace; return both figures.
 
     The first figure overlays the channels that entered the PCA (non-bad EEG,
     reference excluded; one color each) before and after cleaning on a shared
@@ -1292,6 +1288,94 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     return overview, traces
 
 
+# %% Robust average reference
+
+def _robust_mean(raw, bads):
+    """Mean over all EEG channels of a copy with the named bads spherically interpolated."""
+    interpolated = raw.copy()
+    interpolated.info["bads"] = list(bads)
+    if bads:
+        interpolated.interpolate_bads(reset_bads=False, on_bad_position="raise", verbose=False)
+    eeg = mne.pick_types(interpolated.info, eeg=True, exclude=[])
+    return interpolated._data[eeg].mean(axis=0)
+
+
+def robust_average_reference_inplace(raw, reference_channel=None, max_iterations=10):
+    """Robust-average-reference preloaded raw in place; return (report, bads, reference).
+
+    Require the native reference, as in bad_ch_by_flatline. Existing bads stay
+    bad and are never re-evaluated. Non-bad EEG data must be finite.
+
+    Each pass takes the robust mean: on a copy, interpolate the existing EEG
+    bads and the channels the previous pass flagged (none in the first pass)
+    with MNE's spherical splines at default settings, then average all EEG
+    channels, including the native reference (all zero) and the interpolated
+    channels. Subtract this mean from every EEG channel of another copy, whose
+    bad channels are not interpolated, and run bad_ch_by_voltage (no plot),
+    bad_ch_by_smallness, bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, and
+    bad_ch_by_BBnoise on it in that order. Each pass starts from the existing
+    bads, and each detector also excludes the channels flagged before it in the
+    same pass. Stop when a pass flags exactly the channels its robust mean
+    interpolated; raise if that has not happened within max_iterations passes.
+
+    Then interpolate every bad EEG channel in raw, subtract the last robust
+    mean from every EEG channel, and remove the EEG channels from
+    raw.info["bads"], so all EEG channels average to zero. Non-EEG channels are
+    unchanged. Unless the reference channel was interpolated, verify that it
+    now holds exactly minus the robust mean.
+
+    Return the last pass's {criterion: names}, the interpolated EEG channels in
+    Raw order (existing and new bads), and the subtracted robust mean in volts,
+    shape (n_times,). Adding it back to every EEG channel restores the native
+    reference.
+    """
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    if not isinstance(max_iterations, int) or max_iterations < 1:
+        raise ValueError("max_iterations must be a positive integer.")
+    reference_channel = _reference_channel(raw, "native", reference_channel)
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    eeg_names = [raw.ch_names[i] for i in eeg]
+    initial = list(raw.info["bads"])
+    initial_eeg = [name for name in initial if name in eeg_names]
+    if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
+        raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
+
+    detectors = (bad_ch_by_smallness, bad_ch_by_HFnoise, bad_ch_by_pop,
+                 bad_ch_by_std, bad_ch_by_BBnoise)
+    flagged, history = [], []
+    for _ in range(max_iterations):
+        reference = _robust_mean(raw, initial_eeg + flagged)
+        referenced = raw.copy()
+        referenced._data[eeg] -= reference
+        report = bad_ch_by_voltage(referenced, plot=False)
+        for detector in detectors:
+            report.update(detector(referenced))
+        new = [name for name in raw.ch_names
+               if name in referenced.info["bads"] and name not in initial]
+        history.append(new)
+        print(f"Robust average reference pass {len(history)}: bad channels {new}")
+        if set(new) == set(flagged):
+            break
+        flagged = new
+    else:
+        raise RuntimeError(f"Robust average reference did not converge in {max_iterations} "
+                           f"passes; bad channels flagged per pass: {history}")
+
+    bads = [name for name in eeg_names if name in initial_eeg or name in flagged]
+    raw.info["bads"] = bads
+    if bads:
+        raw.interpolate_bads(reset_bads=True, on_bad_position="raise", verbose=False)
+    raw._data[eeg] -= reference
+    raw.info["bads"] = [name for name in initial if name not in eeg_names]
+    if reference_channel not in bads and not np.array_equal(
+        raw._data[raw.ch_names.index(reference_channel)], -reference
+    ):
+        raise RuntimeError(f"Reference channel {reference_channel} does not hold minus the "
+                           "robust mean after re-referencing.")
+    return report, bads, reference
+
+
 # %% Part 2: Definitive bad-time detection (to be developed)
 
 
@@ -1346,9 +1430,9 @@ if __name__ == "__main__":
     # to the bads and redo the cleaning on the pre-cleaning data.
     while True:
         raw_pca = raw_bads.copy()
-        pca_details = pca_cleaning(raw_pca)
+        pca_details = pca_cleaning_inplace(raw_pca)
         new_bads = {}
-        new_bads.update(bad_ch_by_voltage(raw_pca))
+        new_bads.update(bad_ch_by_voltage(raw_pca, plot=False))
         new_bads.update(bad_ch_by_HFnoise(raw_pca))
         new_bads.update(bad_ch_by_pop(raw_pca))
         print(f"New bad channels after PCA cleaning: {new_bads}")
@@ -1357,8 +1441,14 @@ if __name__ == "__main__":
         for criterion, names in new_bads.items():
             bad_ch_report[criterion] = bad_ch_report[criterion] + names
         raw_bads.info["bads"] = list(raw_pca.info["bads"])
-    plot_bad_ch_report(raw_bads, bad_ch_report)
 
     # Whole-recording traces before and after PCA cleaning
     pca_overview_figure, pca_channel_figure = plot_pca_cleaning(raw_bads, raw_pca, pca_details)
     raw_bads = raw_pca  # Keep the cleaned data for the next steps
+
+    # %% Robust average reference: interpolate all bad channels, which info["bads"]
+    # no longer lists; bad_ch_report keeps them by criterion.
+    robust_report, interpolated_bads, robust_reference = robust_average_reference_inplace(raw_bads)
+    for criterion, names in robust_report.items():
+        bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
+    plot_bad_ch_report(raw_bads, bad_ch_report)

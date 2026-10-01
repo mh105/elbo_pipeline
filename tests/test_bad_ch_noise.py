@@ -386,9 +386,11 @@ class TestRobustMetrics(unittest.TestCase):
 class TestWindowedNoiseDetection(unittest.TestCase):
     def test_report_keeps_separate_criteria_while_bads_accumulate(self):
         raw = std_raw()
+        cz = mne.create_info(["Cz"], raw.info["sfreq"], "eeg")
+        raw.add_channels([mne.io.RawArray(np.zeros((1, raw.n_times)), cz, verbose=False)])
         raw._data[1, 5] = np.nan
         report = {}
-        report.update(step2.bad_ch_by_nan(raw))
+        report.update(step2.bad_ch_by_nan(raw))  # Needs the native reference, Cz.
         raw.set_eeg_reference("average", projection=False, verbose=False)
         report.update(step2.bad_ch_by_std(raw))
         self.assertEqual(report, {"nan": ["E1"], "std": ["E8", "M8"]})
@@ -462,7 +464,7 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 if detector is not step2.bad_ch_by_HFnoise:
                     raw.set_eeg_reference("average", projection=False, verbose=False)
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
-                self.assertEqual(detector(raw, reference_channel="Cz"), {criterion: expected})
+                self.assertEqual(detector(raw), {criterion: expected})
                 self.assertEqual(raw.info["bads"], ["E1"] + expected)
                 self.assertEqual(len(raw.annotations), 0)
 
