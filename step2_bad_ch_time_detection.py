@@ -1297,6 +1297,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads))
     bad_ch_report.update(bad_ch_by_pop(raw_bads))
+    print(bad_ch_report)
 
     # %% Local PCA cleaning of shared artifacts, excluding the bad channels above.
     # Rerun the detectors on the cleaned data; if they flag new channels, add them
