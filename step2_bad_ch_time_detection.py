@@ -1423,7 +1423,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads))
     bad_ch_report.update(bad_ch_by_pop(raw_bads))
-    print(bad_ch_report)
+    plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
     # %% Local PCA cleaning of shared artifacts, excluding the bad channels above.
     # Rerun the detectors on the cleaned data; if they flag new channels, add them
@@ -1441,6 +1441,7 @@ if __name__ == "__main__":
         for criterion, names in new_bads.items():
             bad_ch_report[criterion] = bad_ch_report[criterion] + names
         raw_bads.info["bads"] = list(raw_pca.info["bads"])
+    plot_bad_ch_report(raw_bads, bad_ch_report)  # After PCA cleaning
 
     # Whole-recording traces before and after PCA cleaning
     pca_overview_figure, pca_channel_figure = plot_pca_cleaning(raw_bads, raw_pca, pca_details)
