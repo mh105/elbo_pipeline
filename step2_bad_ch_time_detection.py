@@ -1359,5 +1359,6 @@ if __name__ == "__main__":
         raw_bads.info["bads"] = list(raw_pca.info["bads"])
     plot_bad_ch_report(raw_bads, bad_ch_report)
 
-    # %% Whole-recording traces before and after PCA cleaning
+    # Whole-recording traces before and after PCA cleaning
     pca_overview_figure, pca_channel_figure = plot_pca_cleaning(raw_bads, raw_pca, pca_details)
+    raw_bads = raw_pca  # Keep the cleaned data for the next steps
