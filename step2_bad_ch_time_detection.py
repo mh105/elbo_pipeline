@@ -1055,10 +1055,11 @@ def pca_cleaning(
     total removal weight never exceeds one. fade_length may be 0 (hard edges)
     up to half of window_length.
 
-    Exclude existing bads, non-EEG channels, and any all-zero reference, which
-    stay unchanged; otherwise verify average reference as in bad_ch_by_smallness.
-    Run before average referencing, so noise in the recording reference is
-    shared by every channel. Bad labels and annotations are unchanged.
+    Require a supplied or uniquely detected all-zero EEG reference: run this
+    before average referencing, which changes PC1 variance fractions and peaks,
+    so the cutoffs apply to native-reference data only. Exclude existing bads,
+    non-EEG channels, and the reference, which stay unchanged. Bad labels and
+    annotations are unchanged.
 
     Return ch_names, crop-relative start_s/stop_s, first_samp, n_times, sfreq,
     cleaned (bool), removed_pass ("input", "highpass", or "" per window), and for
@@ -1082,7 +1083,7 @@ def pca_cleaning(
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, reference_channel, window_length, 0.25
+        raw, reference_channel, window_length, 0.25, require_reference=True
     )
     fade = int(round(fade_length * raw.info["sfreq"]))
     starts = np.arange(n_windows) * window_samples

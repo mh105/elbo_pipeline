@@ -171,10 +171,9 @@ class TestPCACleaning(unittest.TestCase):
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 step2.pca_cleaning(pca_raw(data), **kwargs)
-        not_referenced = pca_raw(data)
-        not_referenced._data[-1] = 1e-6  # No zero reference, and not average referenced.
-        with self.assertRaisesRegex(ValueError, "average referenced"):
-            step2.pca_cleaning(not_referenced)
+        average = pca_raw(data).set_eeg_reference("average", projection=False, verbose=False)
+        with self.assertRaisesRegex(ValueError, "entirely zero EEG reference"):
+            step2.pca_cleaning(average)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test_raw.fif"
             pca_raw(data).save(path, verbose=False)
