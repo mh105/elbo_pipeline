@@ -83,6 +83,9 @@ if __name__ == "__main__":
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = mne.io.read_raw_eeglab(set_file, preload=True)
     assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
+    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
+    with raw.info._unlock():
+        raw.info["lowpass"] = 100.0
 
     enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
     encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
