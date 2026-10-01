@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
 import mne
 import numpy as np
 
@@ -214,6 +215,11 @@ class TestPCACleaning(unittest.TestCase):
                     self.assertEqual(len(overview.axes), 2)
                     self.assertEqual([ax.get_ylabel().split("\n")[0] for ax in traces.axes],
                                      expected)
+                    shading = [{span.get_facecolor()[:3] for span in ax.patches}
+                               for ax in traces.axes]
+                    self.assertEqual(shading, [{to_rgb("lightsteelblue")}] * 3
+                                     + [{to_rgb("pink")}] * len(bads[:1]))
+                    self.assertEqual("pink" in traces.get_suptitle(), bool(bads))
                 finally:
                     plt.close(overview)
                     plt.close(traces)

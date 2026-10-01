@@ -1207,9 +1207,11 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     vertex (frontal, middle, posterior), then the first bad EEG channel in
     cleaned_raw.info["bads"], which was not cleaned, if there is one. Blue
     shading marks runs of cleaned windows; each run's removal also fades in and
-    out just outside it. In the second figure, finite samples are drawn and gray
-    shading with a legend marks NaN or infinite samples, which can occur only in
-    the bad channel. Times are relative to the cropped Raw.
+    out just outside it. The bad channel's panel shades the same runs pink
+    instead, since nothing was removed there. In the second figure, finite
+    samples are drawn and gray shading with a legend marks NaN or infinite
+    samples, which can occur only in the bad channel. Times are relative to the
+    cropped Raw.
     """
     sfreq = raw.info["sfreq"]
     names = pca_details["ch_names"]
@@ -1234,9 +1236,9 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
             for first, stop in edges]
     window_length = pca_details["stop_s"][0] - pca_details["start_s"][0]
 
-    def shade(ax):
+    def shade(ax, color="lightsteelblue"):
         for start, stop in runs:
-            ax.axvspan(start, stop, color="lightsteelblue", alpha=0.5, zorder=0)
+            ax.axvspan(start, stop, color=color, alpha=0.5, zorder=0)
 
     bin_samples = int(round(0.02 * sfreq))
     n_bins = raw.n_times // bin_samples
@@ -1266,7 +1268,7 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     for row, (ax, (name, label)) in enumerate(zip(axes[:, 0], channels)):
         data = cleaned_raw.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
         ax.plot(cleaned_raw.times, data, color=f"C{row % 10}", linewidth=0.5)
-        shade(ax)
+        shade(ax, "lightsteelblue" if name in names else "pink")
         missing = np.flatnonzero(np.diff(np.r_[False, ~np.isfinite(data), False])).reshape(-1, 2)
         # A 3-pt edge keeps runs far shorter than a pixel visible at full-recording scale.
         for i, (start, stop) in enumerate(missing / sfreq):
@@ -1276,7 +1278,9 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
             ax.legend(loc="upper right")
         ax.set_ylabel(f"{name} ({label})\nVoltage (µV)")
     axes[-1, 0].set(xlabel="Time from cropped recording start (s)", xlim=(0, raw.times[-1]))
-    traces.suptitle("After PCA cleaning, full resolution; blue = cleaned windows")
+    bad_note = "; pink = the same windows in the bad channel, which was not cleaned"
+    traces.suptitle("After PCA cleaning, full resolution; blue = cleaned windows"
+                    + (bad_note if len(channels) > 3 else ""))
     plt.show(block=False)
     return overview, traces
 
