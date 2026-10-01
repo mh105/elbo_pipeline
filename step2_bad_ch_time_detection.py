@@ -1336,8 +1336,8 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
     reference_channel = _reference_channel(raw, "native", reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
-    initial = list(raw.info["bads"])
-    initial_eeg = [name for name in initial if name in eeg_names]
+    orig_bads = list(raw.info["bads"])
+    initial = [name for name in eeg_names if name in orig_bads]
     if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
         raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
 
@@ -1345,13 +1345,13 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
                  bad_ch_by_std, bad_ch_by_BBnoise)
     flagged, history = [], []
     for _ in range(max_iterations):
-        reference = _robust_mean(raw, initial_eeg + flagged)
+        reference = _robust_mean(raw, initial + flagged)
         referenced = raw.copy()
         referenced._data[eeg] -= reference
         report = bad_ch_by_voltage(referenced, plot=False)
         for detector in detectors:
             report.update(detector(referenced))
-        new = [name for name in raw.ch_names
+        new = [name for name in eeg_names
                if name in referenced.info["bads"] and name not in initial]
         history.append(new)
         print(f"Robust average reference pass {len(history)}: bad channels {new}")
@@ -1362,12 +1362,12 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
         raise RuntimeError(f"Robust average reference did not converge in {max_iterations} "
                            f"passes; bad channels flagged per pass: {history}")
 
-    bads = [name for name in eeg_names if name in initial_eeg or name in flagged]
+    bads = [name for name in eeg_names if name in initial or name in flagged]
     raw.info["bads"] = bads
     if bads:
         raw.interpolate_bads(reset_bads=True, on_bad_position="raise", verbose=False)
     raw._data[eeg] -= reference
-    raw.info["bads"] = [name for name in initial if name not in eeg_names]
+    raw.info["bads"] = [name for name in orig_bads if name not in eeg_names]
     if reference_channel not in bads and not np.array_equal(
         raw._data[raw.ch_names.index(reference_channel)], -reference
     ):
