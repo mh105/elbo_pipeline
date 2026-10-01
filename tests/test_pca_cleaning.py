@@ -28,6 +28,20 @@ def pca_raw(data):
     return mne.io.RawArray(data, mne.create_info(names, SFREQ, "eeg"), verbose=False)
 
 
+def with_positions(raw):
+    """Place pca_raw's sensors on a 9-cm sphere; E7 is nearest the vertex after Cz."""
+    # Unit directions: +x right, +y anterior, +z superior.
+    directions = {
+        "E0": [0, 0.8, 0.6], "E1": [-0.6, 0.6, 0.53], "E2": [0.2, 0.1, 0.97],
+        "E3": [-0.8, 0, 0.6], "E4": [0.8, 0, 0.6], "E5": [0, -0.8, 0.6],
+        "E6": [0.6, -0.6, 0.53], "E7": [0, -0.05, 1], "Cz": [0, 0, 1],
+    }
+    return raw.set_montage(mne.channels.make_dig_montage(
+        {name: 0.09 * np.array(d) / np.linalg.norm(d) for name, d in directions.items()},
+        coord_frame="head",
+    ))
+
+
 def noise(seconds=10.5, scale=5e-6, seed=0):
     return np.random.default_rng(seed).normal(0, scale, (8, int(seconds * SFREQ)))
 
@@ -184,17 +198,7 @@ class TestPCACleaning(unittest.TestCase):
                 step2.pca_cleaning(mne.io.read_raw_fif(path, preload=False, verbose=False))
 
     def test_plot_pca_cleaning_shows_frontal_middle_posterior_and_one_bad_channel(self):
-        raw = pca_raw(noise() + burst(int(10.5 * SFREQ), [4]))
-        # Unit directions (+x right, +y anterior, +z superior); bad E7 is nearest the vertex.
-        directions = {
-            "E0": [0, 0.8, 0.6], "E1": [-0.6, 0.6, 0.53], "E2": [0.2, 0.1, 0.97],
-            "E3": [-0.8, 0, 0.6], "E4": [0.8, 0, 0.6], "E5": [0, -0.8, 0.6],
-            "E6": [0.6, -0.6, 0.53], "E7": [0, -0.05, 1], "Cz": [0, 0, 1],
-        }
-        raw.set_montage(mne.channels.make_dig_montage(
-            {name: 0.09 * np.array(d) / np.linalg.norm(d) for name, d in directions.items()},
-            coord_frame="head",
-        ))
+        raw = with_positions(pca_raw(noise() + burst(int(10.5 * SFREQ), [4])))
         for bads, expected in (
             (["E7", "E3"], ["E0 (frontal)", "E2 (middle)", "E5 (posterior)",
                             "E7 (bad, not cleaned)"]),
@@ -213,6 +217,30 @@ class TestPCACleaning(unittest.TestCase):
                 finally:
                     plt.close(overview)
                     plt.close(traces)
+
+    def test_plot_pca_cleaning_draws_finite_samples_and_flags_nonfinite_spans(self):
+        data = noise() + burst(int(10.5 * SFREQ), [4])
+        data[7, 2 * SFREQ:3 * SFREQ] = np.nan
+        data[7, 6 * SFREQ] = np.inf
+        raw = with_positions(pca_raw(data))
+        raw.info["bads"] = ["E7"]
+        cleaned = raw.copy()
+        details = step2.pca_cleaning(cleaned)
+        with patch.object(step2.plt, "show"):
+            overview, traces = step2.plot_pca_cleaning(raw, cleaned, details)
+        try:
+            *good_axes, bad_ax = traces.axes
+            self.assertTrue(all(ax.get_legend() is None for ax in good_axes))
+            self.assertEqual([text.get_text() for text in bad_ax.get_legend().get_texts()],
+                             ["NaN/inf samples (not drawn)"])
+            gray = [span for span in bad_ax.patches if span.get_facecolor()[:3] == (0.6, 0.6, 0.6)]
+            np.testing.assert_allclose([span.get_x() for span in gray], [2.0, 6.0])
+            np.testing.assert_allclose([span.get_width() for span in gray], [1.0, 1 / SFREQ])
+            drawn = bad_ax.lines[0].get_ydata()
+            self.assertEqual(np.isfinite(drawn).sum(), data.shape[1] - SFREQ - 1)
+        finally:
+            plt.close(overview)
+            plt.close(traces)
 
     def test_plot_pca_cleaning_requires_sensor_positions(self):
         raw = pca_raw(noise())

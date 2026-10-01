@@ -1207,7 +1207,9 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     vertex (frontal, middle, posterior), then the first bad EEG channel in
     cleaned_raw.info["bads"], which was not cleaned, if there is one. Blue
     shading marks runs of cleaned windows; each run's removal also fades in and
-    out just outside it. Times are relative to the cropped Raw.
+    out just outside it. In the second figure, finite samples are drawn and gray
+    shading with a legend marks NaN or infinite samples, which can occur only in
+    the bad channel. Times are relative to the cropped Raw.
     """
     sfreq = raw.info["sfreq"]
     names = pca_details["ch_names"]
@@ -1265,6 +1267,13 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
         data = cleaned_raw.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
         ax.plot(cleaned_raw.times, data, color=f"C{row % 10}", linewidth=0.5)
         shade(ax)
+        missing = np.flatnonzero(np.diff(np.r_[False, ~np.isfinite(data), False])).reshape(-1, 2)
+        # A 3-pt edge keeps runs far shorter than a pixel visible at full-recording scale.
+        for i, (start, stop) in enumerate(missing / sfreq):
+            ax.axvspan(start, stop, color="0.6", alpha=0.6, linewidth=3, zorder=0,
+                       label="_nolegend_" if i else "NaN/inf samples (not drawn)")
+        if len(missing):
+            ax.legend(loc="upper right")
         ax.set_ylabel(f"{name} ({label})\nVoltage (µV)")
     axes[-1, 0].set(xlabel="Time from cropped recording start (s)", xlim=(0, raw.times[-1]))
     traces.suptitle("After PCA cleaning, full resolution; blue = cleaned windows")
