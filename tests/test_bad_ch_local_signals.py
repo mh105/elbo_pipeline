@@ -108,9 +108,9 @@ class TestBadChBySmallness(unittest.TestCase):
                 np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_custom_parameters(self):
-        variances = np.ones((4, 9))
-        variances[:2, 0] = 0.01
-        variances[:, -1] = 100
+        # E0 has robust z of about -2.5 in the first two windows.
+        variances = np.tile([1.0, 0.9, 1.1, 0.95, 1.05, 1.0, 0.85, 1.15, 100], (4, 1))
+        variances[:2, 0] = 0.6
         for kwargs, expected in (
             ({"window_length": 1.0}, ["E0", "M0"]),
             ({"window_length": 1.0, "occurrence_cutoff": 0.5}, []),
@@ -120,6 +120,12 @@ class TestBadChBySmallness(unittest.TestCase):
                 raw = make_raw(variances, window_samples=100, average=True)
                 self.assertEqual(bad_ch_by_smallness(raw, **kwargs), {"smallness": expected})
                 self.assertEqual(raw.info["bads"], expected)
+
+    def test_strong_artifact_channels_do_not_inflate_baseline(self):
+        # A mean/std baseline keeps the three 100s and its lower cutoff goes negative.
+        variances = np.tile([0.6, 0.9, 1.1, 0.95, 1.05, 1.0, 100, 100, 100], (2, 1))
+        raw = make_raw(variances, average=True)
+        self.assertEqual(bad_ch_by_smallness(raw), {"smallness": ["E0", "M0"]})
 
     def test_bads_auxiliary_and_reference_are_excluded(self):
         variances = np.ones((2, 11))

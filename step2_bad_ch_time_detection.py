@@ -238,13 +238,16 @@ def bad_ch_by_smallness(
     this Raw; window_length is in seconds, rounded to samples. Ignore the trailing
     partial window; annotations do not exclude any samples.
 
-    In each window, compute each channel's variance (ddof=0). Remove values
-    strictly above mean + std_cutoff * std, then recompute mean/std on the
-    retained variances (ddof=0). Flag retained values strictly below the new
-    mean - std_cutoff * std. Upper-tail removal is a single pass and does not
-    itself flag a channel. Return channels flagged in strictly more than
-    occurrence_cutoff of complete windows, and add them to raw.info["bads"].
-    Preserve existing labels without duplicates; data/annotations are unchanged.
+    In each window, compute each channel's variance (ddof=0) and its robust z
+    across channels, (variance - median) / (1.4826 * MAD), flooring a zero
+    scale at machine epsilon. Remove values with robust z strictly above
+    std_cutoff, then recompute the median and MAD on the retained variances.
+    Flag retained values with new robust z strictly below -std_cutoff.
+    Upper-tail removal is a single pass, keeps strong-artifact channels from
+    inflating the MAD, and does not itself flag a channel. Return channels
+    flagged in strictly more than occurrence_cutoff of complete windows, and
+    add them to raw.info["bads"]. Preserve existing labels without duplicates;
+    data/annotations are unchanged.
 
     With return_details=True, return (report, details). Common fields follow
     bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
@@ -273,10 +276,9 @@ def bad_ch_by_smallness(
         if not np.isfinite(data).all():
             raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
         variances = data.var(axis=1)
-        high_cutoff = variances.mean() + std_cutoff * variances.std()
+        high_cutoff = _robust_z_value(variances, std_cutoff)
         keep = variances <= high_cutoff
-        retained = variances[keep]
-        low_cutoff = retained.mean() - std_cutoff * retained.std()
+        low_cutoff = _robust_z_value(variances[keep], -std_cutoff)
         violates = keep & (variances < low_cutoff)
         counts += violates
         if return_details:
@@ -465,6 +467,11 @@ def _robust_channel_z(values, use_iqr=False):
     center = np.median(values, axis=0)
     scale = 0.7413 * _iqr(values) if use_iqr else 1.4826 * _mad(values)
     return (values - center) / np.maximum(scale, np.finfo(float).eps)
+
+
+def _robust_z_value(values, z):
+    """Value at robust z across channels, with _robust_channel_z's MAD scale."""
+    return np.median(values) + z * max(1.4826 * _mad(values), np.finfo(float).eps)
 
 
 def _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff):
