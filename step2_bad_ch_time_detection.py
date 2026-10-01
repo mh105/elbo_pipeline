@@ -993,6 +993,8 @@ def plot_bad_ch_report(raw, bad_ch_report):
     detections from the legend. Non-EEG entries are not plotted. Unflagged
     sensors are gray, and raw and bad_ch_report are unchanged.
     """
+    print(bad_ch_report)
+
     picks = mne.pick_types(raw.info, eeg=True, exclude=[])
     info = mne.pick_info(raw.info, picks)
     info["bads"] = []  # Category rings provide the bad-channel colors.
@@ -1317,7 +1319,6 @@ if __name__ == "__main__":
         for criterion, names in new_bads.items():
             bad_ch_report[criterion] = bad_ch_report[criterion] + names
         raw_bads.info["bads"] = list(raw_pca.info["bads"])
-    print(bad_ch_report)
     plot_bad_ch_report(raw_bads, bad_ch_report)
 
     # %% Whole-recording traces before and after PCA cleaning
