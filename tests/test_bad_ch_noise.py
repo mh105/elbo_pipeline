@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import matplotlib.pyplot as plt
 import mne
 import numpy as np
 
@@ -159,6 +160,24 @@ class TestVoltageDetection(unittest.TestCase):
         self.assertEqual(raw.info["bads"], ["E0"])
         self.assertEqual(raw.annotations, annotations)
         np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_plot_omits_existing_bads(self):
+        raw = make_raw(np.ones((3, 100)) * 1e-6, sfreq=100)
+        raw._data[0] = 300e-6  # Detected by this call: plotted and labeled.
+        raw._data[1] = 5000e-6  # Existing bad: neither plotted nor used for the y-axis.
+        raw.info["bads"] = ["E1"]
+        with patch.object(step2.plt, "show"):
+            self.assertEqual(step2.bad_ch_by_voltage(raw), {"voltage": ["E0"]})
+        fig = plt.gcf()
+        try:
+            ax = fig.axes[0]
+            traces = [line for line in ax.lines if len(line.get_ydata()) == raw.n_times]
+            self.assertEqual(len(traces), 3)  # E0, E2, and Cz.
+            self.assertTrue(all(line.get_ydata().max() < 1000 for line in traces))
+            self.assertLess(ax.get_ylim()[1], 1000)
+            self.assertEqual([text.get_text() for text in ax.get_legend().get_texts()], ["E0"])
+        finally:
+            plt.close(fig)
 
 
 class TestRobustMetrics(unittest.TestCase):

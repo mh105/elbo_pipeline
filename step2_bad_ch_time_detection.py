@@ -490,11 +490,12 @@ def bad_ch_by_voltage(
     Accept an all-zero native reference, otherwise verify average reference
     as in bad_ch_by_smallness.
 
-    Show all channels over the full time range, including existing bads,
-    the reference, and masked samples. Plot in microvolts with dotted cutoff
+    Show all channels except existing bads over the full time range, including
+    the reference and masked samples. Plot in microvolts with dotted cutoff
     lines and a different color per channel. Highlight and label only this
     call's detections in the legend. Shade temporary voltage masks in light
-    gray and scale the y-axis from finite samples outside all BAD annotations.
+    gray and scale the y-axis from the plotted channels' finite samples outside
+    all BAD annotations.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -519,6 +520,8 @@ def bad_ch_by_voltage(
     colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(raw.ch_names)))
     ymin, ymax = np.inf, -np.inf
     for i, name in enumerate(raw.ch_names):
+        if name in masked.info["bads"]:  # Bads before this call.
+            continue
         data_uv = raw.get_data(picks=[i], reject_by_annotation=None)[0] * 1e6
         retained_uv = masked.get_data(
             picks=[i], reject_by_annotation="omit", verbose=False
