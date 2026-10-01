@@ -101,7 +101,7 @@ class TestPCACleaning(unittest.TestCase):
                 )
                 self.assertEqual(details["input"]["flagged"][4], flagged)
 
-    def test_highpass_pass_weights_are_applied_to_input_data(self):
+    def test_highpass_pass_removes_pc1_from_highpassed_data_only(self):
         background = noise(scale=100e-6)
         spike = burst(background.shape[1], [2], amplitude=150e-6)
         data = background + spike
@@ -117,8 +117,11 @@ class TestPCACleaning(unittest.TestCase):
         start, stop, removal = details["removed_spans"][0]
         window = slice(2 * SFREQ - start, 3 * SFREQ - start)
         np.testing.assert_allclose(
-            removal[:, window], np.outer(u, u) @ data[:, 2 * SFREQ:3 * SFREQ], atol=1e-15
+            removal[:, window], np.outer(u, u) @ highpassed[:, 2 * SFREQ:3 * SFREQ], atol=1e-15
         )
+        # The background the filter rejected is kept, including its part along u.
+        np.testing.assert_allclose(raw.get_data()[:8, 2 * SFREQ:3 * SFREQ],
+                                   background[:, 2 * SFREQ:3 * SFREQ], rtol=0, atol=1e-7)
 
     def test_fades_and_hand_overs_keep_total_removal_weight_at_most_one(self):
         background = noise(scale=1e-6)

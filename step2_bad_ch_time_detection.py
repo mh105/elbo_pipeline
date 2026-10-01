@@ -1043,10 +1043,12 @@ def pca_cleaning(
     own data exceeds amplitude_floor_uv on at least one channel, so small shared
     signals, such as rhythms under the reference, are kept.
 
-    Removal always acts on the original input data and removes one PC1 per
-    cleaned window: the input pass's weights u when that pass qualifies,
-    otherwise the high-pass weights, as u u^T x(t). Window means are not
-    subtracted, so the artifact's average level is removed with its waveform.
+    Each cleaned window subtracts one PC1 back-projection from the input data.
+    When the input pass qualifies, it is u u^T x(t) with that pass's weights and
+    the input data; otherwise it is u_hp u_hp^T x_hp(t) with the high-pass
+    weights and high-passed data, so activity the filter rejects, including the
+    artifact's slow part, is kept. Window means are not subtracted, so an
+    input-pass removal includes the artifact's average level.
     Consecutive cleaned windows form runs. A run's removal fades in (raised
     cosine) over the fade_length seconds before its first window and out over
     the fade_length seconds after its last. Between consecutive cleaned windows,
@@ -1117,7 +1119,6 @@ def pca_cleaning(
             details[name]["pc1_variance_fraction"][window] = singular[0] ** 2 / np.sum(singular ** 2)
             details[name]["pc1_peak_uv"][window] = np.abs(np.outer(pc1, pc1 @ data)).max() * 1e6
             details[name]["pc1_loadings"][window] = pc1
-    del highpassed
     for name in ("input", "highpass"):
         passed = details[name]
         passed["flagged"] = passed["pc1_variance_fraction"] >= variance_cutoff
@@ -1143,14 +1144,16 @@ def pca_cleaning(
         span_stop = min(stops[last] + fade, raw.n_times)
         samples = np.arange(span_start, span_stop)
         data = raw._data[picks, span_start:span_stop]
+        sources = {"input": data, "highpass": highpassed[:, span_start:span_stop]}
         removal = np.zeros_like(data)
         for window in range(first, last + 1):
             rise = (starts[window] - fade, fade if window == first else 2 * fade)
             fall = (stops[window] if window == last else stops[window] - fade,
                     fade if window == last else 2 * fade)
             weight = ramp(samples, *rise) * (1 - ramp(samples, *fall))
-            pc1 = details[details["removed_pass"][window]]["pc1_loadings"][window]
-            removal += weight * np.outer(pc1, pc1 @ data)
+            name = details["removed_pass"][window]
+            pc1 = details[name]["pc1_loadings"][window]
+            removal += weight * np.outer(pc1, pc1 @ sources[name])
         raw._data[picks, span_start:span_stop] = data - removal
         if return_removed:
             details["removed_spans"].append((span_start, span_stop, removal))
