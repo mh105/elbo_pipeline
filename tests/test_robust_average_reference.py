@@ -78,6 +78,25 @@ class TestRobustAverageReference(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(picks="EOG"), native.get_data(picks="EOG"))
         self.assertIsNone(step2._reference_channel(raw, "average"))
 
+    def test_details_describe_each_pass_without_changing_the_result(self):
+        raw = make_native_raw(noisy="O1")
+        expected = raw.copy()
+        expected_result = step2.robust_average_reference_inplace(expected)
+        *result, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        self.assertEqual(result[:2], list(expected_result[:2]))
+        np.testing.assert_array_equal(result[2], expected_result[2])
+        np.testing.assert_array_equal(raw.get_data(), expected.get_data())
+        self.assertEqual([d["interpolated"] for d in details], [[], ["O1"]])
+        self.assertEqual([d["flagged"] for d in details], [["O1"], ["O1"]])
+        for criterion in ("voltage", "smallness", "HFnoise", "pop", "std", "BBnoise"):
+            self.assertIn(criterion, details[-1])
+        # std flags O1, so BBnoise, which runs after it in the pass, no longer evaluates it.
+        self.assertIn("O1", details[-1]["std"]["ch_names"])
+        self.assertNotIn("O1", details[-1]["BBnoise"]["ch_names"])
+        voltage = details[-1]["voltage"]
+        self.assertEqual(len(voltage["exceed_fraction"]), len(voltage["ch_names"]))
+        self.assertTrue((voltage["exceed_fraction"] <= 0.25).all())
+
     def test_stops_when_a_pass_repeats_and_drops_unflagged_channels(self):
         # F4 is flagged once, then not again: no union, so it is not interpolated.
         for schedule, passes, final in (([[]], 1, []),

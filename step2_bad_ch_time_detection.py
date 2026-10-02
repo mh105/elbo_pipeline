@@ -31,6 +31,7 @@ robust average reference (the mean with bad channels interpolated), interpolates
 the bad channels, and subtracts the final robust mean.
 """
 
+from functools import partial
 from pathlib import Path
 import matplotlib.pyplot as plt
 import mne
@@ -486,6 +487,7 @@ def bad_ch_by_voltage(
     occurrence_cutoff=0.25,
     *,
     plot=True,
+    return_details=False,
 ):
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
@@ -504,6 +506,10 @@ def bad_ch_by_voltage(
     only this call's detections in the legend. Shade temporary voltage masks in
     light gray and scale the y-axis from the plotted channels' finite samples
     outside all BAD annotations.
+
+    With return_details=True, return (report, details): ch_names of the
+    evaluated channels and exceed_fraction, each one's fraction of retained
+    samples beyond +/-voltage_threshold_uv.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -514,16 +520,20 @@ def bad_ch_by_voltage(
     picks = mne.pick_types(
         masked.info, eeg=True, exclude=exclude
     )
-    bad_names = []
-    for i in picks:
+    fractions = np.empty(len(picks))
+    for row, i in enumerate(picks):
         data = masked.get_data(picks=[i], reject_by_annotation="omit", verbose=False)[0]
         if data.size == 0:
             raise ValueError("No unmasked samples remain for channel detection.")
-        if np.mean(np.abs(data) > voltage_threshold_uv / 1e6) > occurrence_cutoff:
-            bad_names.append(raw.ch_names[i])
+        fractions[row] = np.mean(np.abs(data) > voltage_threshold_uv / 1e6)
+    bad_names = [raw.ch_names[i] for i in picks[fractions > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    result = {"voltage": bad_names}
+    if return_details:
+        result = result, {"ch_names": [raw.ch_names[i] for i in picks],
+                          "exceed_fraction": fractions}
     if not plot:
-        return {"voltage": bad_names}
+        return result
 
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
     times = raw.times
@@ -556,7 +566,7 @@ def bad_ch_by_voltage(
     if bad_names:
         ax.legend(title="Flagged channels", loc="upper left", bbox_to_anchor=(1.01, 1))
     plt.show()
-    return {"voltage": bad_names}
+    return result
 
 
 def bad_ch_by_std(
@@ -1300,7 +1310,9 @@ def _robust_mean(raw, bads):
     return interpolated._data[eeg].mean(axis=0)
 
 
-def robust_average_reference_inplace(raw, reference_channel=None, max_iterations=10):
+def robust_average_reference_inplace(
+    raw, reference_channel=None, max_iterations=10, *, return_details=False,
+):
     """Robust-average-reference preloaded raw in place; return (report, bads, reference).
 
     Require the native reference, as in bad_ch_by_flatline. Existing bads stay
@@ -1328,6 +1340,13 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
     Raw order (existing and new bads), and the subtracted robust mean in volts,
     shape (n_times,). Adding it back to every EEG channel restores the native
     reference.
+
+    With return_details=True, also return a list with one dict per pass:
+    interpolated (the channels interpolated for its robust mean), flagged (the
+    channels it flagged), and each criterion's details from its detector with
+    return_details=True. Each detector's details cover the channels it
+    evaluated, without the existing bads and the channels flagged before it in
+    that pass. A non-bad channel's final trace in raw is the signal they saw.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -1341,18 +1360,24 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
     if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
         raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
 
-    detectors = (bad_ch_by_smallness, bad_ch_by_HFnoise, bad_ch_by_pop,
-                 bad_ch_by_std, bad_ch_by_BBnoise)
-    flagged, history = [], []
+    detectors = (partial(bad_ch_by_voltage, plot=False), bad_ch_by_smallness,
+                 bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise)
+    flagged, history, details = [], [], []
     for _ in range(max_iterations):
         reference = _robust_mean(raw, initial + flagged)
         referenced = raw.copy()
         referenced._data[eeg] -= reference
-        report = bad_ch_by_voltage(referenced, plot=False)
+        report, pass_details = {}, {"interpolated": initial + flagged}
         for detector in detectors:
-            report.update(detector(referenced))
+            result = detector(referenced, return_details=return_details)
+            if return_details:
+                result, detector_details = result
+                pass_details[next(iter(result))] = detector_details
+            report.update(result)
         new = [name for name in eeg_names
                if name in referenced.info["bads"] and name not in initial]
+        pass_details["flagged"] = new
+        details.append(pass_details)
         history.append(new)
         print(f"Robust average reference pass {len(history)}: bad channels {new}")
         if set(new) == set(flagged):
@@ -1373,6 +1398,8 @@ def robust_average_reference_inplace(raw, reference_channel=None, max_iterations
     ):
         raise RuntimeError(f"Reference channel {reference_channel} does not hold minus the "
                            "robust mean after re-referencing.")
+    if return_details:
+        return report, bads, reference, details
     return report, bads, reference
 
 
