@@ -233,7 +233,7 @@ def _finish_window_details(details, window_samples):
 def bad_ch_by_smallness(
     raw,
     window_length=2.0,
-    std_cutoff=2.0,
+    robust_z_cutoff=2.0,
     occurrence_cutoff=0.25,
     *,
     return_details=False,
@@ -249,13 +249,13 @@ def bad_ch_by_smallness(
     In each window, compute each channel's variance (ddof=0) and its robust z
     across channels, (variance - median) / (1.4826 * MAD), flooring a zero
     scale at machine epsilon. Remove values with robust z strictly above
-    std_cutoff, then recompute the median and MAD on the retained variances.
-    Flag retained values with new robust z strictly below -std_cutoff.
-    Upper-tail removal is a single pass, keeps strong-artifact channels from
-    inflating the MAD, and does not itself flag a channel. Return channels
-    flagged in strictly more than occurrence_cutoff of complete windows, and
-    add them to raw.info["bads"]. Preserve existing labels without duplicates;
-    data/annotations are unchanged.
+    robust_z_cutoff, then recompute the median and MAD on the retained
+    variances. Flag retained values with new robust z strictly below
+    -robust_z_cutoff. Upper-tail removal is a single pass, keeps
+    strong-artifact channels from inflating the MAD, and does not itself flag
+    a channel. Return channels flagged in strictly more than occurrence_cutoff
+    of complete windows, and add them to raw.info["bads"]. Preserve existing
+    labels without duplicates; data/annotations are unchanged.
 
     With return_details=True, return (report, details). Common fields follow
     bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
@@ -264,8 +264,8 @@ def bad_ch_by_smallness(
     (channels, windows); upper_cutoff_uv2 and lower_cutoff_uv2 have one value
     per window. Variances and cutoffs are in squared microvolts.
     """
-    if not np.isfinite(std_cutoff) or std_cutoff <= 0:
-        raise ValueError("std_cutoff must be finite and greater than 0.")
+    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
+        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average"
     )
@@ -284,9 +284,9 @@ def bad_ch_by_smallness(
         if not np.isfinite(data).all():
             raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
         variances = data.var(axis=1)
-        high_cutoff = _robust_z_value(variances, std_cutoff)
+        high_cutoff = _robust_z_value(variances, robust_z_cutoff)
         keep = variances <= high_cutoff
-        low_cutoff = _robust_z_value(variances[keep], -std_cutoff)
+        low_cutoff = _robust_z_value(variances[keep], -robust_z_cutoff)
         violates = keep & (variances < low_cutoff)
         counts += violates
         if return_details:
@@ -777,7 +777,7 @@ def bad_ch_by_HFnoise(
 def bad_ch_by_BBnoise(
     raw,
     window_length=2.0,
-    robust_z_cutoff=3.0,
+    robust_z_cutoff=5.0,
     min_bad_bands=3,
     occurrence_cutoff=0.25,
     *,

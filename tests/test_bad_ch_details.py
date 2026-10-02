@@ -138,7 +138,7 @@ class TestWindowDetails(unittest.TestCase):
                             self.assertEqual(details[metric].shape, (*details["violates"].shape, 5))
                             self.assertTrue(np.isnan(details[metric][:, [1, 2]]).all())
                         band_flags = details["band_violates"][:, [0, 3]]
-                        np.testing.assert_array_equal(band_flags, details["robust_z"][:, [0, 3]] > 3)
+                        np.testing.assert_array_equal(band_flags, details["robust_z"][:, [0, 3]] > 5)
                         np.testing.assert_array_equal(details["n_bad_bands"][:, [0, 3]], band_flags.sum(axis=2))
                         np.testing.assert_array_equal(details["violates"][:, [0, 3]], band_flags.sum(axis=2) >= 3)
 

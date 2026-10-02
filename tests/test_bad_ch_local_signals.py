@@ -118,7 +118,7 @@ class TestBadChBySmallness(unittest.TestCase):
         for kwargs, expected in (
             ({"window_length": 1.0}, ["E0", "M0"]),
             ({"window_length": 1.0, "occurrence_cutoff": 0.5}, []),
-            ({"window_length": 1.0, "std_cutoff": 3.0}, []),
+            ({"window_length": 1.0, "robust_z_cutoff": 3.0}, []),
         ):
             with self.subTest(kwargs=kwargs):
                 raw = make_raw(variances, window_samples=100, average=True)
@@ -255,8 +255,10 @@ class TestWindowRules(unittest.TestCase):
                     raw.info["bads"] = ["M0"]
                 detector(raw)
         for cutoff in (0, -1, np.nan, np.inf):
-            with self.subTest(cutoff=cutoff), self.assertRaisesRegex(ValueError, "std_cutoff"):
-                bad_ch_by_smallness(make_raw([[1, 1]]), std_cutoff=cutoff)
+            with self.subTest(cutoff=cutoff), self.assertRaisesRegex(
+                ValueError, "robust_z_cutoff"
+            ):
+                bad_ch_by_smallness(make_raw([[1, 1]]), robust_z_cutoff=cutoff)
 
 
 if __name__ == "__main__":
