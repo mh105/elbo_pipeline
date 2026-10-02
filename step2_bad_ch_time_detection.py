@@ -1337,15 +1337,15 @@ def robust_average_reference_inplace(
     channels, including the native reference (all zero) and the interpolated
     channels. Subtract this mean from every EEG channel of another copy, whose
     bad channels are not interpolated, and run bad_ch_by_voltage (no plot),
-    bad_ch_by_smallness, bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, and
-    bad_ch_by_BBnoise on it in that order. Each pass starts from the existing
-    bads, and each detector also excludes the channels flagged before it in the
-    same pass. Stop when a pass flags exactly the channels its robust mean
-    interpolated. If a pass instead flags the set an earlier robust mean
-    interpolated (none for the first), the passes would cycle: warn, treat
-    every channel flagged within the cycle as bad, and recompute the robust
-    mean with them interpolated. Raise if neither has happened within
-    max_iterations passes.
+    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std, and
+    bad_ch_by_BBnoise on it in that order, the detectors that require average
+    reference last. Each pass starts from the existing bads, and each detector
+    also excludes the channels flagged before it in the same pass. Stop when a
+    pass flags exactly the channels its robust mean interpolated. If a pass
+    instead flags the set an earlier robust mean interpolated (none for the
+    first), the passes would cycle: warn, treat every channel flagged within
+    the cycle as bad, and recompute the robust mean with them interpolated.
+    Raise if neither has happened within max_iterations passes.
 
     Then interpolate every bad EEG channel in raw, subtract the last robust
     mean from every EEG channel, and remove the EEG channels from
@@ -1378,8 +1378,8 @@ def robust_average_reference_inplace(
     if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
         raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
 
-    detectors = (partial(bad_ch_by_voltage, plot=False), bad_ch_by_smallness,
-                 bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise)
+    detectors = (partial(bad_ch_by_voltage, plot=False), bad_ch_by_HFnoise, bad_ch_by_pop,
+                 bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise)
     flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
