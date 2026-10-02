@@ -1378,12 +1378,16 @@ def robust_average_reference_inplace(
     if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
         raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
 
-    detectors = (partial(bad_ch_by_voltage, plot=False),
-                 bad_ch_by_HFnoise,
-                 bad_ch_by_pop,
-                 bad_ch_by_smallness,
-                 bad_ch_by_std,
-                 bad_ch_by_BBnoise)
+    detectors = (
+        # the first three can also run on native reference
+        partial(bad_ch_by_voltage, plot=False),
+        bad_ch_by_HFnoise,
+        bad_ch_by_pop,
+        # the next three require average reference
+        bad_ch_by_smallness,
+        bad_ch_by_std,
+        bad_ch_by_BBnoise
+    )
     flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
