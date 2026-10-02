@@ -366,9 +366,27 @@ class TestRobustMetrics(unittest.TestCase):
                 z = np.zeros(18 if detector is step2.bad_ch_by_std else 9)
                 z[:3] = [-10, 5, 5.001]
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
+                # Isolate the occurrence rule from std's median-z rule.
+                kwargs = {"median_z_cutoff": 1e9} if detector is step2.bad_ch_by_std else {}
                 with patch.object(step2, "_robust_channel_z", return_value=z):
-                    self.assertEqual(detector(raw), {criterion: ["E2"]})
+                    self.assertEqual(detector(raw, **kwargs), {criterion: ["E2"]})
                 self.assertEqual(raw.info["bads"], ["E2"])
+
+    def test_std_also_flags_a_median_z_strictly_above_its_cutoff(self):
+        raw = std_raw(n_bad=0)
+        z = np.zeros(18)
+        z[3:5] = [2, 2.001]  # Every window, so below robust_z_cutoff but at the median.
+        with patch.object(step2, "_robust_channel_z", return_value=z):
+            report, details = step2.bad_ch_by_std(raw, return_details=True)
+            self.assertEqual(report, {"std": ["E4"]})
+            np.testing.assert_array_equal(details["median_robust_z"], z)
+            self.assertEqual(step2.bad_ch_by_std(std_raw(n_bad=0), median_z_cutoff=2.001),
+                             {"std": []})
+        for cutoff in (0, -1, np.nan, np.inf):
+            with self.subTest(cutoff=cutoff), self.assertRaisesRegex(
+                ValueError, "median_z_cutoff"
+            ):
+                step2.bad_ch_by_std(std_raw(), median_z_cutoff=cutoff)
 
     def test_hf_ratio_tracks_hf_relative_to_lf_and_ignores_dc_offset(self):
         sfreq = 1000
@@ -447,8 +465,10 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 with self.subTest(detector=detector.__name__, cutoff=cutoff):
                     raw = factory(window_length=1)
                     criterion = detector.__name__.removeprefix("bad_ch_by_")
+                    # Two of four windows are bad, which also lifts std's median z.
+                    kwargs = {"median_z_cutoff": 1e9} if detector is step2.bad_ch_by_std else {}
                     self.assertEqual(
-                        detector(raw, window_length=1, occurrence_cutoff=cutoff),
+                        detector(raw, window_length=1, occurrence_cutoff=cutoff, **kwargs),
                         {criterion: expected if cutoff == 0.25 else []},
                     )
                     self.assertEqual(raw.info["bads"], expected if cutoff == 0.25 else [])
