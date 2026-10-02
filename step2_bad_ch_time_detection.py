@@ -1527,6 +1527,4 @@ if __name__ == "__main__":
 
     # Band-power topomaps after robust average referencing (bads interpolated). The
     # median Welch PSD shows persistent channel power; brief large events barely count.
-    psd_topomap_figure = raw_bads.compute_psd(
-        fmax=45.0, average="median", verbose=False
-    ).plot_topomap()
+    psd_topomap_figure = raw_bads.compute_psd(fmax=45.0, average="median", verbose=False).plot_topomap()
