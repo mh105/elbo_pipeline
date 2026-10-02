@@ -1,3 +1,4 @@
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -116,12 +117,37 @@ class TestRobustAverageReference(unittest.TestCase):
                                            rtol=0, atol=1e-15)
                 np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
 
-    def test_raises_without_changes_if_passes_keep_changing(self):
+    def test_cycles_mark_every_channel_flagged_in_the_cycle_as_bad(self):
+        # schedule, passes run, channels treated as bad, flipping channels, repeated pass
+        for schedule, passes, final, flipping, repeated in (
+            ([["F3", "F4"], ["F3"], ["F3", "F4"]], 3, ["F3", "F4"], ["F4"], 2),
+            ([["F3"], ["F4"], ["F3"]], 3, ["F3", "F4"], ["F3", "F4"], 2),
+            ([["F3"], []], 2, ["F3"], ["F3"], 1),  # Back to the first mean's empty set.
+        ):
+            with self.subTest(schedule=schedule):
+                raw = make_native_raw()
+                native = raw.copy()
+                detector, calls = scheduled_detector(schedule)
+                with patch.object(step2, "bad_ch_by_HFnoise", detector), self.assertWarnsRegex(
+                    UserWarning, rf"pass {passes + 1} would repeat pass {repeated}, with "
+                                 rf"{re.escape(repr(flipping))} flipping.*as bad: "
+                                 rf"{re.escape(repr(final))}"
+                ):
+                    report, bads, reference = step2.robust_average_reference_inplace(raw)
+                self.assertEqual(len(calls), passes)
+                self.assertEqual(report["HFnoise"], final)
+                self.assertEqual(bads, final)
+                expected, mean = interpolated_average(native, final)
+                np.testing.assert_allclose(raw.get_data(), expected.get_data(),
+                                           rtol=0, atol=1e-15)
+                np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
+
+    def test_raises_without_changes_if_passes_neither_converge_nor_cycle(self):
         raw = make_native_raw()
         original = raw.get_data().copy()
-        detector, calls = scheduled_detector([["F3"], ["F4"], ["F3"], ["F4"]])
+        detector, calls = scheduled_detector([["F3"], ["F4"], ["Fz"], ["Pz"]])
         with patch.object(step2, "bad_ch_by_HFnoise", detector), self.assertRaisesRegex(
-            RuntimeError, r"did not converge in 3 passes.*\[\['F3'\], \['F4'\], \['F3'\]\]"
+            RuntimeError, r"did not converge in 3 passes.*\[\['F3'\], \['F4'\], \['Fz'\]\]"
         ):
             step2.robust_average_reference_inplace(raw, max_iterations=3)
         self.assertEqual(len(calls), 3)

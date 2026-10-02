@@ -33,6 +33,7 @@ the bad channels, and subtracts the final robust mean.
 
 from functools import partial
 from pathlib import Path
+import warnings
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
@@ -1340,7 +1341,11 @@ def robust_average_reference_inplace(
     bad_ch_by_BBnoise on it in that order. Each pass starts from the existing
     bads, and each detector also excludes the channels flagged before it in the
     same pass. Stop when a pass flags exactly the channels its robust mean
-    interpolated; raise if that has not happened within max_iterations passes.
+    interpolated. If a pass instead flags the set an earlier robust mean
+    interpolated (none for the first), the passes would cycle: warn, treat
+    every channel flagged within the cycle as bad, and recompute the robust
+    mean with them interpolated. Raise if neither has happened within
+    max_iterations passes.
 
     Then interpolate every bad EEG channel in raw, subtract the last robust
     mean from every EEG channel, and remove the EEG channels from
@@ -1348,7 +1353,8 @@ def robust_average_reference_inplace(
     unchanged. Unless the reference channel was interpolated, verify that it
     now holds exactly minus the robust mean.
 
-    Return the last pass's {criterion: names}, the interpolated EEG channels in
+    Return the last pass's {criterion: names} (after a cycle, each criterion's
+    channels across the cycling passes), the interpolated EEG channels in
     Raw order (existing and new bads), and the subtracted robust mean in volts,
     shape (n_times,). Adding it back to every EEG channel restores the native
     reference.
@@ -1374,8 +1380,9 @@ def robust_average_reference_inplace(
 
     detectors = (partial(bad_ch_by_voltage, plot=False), bad_ch_by_smallness,
                  bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise)
-    flagged, history, details = [], [], []
+    flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
+        used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
         reference = _robust_mean(raw, initial + flagged)
         referenced = raw.copy()
         referenced._data[eeg] -= reference
@@ -1391,8 +1398,24 @@ def robust_average_reference_inplace(
         pass_details["flagged"] = new
         details.append(pass_details)
         history.append(new)
+        reports.append(report)
         print(f"Robust average reference pass {len(history)}: bad channels {new}")
         if set(new) == set(flagged):
+            break
+        start = next((p for p, earlier in enumerate(used[:-1]) if set(earlier) == set(new)), None)
+        if start is not None:
+            # The next pass would repeat pass start + 1, so used[start:] keeps recurring.
+            cycle = used[start:]
+            flagged = [name for name in eeg_names if any(name in names for names in cycle)]
+            flipping = [name for name in flagged if not all(name in names for names in cycle)]
+            cycle_reports = reports[max(start, 1) - 1:]
+            report = {criterion: [name for name in eeg_names
+                                  if any(name in r[criterion] for r in cycle_reports)]
+                      for criterion in report}
+            warnings.warn(f"Robust average reference cycled: pass {len(history) + 1} would "
+                          f"repeat pass {start + 1}, with {flipping} flipping. Treating every "
+                          f"channel flagged in the cycle as bad: {flagged}.", stacklevel=2)
+            reference = _robust_mean(raw, initial + flagged)
             break
         flagged = new
     else:
