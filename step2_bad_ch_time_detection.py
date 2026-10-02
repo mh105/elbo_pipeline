@@ -1453,3 +1453,6 @@ if __name__ == "__main__":
     for criterion, names in robust_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
     plot_bad_ch_report(raw_bads, bad_ch_report)
+
+    # Band-power topomaps after robust average referencing (bads interpolated)
+    psd_topomap_figure = raw_bads.compute_psd(fmax=45.0, verbose=False).plot_topomap()
