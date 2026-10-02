@@ -1478,6 +1478,7 @@ if __name__ == "__main__":
 
     # %% Initial bad channels: nonfinite values and flat lines
     bad_ch_report = {}
+    # bad_ch_by_impedance
     bad_ch_report.update(bad_ch_by_nan(raw_bads))
     bad_ch_report.update(bad_ch_by_flatline(raw_bads))
 
