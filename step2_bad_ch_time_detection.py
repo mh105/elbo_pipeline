@@ -315,7 +315,10 @@ def bad_ch_by_flatline(
 ):
     """Return {"flatline": names} for persistently flat EEG channels.
 
-    Require the native reference: run this before re-referencing. A supplied
+    Require the native reference: run this before re-referencing. Also run it
+    before filtering or line-noise removal: both perturb a constant nonzero
+    signal by round-off, so its samples are no longer exactly equal, while
+    entirely zero channels stay zero. A supplied
     reference_channel must be entirely zero, bad or not; other entirely zero
     channels are then evaluated like any other. Without a name, exactly one
     non-bad EEG channel must be entirely zero. Channel selection and
@@ -1471,6 +1474,13 @@ if __name__ == "__main__":
     crop_tmax = encm_onsets.max() - raw.first_time + 2.5
     raw.crop(tmin=crop_tmin, tmax=crop_tmax)
 
+    # %% Initial bad channels: nonfinite values and flat lines, on the unfiltered data
+    # because line-noise removal and filtering break exact flatness
+    bad_ch_report = {}
+    # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
+    bad_ch_report.update(bad_ch_by_nan(raw))
+    bad_ch_report.update(bad_ch_by_flatline(raw))
+
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
@@ -1485,12 +1495,6 @@ if __name__ == "__main__":
     # %% High-pass filter at 0.3 Hz
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
-
-    # %% Initial bad channels: nonfinite values and flat lines
-    bad_ch_report = {}
-    # bad_ch_report.update(bad_ch_by_impedance(raw_bads, initial_impedance))
-    bad_ch_report.update(bad_ch_by_nan(raw_bads))
-    bad_ch_report.update(bad_ch_by_flatline(raw_bads))
 
     # %% Bad channels by voltage, high-frequency noise, and electrode pops
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
