@@ -400,6 +400,17 @@ class TestRobustMetrics(unittest.TestCase):
         np.testing.assert_allclose(shifted, ratios[:1], rtol=1e-8)
         np.testing.assert_array_equal(step2._prep_hf_ratio(np.zeros((2, len(t))), sfreq), [0, 0])
 
+    def test_hf_ratio_band_edges_stay_at_45_and_50_hz_for_any_sampling_rate(self):
+        for sfreq in (250, 1000, 2000):
+            with self.subTest(sfreq=sfreq):
+                t = np.arange(2 * sfreq) / sfreq
+                passband, stopband = np.sin(2 * np.pi * 44 * t), np.sin(2 * np.pi * 51 * t)
+                ratios = step2._prep_hf_ratio(np.array([passband, stopband]), sfreq)
+                self.assertLess(ratios[0], 0.01)
+                self.assertGreater(ratios[1], 100)
+        with self.assertRaisesRegex(ValueError, "longer than"):
+            step2._prep_hf_ratio(np.zeros((2, 600)), 1000)  # Filter has 661 taps at 1000 Hz.
+
 
 class TestWindowedNoiseDetection(unittest.TestCase):
     def test_report_keeps_separate_criteria_while_bads_accumulate(self):

@@ -37,8 +37,7 @@ import warnings
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
-from scipy.interpolate import PchipInterpolator
-from scipy.signal import lfilter
+from scipy.signal import fftconvolve, firwin
 from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
 
 
@@ -645,28 +644,30 @@ def bad_ch_by_std(
 def _prep_hf_ratio(data, sfreq, *, return_mads=False):
     """PREP's MAD(residual)/MAD(lowpass), filtering this window in isolation.
 
-    Port the 100th-order design_fir and filtfilt_fast FIR paths called by
-    findNoisyChannels.m, Method 2: 45 Hz passband, 50 Hz stopband, cubic
-    response interpolation, Hamming window, and forward/backward filtering.
-    The implemented PREP filter is low-pass only, despite its 1 Hz comment.
+    Low-pass with a 45 Hz passband edge and a 50 Hz stopband edge at any
+    sampling rate: a Hamming-window FIR (firwin, cutoff 47.5 Hz) whose length
+    follows from the 5 Hz transition band, 3.3 * sfreq / 5 taps made odd, the
+    rule MNE and EEGLAB's firfilt use. PREP's findNoisyChannels.m, Method 2,
+    fixes the order at 100 instead, so its band moves with the sampling rate.
+    As in PREP's filtfilt_fast, filter forward and backward after
+    odd-reflection padding; the zero-phase gain stays within 1% of 1 up to
+    45 Hz and below 2e-5 from 50 Hz. The window must be longer than the
+    filter (about 0.66 s). Like PREP's, the filter is low-pass only.
     Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
     With return_mads=True, also return the HF and LF MAD arrays, in input units.
     """
-    order, n_fft = 100, 512
-    frequencies = np.array([0, 45, 50, sfreq / 2]) / (sfreq / 2)
-    bins = np.floor(frequencies * n_fft + 0.5).astype(int)
-    if np.any(np.diff(bins) <= 0):
-        raise ValueError("Sampling rate cannot resolve PREP's 45-50 Hz filter grid.")
-    grid = np.arange(n_fft + 1)
-    response = PchipInterpolator(bins, [1, 1, 0, 0])(grid)
-    response = response * np.exp(-0.5j * order * np.pi * grid / n_fft)
-    kernel = np.fft.irfft(response, n=2 * n_fft)[:order + 1] * np.hamming(order + 1)
+    n_taps = int(round(3.3 * sfreq / (50 - 45)))
+    n_taps += n_taps % 2 == 0
+    kernel = firwin(n_taps, 47.5, window="hamming", fs=sfreq)
     width, n_times = len(kernel), data.shape[1]
+    if n_times <= width:
+        raise ValueError(f"HF windows must be longer than the {width / sfreq:.2f} s low-pass filter.")
     left = 2 * data[:, :1] - data[:, np.arange(width, 0, -1) % n_times]
     right = 2 * data[:, -1:] - data[:, np.arange(n_times - 2, n_times - width - 2, -1) % n_times]
     padded = np.concatenate([left, data, right], axis=1)
-    forward = lfilter(kernel, [1], padded, axis=1)
-    lowpass = lfilter(kernel, [1], forward[:, ::-1], axis=1)[:, ::-1]
+    # FFT convolution truncated to the causal output, as lfilter, but faster for long kernels
+    forward = fftconvolve(padded, kernel[None], axes=1)[:, :padded.shape[1]]
+    lowpass = fftconvolve(forward[:, ::-1], kernel[None], axes=1)[:, :padded.shape[1]][:, ::-1]
     lowpass = lowpass[:, width:width + n_times]
     hf_mad = _mad(data - lowpass, axis=1)
     lf_mad = _mad(lowpass, axis=1)
@@ -701,7 +702,8 @@ def bad_ch_by_HFnoise(
     neighboring windows. Accept the native reference or re-referenced data as
     in bad_ch_by_voltage. Temporary masking and the occurrence denominator follow
     bad_ch_by_std. Require sfreq > 100 Hz
-    to evaluate noise above 50 Hz. Add detections to raw.info["bads"], preserving
+    to evaluate noise above 50 Hz, and windows longer than the 0.66 s low-pass
+    filter. Add detections to raw.info["bads"], preserving
     existing labels without duplicates. Input data/annotations are unchanged.
 
     With return_details=True, return (report, details). Details contain channel
