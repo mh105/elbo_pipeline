@@ -19,6 +19,32 @@ import pandas as pd
 from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
 
 
+def load_raw_data(subject_id):
+    """Load a subject's preloaded ColorPrecMemStudy run-1 EEG and crop to the task.
+
+    Require 1000 Hz sampling and record the export's 100 Hz amplifier low-pass
+    in MNE metadata. Crop from 3 seconds before the first enci annotation to
+    2.5 seconds after the last encm annotation, preserving the native reference.
+    """
+    project_dir = Path(__file__).resolve().parents[3]
+    set_file = (project_dir / subject_id / "eeg"
+                / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
+    raw = mne.io.read_raw_eeglab(set_file, preload=True)
+    assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
+    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
+    with raw.info._unlock():
+        raw.info["lowpass"] = 100.0
+
+    enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
+    encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
+    if not len(enci_onsets) or not len(encm_onsets):
+        raise ValueError("The example crop requires both enci and encm annotations.")
+    crop_tmin = enci_onsets.min() - raw.first_time - 3.0
+    crop_tmax = encm_onsets.max() - raw.first_time + 2.5
+    raw.crop(tmin=crop_tmin, tmax=crop_tmax)
+    return raw
+
+
 def check_raw_quality(raw):
     """Validate raw without modifying it; return reference and fitted sphere.
 
@@ -222,22 +248,7 @@ def plot_sensor_locations(raw, sphere, selected=()):
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-03"
-    project_dir = Path(__file__).resolve().parents[3]
-    set_file = (project_dir / subject_id / "eeg"
-                / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
-    raw = mne.io.read_raw_eeglab(set_file, preload=True)
-    assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
-    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
-    with raw.info._unlock():
-        raw.info["lowpass"] = 100.0
-
-    enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
-    encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
-    if not len(enci_onsets) or not len(encm_onsets):
-        raise ValueError("The example crop requires both enci and encm annotations.")
-    crop_tmin = enci_onsets.min() - raw.first_time - 3.0
-    crop_tmax = encm_onsets.max() - raw.first_time + 2.5
-    raw.crop(tmin=crop_tmin, tmax=crop_tmax)
+    raw = load_raw_data(subject_id)
 
     # %% Inspect all annotations/events and counts before the quality check
     # regexp=None retains BAD*/EDGE* annotations that MNE normally excludes.

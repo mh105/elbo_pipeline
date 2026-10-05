@@ -1,10 +1,10 @@
-from pathlib import Path
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
 from mne_denoise.zapline import ZapLine
 from mne_denoise.spectrum_interpolation import SpectrumInterpolation
 from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
+from step0_data_quality_check import load_raw_data
 
 
 def ZapLine_notch(raw_prep, line_freq):
@@ -78,22 +78,7 @@ def remove_line_noise_inplace(raw, raw_prep, clean):
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-02"
-    project_dir = Path(__file__).resolve().parents[3]
-    set_file = (project_dir / subject_id / "eeg"
-                / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
-    raw = mne.io.read_raw_eeglab(set_file, preload=True)
-    assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
-    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
-    with raw.info._unlock():
-        raw.info["lowpass"] = 100.0
-
-    enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
-    encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
-    if not len(enci_onsets) or not len(encm_onsets):
-        raise ValueError("The example crop requires both enci and encm annotations.")
-    crop_tmin = enci_onsets.min() - raw.first_time - 3.0
-    crop_tmax = encm_onsets.max() - raw.first_time + 2.5
-    raw.crop(tmin=crop_tmin, tmax=crop_tmax)
+    raw = load_raw_data(subject_id)
 
     # %% Line noise removal
 

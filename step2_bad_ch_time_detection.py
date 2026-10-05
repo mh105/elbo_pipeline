@@ -39,7 +39,6 @@ the bad channels, and subtracts the final robust mean.
 """
 
 from functools import partial
-from pathlib import Path
 import warnings
 import matplotlib.pyplot as plt
 import mne
@@ -53,6 +52,7 @@ from spherical_spline import (
     _spline_geometry, _spline_weights, _flatline_aware_mean,
     _interpolate_bads_and_flatlines_inplace,
 )
+from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
 
 
@@ -1980,22 +1980,7 @@ def robust_average_reference_inplace(
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-02"
-    project_dir = Path(__file__).resolve().parents[3]
-    set_file = (project_dir / subject_id / "eeg"
-                / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
-    raw = mne.io.read_raw_eeglab(set_file, preload=True)
-    assert raw.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
-    # The amplifier export applied a 100 Hz low-pass that the .set file doesn't record.
-    with raw.info._unlock():
-        raw.info["lowpass"] = 100.0
-
-    enci_onsets = raw.annotations.onset[raw.annotations.description == "enci"]
-    encm_onsets = raw.annotations.onset[raw.annotations.description == "encm"]
-    if not len(enci_onsets) or not len(encm_onsets):
-        raise ValueError("The example crop requires both enci and encm annotations.")
-    crop_tmin = enci_onsets.min() - raw.first_time - 3.0
-    crop_tmax = encm_onsets.max() - raw.first_time + 2.5
-    raw.crop(tmin=crop_tmin, tmax=crop_tmax)
+    raw = load_raw_data(subject_id)
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}
