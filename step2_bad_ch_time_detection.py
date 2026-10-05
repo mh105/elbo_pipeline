@@ -243,79 +243,6 @@ def _finish_window_details(details, window_samples):
     return details
 
 
-# Local signal properties with time-dependent occurrence criteria
-def bad_ch_by_smallness(
-    raw,
-    window_length=2.0,
-    robust_z_cutoff=2.0,
-    occurrence_cutoff=0.25,
-    *,
-    return_details=False,
-):
-    """Return {"smallness": names} for persistently low-variance EEG channels.
-
-    Require re-referenced data: raise if any EEG channel, bad or not, is
-    entirely zero, as the native reference is. Exclude existing bads and
-    non-EEG channels. Use complete non-overlapping windows, starting at the
-    first sample of this Raw; window_length is in seconds, rounded to samples.
-    Ignore the trailing partial window; annotations do not exclude any samples.
-
-    In each window, compute each channel's variance (ddof=0) and its robust z
-    across channels, (variance - median) / (1.4826 * MAD), flooring a zero
-    scale at machine epsilon. Remove values with robust z strictly above
-    robust_z_cutoff, then recompute the median and MAD on the retained
-    variances. Flag retained values with new robust z strictly below
-    -robust_z_cutoff. Upper-tail removal is a single pass, keeps
-    strong-artifact channels from inflating the MAD, and does not itself flag
-    a channel. Return channels flagged in strictly more than occurrence_cutoff
-    of complete windows, and add them to raw.info["bads"]. Preserve existing
-    labels without duplicates; data/annotations are unchanged.
-
-    With return_details=True, return (report, details). Common fields follow
-    bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
-    violates, and flagged_data_uv. All complete windows are retained, even
-    when annotated. variance_uv2 and baseline_retained (0/1) have shape
-    (channels, windows); upper_cutoff_uv2 and lower_cutoff_uv2 have one value
-    per window. Variances and cutoffs are in squared microvolts.
-    """
-    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
-        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average"
-    )
-    counts = np.zeros(len(picks), dtype=int)
-    if return_details:
-        details = _init_window_details(
-            raw, picks, window_samples, n_windows, ("variance_uv2", "baseline_retained")
-        )
-        for metric in ("upper_cutoff_uv2", "lower_cutoff_uv2"):
-            details[metric] = np.full(n_windows, np.nan)
-    for start in range(0, n_windows * window_samples, window_samples):
-        data = raw.get_data(
-            picks=picks, start=start, stop=start + window_samples,
-            reject_by_annotation=None,
-        )
-        if not np.isfinite(data).all():
-            raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
-        variances = data.var(axis=1)
-        high_cutoff = _robust_z_value(variances, robust_z_cutoff)
-        keep = variances <= high_cutoff
-        low_cutoff = _robust_z_value(variances[keep], -robust_z_cutoff)
-        violates = keep & (variances < low_cutoff)
-        counts += violates
-        if return_details:
-            window = _record_window_details(details, start, window_samples, data, violates)
-            details["variance_uv2"][:, window] = variances * 1e12
-            details["baseline_retained"][:, window] = keep
-            details["upper_cutoff_uv2"][window] = high_cutoff * 1e12
-            details["lower_cutoff_uv2"][window] = low_cutoff * 1e12
-
-    bad_names = [raw.ch_names[i] for i in picks[counts / n_windows > occurrence_cutoff]]
-    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    report = {"smallness": bad_names}
-    if return_details:
-        return report, _finish_window_details(details, window_samples)
-    return report
 
 
 def detect_flatline(raw, reference_channel=None):
@@ -506,10 +433,17 @@ def _robust_z_value(values, z):
 
 
 def _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff):
-    """Return flagged names after evaluating at least one retained window."""
+    """Accept shared or per-channel denominators; no evidence gives no flag."""
+    if np.ndim(n_retained) == 0:
+        _require_retained_windows(n_retained)
+    fraction = np.divide(counts, n_retained, out=np.zeros(len(picks)),
+                         where=np.asarray(n_retained) > 0)
+    return [raw.ch_names[i] for i in picks[fraction > occurrence_cutoff]]
+
+
+def _require_retained_windows(n_retained):
     if n_retained == 0:
         raise ValueError("No complete unmasked windows remain for channel detection.")
-    return [raw.ch_names[i] for i in picks[counts / n_retained > occurrence_cutoff]]
 
 
 def bad_ch_by_voltage(
@@ -600,6 +534,93 @@ def bad_ch_by_voltage(
     return result
 
 
+# Local signal properties with time-dependent occurrence criteria
+def bad_ch_by_smallness(
+    raw,
+    window_length=2.0,
+    robust_z_cutoff=2.0,
+    occurrence_cutoff=0.25,
+    *,
+    flatlines=None,
+    return_details=False,
+):
+    """Return {"smallness": names} for persistently low-variance EEG channels.
+
+    Require re-referenced data: raise if any EEG channel, bad or not, is
+    entirely zero, as the native reference is. Exclude existing bads and
+    non-EEG channels. Use complete non-overlapping windows, starting at the
+    first sample of this Raw; window_length is in seconds, rounded to samples.
+    Ignore the trailing partial window and windows overlapping BAD annotations
+    or a temporary voltage mask. Known local flat channels are excluded from
+    each window's calculation and baseline, and their occurrence denominator.
+
+    In each window, compute each channel's variance (ddof=0) and its robust z
+    across channels, (variance - median) / (1.4826 * MAD), flooring a zero
+    scale at machine epsilon. Remove values with robust z strictly above
+    robust_z_cutoff, then recompute the median and MAD on the retained
+    variances. Flag retained values with new robust z strictly below
+    -robust_z_cutoff. Upper-tail removal is a single pass, keeps
+    strong-artifact channels from inflating the MAD, and does not itself flag
+    a channel. Return channels flagged in strictly more than occurrence_cutoff
+    of complete windows, and add them to raw.info["bads"]. Preserve existing
+    labels without duplicates; data/annotations are unchanged.
+
+    With return_details=True, return (report, details). Common fields follow
+    bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
+    violates, and flagged_data_uv. Excluded observations contain NaN.
+    variance_uv2 and baseline_retained (0/1) have shape
+    (channels, windows); upper_cutoff_uv2 and lower_cutoff_uv2 have one value
+    per window. Variances and cutoffs are in squared microvolts.
+    """
+    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
+        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
+    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    picks, window_samples, n_windows = _prepare_channel_windows(
+        masked, window_length, occurrence_cutoff, "average"
+    )
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
+    counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
+    n_retained = 0
+    if return_details:
+        details = _init_window_details(
+            raw, picks, window_samples, n_windows, ("variance_uv2", "baseline_retained")
+        )
+        for metric in ("upper_cutoff_uv2", "lower_cutoff_uv2"):
+            details[metric] = np.full(n_windows, np.nan)
+    for start, data in _unmasked_windows(
+        masked, picks, window_samples, n_windows, return_start=True
+    ):
+        valid = ~flat[:, start // window_samples]
+        if not np.isfinite(data[valid]).all():
+            raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
+        variances = np.full(len(picks), np.nan)
+        variances[valid] = data[valid].var(axis=1)
+        high_cutoff = _robust_z_value(variances[valid], robust_z_cutoff) if valid.any() else np.nan
+        keep = valid & (variances <= high_cutoff)
+        low_cutoff = _robust_z_value(variances[keep], -robust_z_cutoff) if keep.any() else np.nan
+        violates = keep & (variances < low_cutoff)
+        counts += violates
+        scorable += valid
+        n_retained += 1
+        if return_details:
+            window = _record_window_details(details, start, window_samples, data, violates)
+            details["violates"][~valid, window] = np.nan
+            details["variance_uv2"][:, window] = variances * 1e12
+            details["baseline_retained"][:, window] = keep
+            details["baseline_retained"][~valid, window] = np.nan
+            details["upper_cutoff_uv2"][window] = high_cutoff * 1e12
+            details["lower_cutoff_uv2"][window] = low_cutoff * 1e12
+
+    _require_retained_windows(n_retained)
+    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"smallness": bad_names}
+    if return_details:
+        return report, _finish_window_details(details, window_samples)
+    return report
+
+
 def bad_ch_by_std(
     raw,
     window_length=2.0,
@@ -607,6 +628,7 @@ def bad_ch_by_std(
     occurrence_cutoff=0.25,
     median_z_cutoff=2.0,
     *,
+    flatlines=None,
     return_details=False,
 ):
     """Return {"std": names} for persistently high robust standard deviation.
@@ -625,6 +647,9 @@ def bad_ch_by_std(
     Add detections to raw.info["bads"], preserving existing labels without
     duplicates. Input data and annotations are unchanged.
 
+    With flatlines, omit each channel's overlapping local-flat windows from
+    its metrics and occurrence denominator and from cross-channel baselines.
+
     With return_details=True, return (report, details), with the common fields
     described in bad_ch_by_HFnoise. robust_std_uv, robust_z, and violates have
     shape (channels, complete windows); masked windows contain NaN.
@@ -640,7 +665,9 @@ def bad_ch_by_std(
     picks, window_samples, n_windows = _prepare_channel_windows(
         masked, window_length, occurrence_cutoff, "average"
     )
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     window_z = []
     if return_details:
@@ -650,18 +677,26 @@ def bad_ch_by_std(
     for start, data in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
-        deviation = 0.7413 * _iqr(data, axis=1)
-        z = _robust_channel_z(deviation, use_iqr=True)
+        valid = ~flat[:, start // window_samples]
+        deviation, z = np.full((2, len(picks)), np.nan)
+        if valid.any():
+            deviation[valid] = 0.7413 * _iqr(data[valid], axis=1)
+            z[valid] = _robust_channel_z(deviation[valid], use_iqr=True)
         violates = z > robust_z_cutoff
         counts += violates
+        scorable += valid
         n_retained += 1
         window_z.append(z)
         if return_details:
             window = _record_window_details(details, start, window_samples, data, violates)
+            details["violates"][~valid, window] = np.nan
             details["robust_std_uv"][:, window] = deviation * 1e6
             details["robust_z"][:, window] = z
-    frequent = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
-    median_z = np.median(window_z, axis=0)
+    _require_retained_windows(n_retained)
+    frequent = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    window_z = np.asarray(window_z).T
+    median_z = np.array([np.median(row[np.isfinite(row)]) if np.isfinite(row).any()
+                         else np.nan for row in window_z])
     bad_names = [raw.ch_names[i] for i, median in zip(picks, median_z)
                  if raw.ch_names[i] in frequent or median > median_z_cutoff]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
@@ -727,6 +762,7 @@ def bad_ch_by_HFnoise(
     robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
     *,
+    flatlines=None,
     return_details=False,
 ):
     """Return {"HFnoise": names} for persistently high PREP HF-noise ratios.
@@ -761,6 +797,9 @@ def bad_ch_by_HFnoise(
     diagnostics describe this pass's channel set, before its new bad labels.
     Window violations remain the initial z flags, including for channels that
     do not pass the channel-level HF/LF confirmation.
+
+    With flatlines, local-flat observations are missing, including from
+    cross-channel baselines, HF/LF confirmation, and each channel's denominator.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -770,7 +809,9 @@ def bad_ch_by_HFnoise(
     picks, window_samples, n_windows = _prepare_channel_windows(
         masked, window_length, occurrence_cutoff, "either"
     )
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     hf_mads, lf_mads, window_violations = [], [], []
     if return_details:
@@ -787,10 +828,16 @@ def bad_ch_by_HFnoise(
     for start, data in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
-        ratios, hf_mad, lf_mad = _prep_hf_ratio(data, raw.info["sfreq"], return_mads=True)
-        z = _robust_channel_z(ratios)
+        valid = ~flat[:, start // window_samples]
+        ratios, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
+        if valid.any():
+            ratios[valid], hf_mad[valid], lf_mad[valid] = _prep_hf_ratio(
+                data[valid], raw.info["sfreq"], return_mads=True
+            )
+            z[valid] = _robust_channel_z(ratios[valid])
         violates = z > robust_z_cutoff
         counts += violates
+        scorable += valid
         n_retained += 1
         hf_mads.append(hf_mad)
         lf_mads.append(lf_mad)
@@ -804,9 +851,11 @@ def bad_ch_by_HFnoise(
                                    ("lf_mad_uv", lf_mad * 1e6),
                                    ("violates", violates)):
                 details[metric][:, window] = values
+            details["violates"][~valid, window] = np.nan
             for i in np.flatnonzero(violates):
                 details["flagged_data_uv"][names[i]].append(data[i] * 1e6)
-    candidates = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    _require_retained_windows(n_retained)
+    candidates = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
     hf_mads = np.asarray(hf_mads).T
     lf_mads = np.asarray(lf_mads).T
     window_violations = np.asarray(window_violations).T
@@ -817,17 +866,20 @@ def bad_ch_by_HFnoise(
         if name not in candidates:
             continue
         flagged = window_violations[i]
-        if flagged.all():
+        baseline = np.isfinite(hf_mads[i]) & ~flagged
+        if not baseline.any():
             bad_names.append(name)
             continue
         hf_flagged = np.median(hf_mads[i, flagged])
-        hf_channel_median = np.median(np.median(hf_mads[:, flagged], axis=1))
+        peer_medians = [np.median(row[np.isfinite(row)])
+                        for row in hf_mads[:, flagged] if np.isfinite(row).any()]
+        hf_channel_median = np.median(peer_medians)
         if hf_flagged >= hf_channel_median:
             bad_names.append(name)
             continue
-        hf_baseline = np.median(hf_mads[i, ~flagged])
+        hf_baseline = np.median(hf_mads[i, baseline])
         lf_flagged = np.median(lf_mads[i, flagged])
-        lf_baseline = np.median(lf_mads[i, ~flagged])
+        lf_baseline = np.median(lf_mads[i, baseline])
         hf_log_change = np.log(max(hf_flagged, eps) / max(hf_baseline, eps))
         lf_log_change = np.log(max(lf_flagged, eps) / max(lf_baseline, eps))
         required_increase = max(0.0, -lf_log_change)
@@ -852,6 +904,7 @@ def bad_ch_by_BBnoise(
     min_bad_bands=3,
     occurrence_cutoff=0.25,
     *,
+    flatlines=None,
     return_details=False,
 ):
     """Return {"BBnoise": names} for persistently broadband high-power EEG channels.
@@ -874,6 +927,9 @@ def bad_ch_by_BBnoise(
     violates (0/1) have shape (channels, complete windows). Masked windows
     contain NaN in all metric/flag arrays. flagged_data_uv stores original
     waveforms only where the channel violates in at least min_bad_bands.
+
+    With flatlines, omit local-flat observations from metrics, cross-channel
+    baselines, and each channel's occurrence denominator.
     """
     SPECTRAL_BANDS = ((0, 4), (4, 8), (8, 12), (12, 30), (30, 45))
 
@@ -887,7 +943,9 @@ def bad_ch_by_BBnoise(
     picks, window_samples, n_windows = _prepare_channel_windows(
         masked, window_length, occurrence_cutoff, "average"
     )
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("n_bad_bands",))
@@ -897,8 +955,11 @@ def bad_ch_by_BBnoise(
     for start, data in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
+        valid = ~flat[:, start // window_samples]
+        # Welch needs a row to define its frequency grid even when none are scorable.
         psds, freqs = mne.time_frequency.psd_array_welch(
-            data, sfreq=raw.info["sfreq"], fmin=0, fmax=45,
+            data[valid] if valid.any() else np.zeros((1, window_samples)),
+            sfreq=raw.info["sfreq"], fmin=0, fmax=45,
             n_fft=window_samples, n_per_seg=window_samples, n_overlap=0,
             window="hamming", remove_dc=True, verbose=False,
         )
@@ -906,20 +967,28 @@ def bad_ch_by_BBnoise(
         if any(not band.any() for band in bands):
             raise ValueError("window_length is too short to resolve all spectral bands.")
         power = np.column_stack([psds[:, band].mean(axis=1) for band in bands])
-        power_db = 10 * np.log10(np.maximum(power, np.finfo(float).tiny))
-        z = _robust_channel_z(power_db)
+        power_db = np.full((len(picks), len(SPECTRAL_BANDS)), np.nan)
+        z = power_db.copy()
+        if valid.any():
+            power_db[valid] = 10 * np.log10(np.maximum(power, np.finfo(float).tiny))
+            z[valid] = _robust_channel_z(power_db[valid])
         band_violates = z > robust_z_cutoff
         n_bad_bands = band_violates.sum(axis=1)
         violates = n_bad_bands >= min_bad_bands
         counts += violates
+        scorable += valid
         n_retained += 1
         if return_details:
             window = _record_window_details(details, start, window_samples, data, violates)
+            details["violates"][~valid, window] = np.nan
             details["band_mean_psd_db"][:, window] = power_db
             details["robust_z"][:, window] = z
             details["band_violates"][:, window] = band_violates
+            details["band_violates"][~valid, window] = np.nan
             details["n_bad_bands"][:, window] = n_bad_bands
-    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+            details["n_bad_bands"][~valid, window] = np.nan
+    _require_retained_windows(n_retained)
+    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"BBnoise": bad_names}
     if return_details:
@@ -1073,14 +1142,15 @@ def _band_limit(data, sfreq):
 
 
 def _widen_voltage_mask(raw, seconds):
-    """Extend each BAD_voltage_mask span of raw by seconds on both sides, within the data."""
+    """Extend voltage/global-flat dropout masks on a detector copy, within the data."""
     annotations = raw.annotations
-    mask = np.flatnonzero(annotations.description == "BAD_voltage_mask")
+    mask = np.flatnonzero(np.isin(annotations.description, ("BAD_voltage_mask", "BAD_by_flatline")))
+    descriptions = annotations.description[mask].copy()
     starts = np.maximum(annotations.onset[mask] - seconds, raw.first_time)
     stops = np.minimum(annotations.onset[mask] + annotations.duration[mask] + seconds,
                        raw.first_time + raw.n_times / raw.info["sfreq"])
     annotations.delete(mask)
-    annotations.append(starts, stops - starts, ["BAD_voltage_mask"] * len(mask))
+    annotations.append(starts, stops - starts, descriptions)
 
 
 def _band_limited_windows(raw, window_length, occurrence_cutoff):
@@ -1129,6 +1199,7 @@ def bad_ch_by_correlation(
     quantile=0.98,
     occurrence_cutoff=0.01,
     *,
+    flatlines=None,
     return_details=False,
 ):
     """Return {"correlation": names} for channels that intermittently lose their shared signal.
@@ -1161,6 +1232,10 @@ def bad_ch_by_correlation(
     described in bad_ch_by_HFnoise. score and violates have shape (channels,
     complete windows); unretained windows contain NaN. flagged_data_uv stores
     the input, not band-limited, violating waveforms.
+
+    With flatlines, omit flat targets and partners in overlapping windows.
+    Their missing scores do not count as failures or enter their denominator;
+    unexpected constants among otherwise eligible targets still raise.
     """
     if not np.isfinite(correlation_cutoff) or not -1 <= correlation_cutoff <= 1:
         raise ValueError("correlation_cutoff must be between -1 and 1.")
@@ -1169,27 +1244,35 @@ def bad_ch_by_correlation(
     masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff
     )
-    names = [raw.ch_names[i] for i in picks]
-    others = ~np.eye(len(picks), dtype=bool)
+    names = np.array([raw.ch_names[i] for i in picks], dtype=object)
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("score",))
     for start, data in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
-        window = filtered[:, start:start + window_samples]
-        _require_variance(data, names, "The input", start, raw.info["sfreq"])
-        _require_variance(window, names, "The band-limited signal", start, raw.info["sfreq"])
-        r = np.corrcoef(window)[others].reshape(len(picks), -1)
-        score = np.quantile(r, quantile, axis=1)
+        valid = ~flat[:, start // window_samples]
+        window = filtered[valid, start:start + window_samples]
+        _require_variance(data[valid], names[valid], "The input", start, raw.info["sfreq"])
+        _require_variance(window, names[valid], "The band-limited signal", start, raw.info["sfreq"])
+        score = np.full(len(picks), np.nan)
+        if valid.sum() >= 2:
+            others = ~np.eye(valid.sum(), dtype=bool)
+            r = np.corrcoef(window)[others].reshape(valid.sum(), -1)
+            score[valid] = np.quantile(r, quantile, axis=1)
         violates = score < correlation_cutoff
         counts += violates
+        scorable += np.isfinite(score)
         n_retained += 1
         if return_details:
             index = _record_window_details(details, start, window_samples, data, violates)
+            details["violates"][~np.isfinite(score), index] = np.nan
             details["score"][:, index] = score
-    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    _require_retained_windows(n_retained)
+    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"correlation": bad_names}
     if return_details:
@@ -1869,7 +1952,7 @@ if __name__ == "__main__":
 
     # %% Bad channels by voltage, high-frequency noise, and electrode pops
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
-    bad_ch_report.update(bad_ch_by_HFnoise(raw_bads))
+    bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_pop(raw_bads))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 

@@ -50,7 +50,7 @@ class TestWindowDetails(unittest.TestCase):
                 raw.crop(tmax=(4.5 * window_samples - 1) / raw.info["sfreq"])
                 raw.info["bads"] = ["E5", "M5"]
                 raw.set_channel_types({"E6": "eog", "M6": "eog"})
-                raw.set_annotations(mne.Annotations([0.1], [0.1], ["BAD_included"]))
+                raw.set_annotations(mne.Annotations([0.1], [0.1], ["BAD_excluded"]))
                 original = raw.copy()
                 kwargs = {"window_length": window_samples / raw.info["sfreq"]}
                 expected = step2.bad_ch_by_smallness(raw.copy(), **kwargs)
@@ -58,22 +58,22 @@ class TestWindowDetails(unittest.TestCase):
                 self.assertEqual(report, expected)
                 self.assertEqual(report, {"smallness": ["E0", "M0"]})
                 self.assert_window_details(original, raw, report, details,
-                                           window_samples, [True] * 4)
+                                           window_samples, [False, True, True, True])
                 names = details["ch_names"]
                 self.assertEqual(names, [n for n in original.ch_names
                                          if n not in ("E5", "M5", "E6", "M6")])
                 np.testing.assert_allclose(details["variance_uv2"][names.index("E0")],
-                                           [0.01, 0.01, 1, 1])
-                np.testing.assert_allclose(details["variance_uv2"][names.index("E8")], 100)
-                np.testing.assert_array_equal(details["baseline_retained"][names.index("E8")], 0)
+                                           [np.nan, 0.01, 1, 1])
+                np.testing.assert_allclose(details["variance_uv2"][names.index("E8"), 1:], 100)
+                np.testing.assert_array_equal(details["baseline_retained"][names.index("E8"), 1:], 0)
                 np.testing.assert_array_equal(
-                    details["baseline_retained"],
-                    details["variance_uv2"] <= details["upper_cutoff_uv2"],
+                    details["baseline_retained"][:, 1:],
+                    (details["variance_uv2"] <= details["upper_cutoff_uv2"])[:, 1:],
                 )
                 np.testing.assert_array_equal(
-                    details["violates"],
-                    (details["baseline_retained"] == 1)
-                    & (details["variance_uv2"] < details["lower_cutoff_uv2"]),
+                    details["violates"][:, 1:],
+                    ((details["baseline_retained"] == 1)
+                     & (details["variance_uv2"] < details["lower_cutoff_uv2"]))[:, 1:],
                 )
 
     def test_flatline_global_exclusions_and_partial_tail(self):

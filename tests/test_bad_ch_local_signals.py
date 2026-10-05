@@ -218,8 +218,7 @@ class TestWindowRules(unittest.TestCase):
                 # Only one of four full windows violates the rule.
                 self.assertEqual(detector(raw), {criterion: []})
                 self.assertEqual(raw.info["bads"], [])
-                if detector is bad_ch_by_flatline:
-                    self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: []})
+                self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: []})
                 raw.set_annotations(None)
                 expected = ["E0", "M0"] if average else ["E0"]
                 self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: expected})

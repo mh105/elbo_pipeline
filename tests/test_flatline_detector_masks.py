@@ -1,0 +1,203 @@
+import sys
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+import mne
+import numpy as np
+
+
+pipeline_dir = Path(__file__).resolve().parents[1]
+if str(pipeline_dir) not in sys.path:
+    sys.path.insert(0, str(pipeline_dir))
+
+import step2_bad_ch_time_detection as step2
+
+
+SFREQ = 250
+WINDOW = 2 * SFREQ
+
+
+def native_raw(n_windows=4, n_nonreference=12, first_samp=0, tail=0, seed=17):
+    rng = np.random.default_rng(seed)
+    n_times = n_windows * WINDOW + tail
+    data = rng.normal(size=(n_nonreference, n_times))
+    data *= np.linspace(8, 12, n_nonreference)[:, None] * 1e-6
+    names = [f"E{i}" for i in range(n_nonreference)] + ["Cz"]
+    data = np.vstack([data, np.zeros(n_times)])
+    return mne.io.RawArray(
+        data, mne.create_info(names, SFREQ, "eeg"), first_samp=first_samp, verbose=False,
+    )
+
+
+def flatlines_for(raw, intervals):
+    with patch.object(step2.mne.filter, "filter_data", side_effect=lambda data, *a, **k: data.copy()):
+        result = step2.detect_flatline(raw, reference_channel="Cz")
+    result["ch_names"] = list(intervals)
+    result["segments"] = list(intervals.values())
+    result["raw_segments"] = list(intervals.values())
+    result["highpass_segments"] = [[] for _ in intervals]
+    return result
+
+
+def average(raw):
+    raw.set_eeg_reference("average", projection=False, verbose=False)
+    return raw
+
+
+DETECTORS = (
+    ("smallness", step2.bad_ch_by_smallness, "variance_uv2"),
+    ("std", step2.bad_ch_by_std, "robust_z"),
+    ("HFnoise", step2.bad_ch_by_HFnoise, "robust_z"),
+    ("BBnoise", step2.bad_ch_by_BBnoise, "robust_z"),
+    ("correlation", step2.bad_ch_by_correlation, "score"),
+)
+
+
+class TestPublicFlatlineStages(unittest.TestCase):
+    def test_detect_public_reference_exemption_and_report_only_output(self):
+        raw = native_raw(n_nonreference=7)
+        raw._data[0, 34:44] = 3e-6
+        raw._data[1, 600:609] = 3e-6
+        raw.info["bads"] = ["E0"]
+        raw.set_annotations(mne.Annotations([1], [0], ["event"]))
+        before = raw.copy()
+        with patch.object(step2.mne.filter, "filter_data", side_effect=lambda data, *a, **k: data.copy()):
+            result = step2.detect_flatline(raw)
+        self.assertEqual(result["ch_names"], ["E0"])
+        self.assertEqual(result["segments"], [[[34, 44]]])
+        self.assertEqual(result["reference_channel"], "Cz")
+        self.assertEqual(len(result["eeg_ch_names"]), 8)
+        np.testing.assert_array_equal(raw.get_data(), before.get_data())
+        self.assertEqual(raw.info["bads"], before.info["bads"])
+        self.assertEqual(raw.annotations, before.annotations)
+
+    def test_global_annotations_use_exact_spans_and_crop_time_base(self):
+        for meas_date in (None, datetime(2026, 10, 5, tzinfo=timezone.utc)):
+            with self.subTest(meas_date=meas_date):
+                raw = native_raw(n_nonreference=7, first_samp=500)
+                raw.set_meas_date(meas_date)
+                raw.crop(tmin=0.4)
+                flatlines = flatlines_for(raw, {name: [[150, 275]] for name in ("E0", "E1", "E2")})
+                raw.info["bads"] = ["E1", "E4", "E5"]
+                before = raw.get_data().copy()
+                self.assertIsNone(step2.mask_segment_by_flatline(raw, flatlines))
+                mask = raw.annotations.description == "BAD_by_flatline"
+                np.testing.assert_allclose(raw.annotations.onset[mask], [raw.first_time + 0.6])
+                np.testing.assert_allclose(raw.annotations.duration[mask], [0.5])
+                self.assertEqual(raw.annotations.orig_time, meas_date)
+                np.testing.assert_array_equal(raw.get_data(), before)
+                self.assertEqual(raw.info["bads"], ["E1", "E4", "E5"])
+                report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
+                self.assertEqual(report, {"flatline": []})
+                np.testing.assert_array_equal(details["retained"], [False, True, True])
+
+    def test_bad_flatline_any_overlap_strict_cutoff_and_partial_tail(self):
+        raw = native_raw(tail=100)
+        flatlines = flatlines_for(raw, {
+            "E0": [[40, 50], [540, 550]], "E1": [[1040, 1050]], "E2": [[2040, 2050]],
+        })
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
+        self.assertEqual(report, {"flatline": ["E0"]})
+        row = details["ch_names"].index("E1")
+        np.testing.assert_array_equal(details["flat"][row], [0, 0, 1, 0])
+        self.assertNotIn("E2", raw.info["bads"])
+
+    def test_entire_global_dropout_raises_after_annotating(self):
+        raw = native_raw(n_nonreference=7)
+        flatlines = flatlines_for(raw, {name: [[0, raw.n_times]] for name in ("E0", "E1", "E2")})
+        with self.assertRaisesRegex(ValueError, "entire recording"):
+            step2.mask_segment_by_flatline(raw, flatlines)
+        self.assertIn("BAD_by_flatline", raw.annotations.description)
+
+
+class TestLocalFlatlineMetricMasks(unittest.TestCase):
+    def test_locally_flat_channel_is_excluded_from_other_channels_metrics(self):
+        native = native_raw()
+        native._data[0, WINDOW:2 * WINDOW] = 3e-6
+        flatlines = flatlines_for(native, {"E0": [[WINDOW, 2 * WINDOW]]})
+        referenced = average(native)
+        for criterion, detector, metric in DETECTORS:
+            with self.subTest(criterion=criterion):
+                local = referenced.copy()
+                original = local.copy()
+                _, masked = detector(local, flatlines=flatlines, return_details=True)
+                control = referenced.copy()
+                control.info["bads"] = ["E0"]
+                _, omitted = detector(control, return_details=True)
+                invalid_row = masked["ch_names"].index("E0")
+                self.assertTrue(np.isnan(masked[metric][invalid_row, 1]).all())
+                self.assertTrue(np.isnan(masked["violates"][invalid_row, 1]))
+                for name in omitted["ch_names"]:
+                    row = masked["ch_names"].index(name)
+                    control_row = omitted["ch_names"].index(name)
+                    np.testing.assert_allclose(masked[metric][row, 1], omitted[metric][control_row, 1],
+                                               rtol=1e-12, atol=1e-12)
+                np.testing.assert_array_equal(local.get_data(), original.get_data())
+                self.assertEqual(local.annotations, original.annotations)
+
+    def test_zero_scorable_channel_has_no_metrics_or_automatic_bad_flag(self):
+        native = native_raw()
+        native._data[0] = 3e-6
+        flatlines = flatlines_for(native, {"E0": [[0, native.n_times]]})
+        referenced = average(native)
+        for criterion, detector, metric in DETECTORS:
+            with self.subTest(criterion=criterion):
+                report, details = detector(referenced.copy(), flatlines=flatlines, return_details=True)
+                row = details["ch_names"].index("E0")
+                self.assertNotIn("E0", report[criterion])
+                self.assertTrue(np.isnan(details[metric][row]).all())
+                self.assertTrue(np.isnan(details["violates"][row]).all())
+                self.assertEqual(details["flagged_data_uv"]["E0"].shape, (0, WINDOW))
+
+    def test_occurrence_denominator_is_specific_to_each_channels_scorable_windows(self):
+        for criterion, detector, _ in DETECTORS:
+            with self.subTest(criterion=criterion):
+                native = native_raw()
+                if criterion == "smallness":
+                    native._data[0, :WINDOW] = 3e-6
+                elif criterion in ("std", "BBnoise"):
+                    native._data[0, :WINDOW] *= 12
+                elif criterion == "HFnoise":
+                    t = np.arange(WINDOW) / SFREQ
+                    native._data[0, :WINDOW] += 60e-6 * np.sin(2 * np.pi * 80 * t)
+                flatlines = flatlines_for(native, {"E0": [[WINDOW, native.n_times]]})
+                referenced = average(native)
+                kwargs = {"occurrence_cutoff": 0.5}
+                if criterion == "std":
+                    kwargs["median_z_cutoff"] = 1e12
+                elif criterion == "correlation":
+                    kwargs["correlation_cutoff"] = 0.9
+                report, details = detector(referenced, flatlines=flatlines,
+                                           return_details=True, **kwargs)
+                self.assertIn("E0", report[criterion])
+                row = details["ch_names"].index("E0")
+                self.assertEqual(details["violates"][row, 0], 1)
+                self.assertTrue(np.isnan(details["violates"][row, 1:]).all())
+
+    def test_smallness_applies_temporary_voltage_mask_without_mutating_annotations(self):
+        raw = average(native_raw())
+        raw._data[:5, :WINDOW] += 600e-6
+        raw._data[5:10, :WINDOW] -= 600e-6
+        _, details = step2.bad_ch_by_smallness(raw, return_details=True)
+        np.testing.assert_array_equal(details["retained"], [False, True, True, True])
+        self.assertTrue(np.isnan(details["variance_uv2"][:, 0]).all())
+        self.assertEqual(len(raw.annotations), 0)
+
+    def test_correlation_skips_global_dropout_after_filter_reach_widening(self):
+        native = native_raw(n_windows=6)
+        flatlines = flatlines_for(native, {name: [[1500, 1520]] for name in ("E0", "E1", "E2", "E3")})
+        step2.mask_segment_by_flatline(native, flatlines)
+        referenced = average(native)
+        original_annotations = referenced.annotations.copy()
+        _, details = step2.bad_ch_by_correlation(referenced, flatlines=flatlines, return_details=True)
+        _, reach = step2._band_limit(np.ones((1, native.n_times)), SFREQ)
+        expected = ((details["stop_s"] <= 6 - reach / SFREQ)
+                    | (details["start_s"] >= 6.08 + reach / SFREQ))
+        np.testing.assert_array_equal(details["retained"], expected)
+        self.assertEqual(referenced.annotations, original_annotations)
+
+
+if __name__ == "__main__":
+    unittest.main()
