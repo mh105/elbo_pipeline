@@ -51,11 +51,12 @@ from scipy.linalg import solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin
 from step0_data_quality_check import load_raw_data
-from step1_line_noise_removal import (
+from step1_line_noise_removal import (  # noqa: F401
     ZapLine_notch,
     Interpolate_fft,
     remove_line_noise_inplace,
-)  # noqa: F401
+)
+
 
 # %% Part 1: Bad-channel detection
 
