@@ -245,6 +245,7 @@ def _finish_window_details(details, window_samples):
     return details
 
 
+# Local signal properties with time-dependent occurrence criteria
 def detect_flatline(raw, reference_channel=None):
     """Return sparse native-reference flat intervals without changing raw.
 
@@ -535,7 +536,6 @@ def bad_ch_by_voltage(
     return result
 
 
-# Local signal properties with time-dependent occurrence criteria
 def bad_ch_by_smallness(
     raw,
     window_length=2.0,
