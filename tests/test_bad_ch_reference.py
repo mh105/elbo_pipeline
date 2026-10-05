@@ -14,7 +14,10 @@ if str(pipeline_dir) not in sys.path:
 import step2_bad_ch_time_detection as step2
 
 
-AVERAGE_ONLY = (step2.bad_ch_by_smallness, step2.bad_ch_by_std, step2.bad_ch_by_BBnoise)
+# bad_ch_by_RANSAC also requires average reference; its tests need sensor positions,
+# so they live in test_bad_ch_cross_channel.py.
+AVERAGE_ONLY = (step2.bad_ch_by_smallness, step2.bad_ch_by_std, step2.bad_ch_by_BBnoise,
+                step2.bad_ch_by_correlation)
 EITHER = (step2.bad_ch_by_voltage, step2.bad_ch_by_HFnoise)
 NATIVE_ONLY = (step2.bad_ch_by_nan, step2.bad_ch_by_flatline)
 

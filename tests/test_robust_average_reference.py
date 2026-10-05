@@ -21,16 +21,28 @@ NAMES = ["Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8", "FC5", "FC1", "FC2", "FC6",
 
 
 def make_native_raw(noisy=None, seconds=40, sfreq=250):
-    """Independent channel potentials in the native Cz reference, plus an EOG channel."""
+    """Smooth scalp fields plus sensor noise in the native Cz reference, plus an EOG channel.
+
+    The fields give neighbouring channels the shared signal that bad_ch_by_correlation
+    and bad_ch_by_RANSAC expect. Each field averages to zero across channels and every
+    channel gets the same field power, so the average-referenced variance is uniform,
+    as with independent noise. The noisy channel gets ten times more independent noise.
+    """
     rng = np.random.default_rng(11)
-    potentials = rng.normal(scale=10e-6, size=(len(NAMES), int(seconds * sfreq)))
-    if noisy is not None:
-        potentials[NAMES.index(noisy)] *= 10
-    native = potentials - potentials[NAMES.index("Cz")]
-    eog = rng.normal(scale=50e-6, size=(1, native.shape[1]))
+    n_times = int(seconds * sfreq)
     info = mne.create_info(NAMES + ["EOG"], sfreq, ["eeg"] * len(NAMES) + ["eog"])
-    raw = mne.io.RawArray(np.vstack([native, eog]), info, verbose=False)
+    raw = mne.io.RawArray(np.zeros((len(NAMES) + 1, n_times)), info, verbose=False)
     raw.set_montage(mne.channels.make_standard_montage("colin27_1020"), verbose=False)
+    patterns = np.array([ch["loc"][:3] for ch in raw.info["chs"][:len(NAMES)]])
+    for _ in range(50):  # Alternate zero-mean fields and equal channel power until both hold.
+        patterns -= patterns.mean(axis=0)
+        patterns /= np.linalg.norm(patterns, axis=1, keepdims=True)
+    potentials = patterns @ rng.normal(scale=10e-6, size=(3, n_times))
+    potentials += rng.normal(scale=1e-6, size=potentials.shape)
+    if noisy is not None:
+        potentials[NAMES.index(noisy)] += rng.normal(scale=100e-6, size=n_times)
+    raw._data[:len(NAMES)] = potentials - potentials[NAMES.index("Cz")]
+    raw._data[-1] = rng.normal(scale=50e-6, size=n_times)
     return raw
 
 
@@ -67,7 +79,8 @@ class TestRobustAverageReference(unittest.TestCase):
         report, bads, reference = step2.robust_average_reference_inplace(raw)
 
         self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
-                                  "BBnoise": [], "smallness": []})
+                                  "BBnoise": [], "smallness": [], "correlation": [],
+                                  "RANSAC": []})
         self.assertEqual(bads, ["T7", "O1"])
         self.assertEqual(raw.info["bads"], ["EOG"])
         expected, mean = interpolated_average(native, bads)
@@ -89,11 +102,14 @@ class TestRobustAverageReference(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(), expected.get_data())
         self.assertEqual([d["interpolated"] for d in details], [[], ["O1"]])
         self.assertEqual([d["flagged"] for d in details], [["O1"], ["O1"]])
-        for criterion in ("voltage", "smallness", "HFnoise", "pop", "std", "BBnoise"):
+        for criterion in ("voltage", "smallness", "HFnoise", "pop", "std", "BBnoise",
+                          "correlation", "RANSAC"):
             self.assertIn(criterion, details[-1])
-        # std flags O1, so BBnoise, which runs after it in the pass, no longer evaluates it.
+        # std flags O1, so the detectors that run after it in the pass no longer evaluate it.
         self.assertIn("O1", details[-1]["std"]["ch_names"])
-        self.assertNotIn("O1", details[-1]["BBnoise"]["ch_names"])
+        for criterion in ("BBnoise", "correlation", "RANSAC"):
+            self.assertNotIn("O1", details[-1][criterion]["ch_names"])
+        self.assertNotIn("O1", details[-1]["RANSAC"]["subsets"])
         voltage = details[-1]["voltage"]
         self.assertEqual(len(voltage["exceed_fraction"]), len(voltage["ch_names"]))
         self.assertTrue((voltage["exceed_fraction"] <= 0.25).all())
@@ -154,11 +170,27 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual(raw.info["bads"], [])
         np.testing.assert_array_equal(raw.get_data(), original)
 
+    def test_ransac_method_is_passed_to_every_pass(self):
+        methods = []
+
+        def recorder(raw, method, **kwargs):
+            methods.append(method)
+            return {"RANSAC": []}
+        with patch.object(step2, "bad_ch_by_RANSAC", recorder):
+            step2.robust_average_reference_inplace(make_native_raw(noisy="O1"),
+                                                   ransac_method="robust_z")
+        self.assertEqual(methods, ["robust_z", "robust_z"])
+
     def test_input_requirements(self):
         for max_iterations in (0, 1.5):
             with self.subTest(max_iterations=max_iterations), self.assertRaises(ValueError):
                 step2.robust_average_reference_inplace(make_native_raw(),
                                                        max_iterations=max_iterations)
+        raw = make_native_raw()
+        original = raw.get_data().copy()
+        with self.assertRaisesRegex(ValueError, "ransac_method"):
+            step2.robust_average_reference_inplace(raw, ransac_method="cosine")
+        np.testing.assert_array_equal(raw.get_data(), original)
         raw = make_native_raw()
         raw._data[0, 5] = np.nan
         with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):

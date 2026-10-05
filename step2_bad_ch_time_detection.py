@@ -13,11 +13,18 @@ The 2-second window detectors accept return_details=True to return
 bad_ch_by_pop counts individual electrode pops instead; its details include
 each channel's pop times and step sizes.
 
+bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
+on a copy band-limited to 1-45 Hz. The first flags channels that intermittently
+lose the signal they share with their neighbours (PREP's correlation
+criterion); the second flags channels that random subsets of the others,
+through spherical splines, persistently fail to predict (RANSAC).
+
 The native reference is the one EEG channel whose samples are all exactly
 zero. bad_ch_by_nan, bad_ch_by_flatline, and pca_cleaning_inplace require it;
-bad_ch_by_smallness, bad_ch_by_std, and bad_ch_by_BBnoise require re-referenced
-data, with no entirely zero EEG channel; bad_ch_by_voltage, bad_ch_by_HFnoise,
-and bad_ch_by_pop accept either and exclude the native reference if present.
+bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation,
+and bad_ch_by_RANSAC require re-referenced data, with no entirely zero EEG
+channel; bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either
+and exclude the native reference if present.
 
 pca_cleaning_inplace modifies the data in place: after the initial bad-channel
 pass, it removes the PC1 of each 1-second window where PC1 explains at least 90%
@@ -36,6 +43,8 @@ from pathlib import Path
 import warnings
 import matplotlib.pyplot as plt
 import mne
+from mne.bem import _check_origin  # private: the origin interpolate_bads fits
+from mne.channels.interpolation import _make_interpolation_matrix  # private: MNE's spherical spline
 import numpy as np
 from scipy.signal import fftconvolve, firwin
 from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
@@ -644,34 +653,49 @@ def bad_ch_by_std(
     return report
 
 
-def _prep_hf_ratio(data, sfreq, *, return_mads=False):
-    """PREP's MAD(residual)/MAD(lowpass), filtering this window in isolation.
+def _lowpass_kernel(sfreq):
+    """FIR with a 45 Hz passband edge and a 50 Hz stopband edge at any sampling rate.
 
-    Low-pass with a 45 Hz passband edge and a 50 Hz stopband edge at any
-    sampling rate: a Hamming-window FIR (firwin, cutoff 47.5 Hz) whose length
-    follows from the 5 Hz transition band, 3.3 * sfreq / 5 taps made odd, the
-    rule MNE and EEGLAB's firfilt use. PREP's findNoisyChannels.m, Method 2,
-    fixes the order at 100 instead, so its band moves with the sampling rate.
-    As in PREP's filtfilt_fast, filter forward and backward after
-    odd-reflection padding; the zero-phase gain stays within 1% of 1 up to
-    45 Hz and below 2e-5 from 50 Hz. The window must be longer than the
-    filter (about 0.66 s). Like PREP's, the filter is low-pass only.
-    Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
-    With return_mads=True, also return the HF and LF MAD arrays, in input units.
+    A Hamming-window FIR (firwin, cutoff 47.5 Hz) whose length follows from
+    the 5 Hz transition band, 3.3 * sfreq / 5 taps made odd, the rule MNE and
+    EEGLAB's firfilt use. PREP's findNoisyChannels.m, Method 2, fixes the order
+    at 100 instead, so its band moves with the sampling rate.
     """
     n_taps = int(round(3.3 * sfreq / (50 - 45)))
     n_taps += n_taps % 2 == 0
-    kernel = firwin(n_taps, 47.5, window="hamming", fs=sfreq)
+    return firwin(n_taps, 47.5, window="hamming", fs=sfreq)
+
+
+def _lowpass_45_hz(data, sfreq):
+    """Low-pass data (channels, times) with _lowpass_kernel, forward and backward.
+
+    As in PREP's filtfilt_fast, filter forward and backward after
+    odd-reflection padding; the zero-phase gain stays within 1% of 1 up to
+    45 Hz and below 2e-5 from 50 Hz. An output sample depends on input samples
+    up to one filter length minus one sample away on either side. data must be
+    longer than the filter (about 0.66 s).
+    """
+    kernel = _lowpass_kernel(sfreq)
     width, n_times = len(kernel), data.shape[1]
     if n_times <= width:
-        raise ValueError(f"HF windows must be longer than the {width / sfreq:.2f} s low-pass filter.")
+        raise ValueError(f"Data must be longer than the {width / sfreq:.2f} s low-pass filter.")
     left = 2 * data[:, :1] - data[:, np.arange(width, 0, -1) % n_times]
     right = 2 * data[:, -1:] - data[:, np.arange(n_times - 2, n_times - width - 2, -1) % n_times]
     padded = np.concatenate([left, data, right], axis=1)
     # FFT convolution truncated to the causal output, as lfilter, but faster for long kernels
     forward = fftconvolve(padded, kernel[None], axes=1)[:, :padded.shape[1]]
     lowpass = fftconvolve(forward[:, ::-1], kernel[None], axes=1)[:, :padded.shape[1]][:, ::-1]
-    lowpass = lowpass[:, width:width + n_times]
+    return lowpass[:, width:width + n_times]
+
+
+def _prep_hf_ratio(data, sfreq, *, return_mads=False):
+    """PREP's MAD(residual)/MAD(lowpass), filtering this window in isolation.
+
+    Low-pass with _lowpass_45_hz; like PREP's, the filter is low-pass only.
+    Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
+    With return_mads=True, also return the HF and LF MAD arrays, in input units.
+    """
+    lowpass = _lowpass_45_hz(data, sfreq)
     hf_mad = _mad(data - lowpass, axis=1)
     lf_mad = _mad(lowpass, axis=1)
     ratios = hf_mad / np.maximum(lf_mad, np.finfo(float).eps)
@@ -1014,6 +1038,324 @@ def bad_ch_by_pop(
     return report
 
 
+# Cross-channel criteria, scored on a copy band-limited to 1-45 Hz
+
+def _band_limit(data, sfreq):
+    """Return data (channels, times) band-limited to 1-45 Hz and the filters' reach.
+
+    High-pass with MNE's default FIR for l_freq=1 (Hamming, 1 Hz passband
+    edge, -6 dB at 0.5 Hz, 3.3 s long, zero phase), then low-pass with
+    _lowpass_45_hz. An output sample depends on input samples up to the
+    returned reach away on either side, in samples: about 2.3 s at any rate.
+    """
+    highpass = mne.filter.create_filter(None, sfreq, l_freq=1.0, h_freq=None, verbose=False)
+    data = mne.filter.filter_data(data, sfreq, l_freq=1.0, h_freq=None, verbose=False)
+    return _lowpass_45_hz(data, sfreq), len(highpass) // 2 + len(_lowpass_kernel(sfreq)) - 1
+
+
+def _widen_voltage_mask(raw, seconds):
+    """Extend each BAD_voltage_mask span of raw by seconds on both sides, within the data."""
+    annotations = raw.annotations
+    mask = np.flatnonzero(annotations.description == "BAD_voltage_mask")
+    starts = np.maximum(annotations.onset[mask] - seconds, raw.first_time)
+    stops = np.minimum(annotations.onset[mask] + annotations.duration[mask] + seconds,
+                       raw.first_time + raw.n_times / raw.info["sfreq"])
+    annotations.delete(mask)
+    annotations.append(starts, stops - starts, ["BAD_voltage_mask"] * len(mask))
+
+
+def _band_limited_windows(raw, window_length, occurrence_cutoff):
+    """Shared setup of the cross-channel detectors.
+
+    Require sfreq > 100 Hz and re-referenced data. Mask a copy of the input,
+    select channels and complete windows as in bad_ch_by_std, band-limit the
+    selected channels with _band_limit, and widen the masks by the filters'
+    reach. Return the masked copy, picks, window_samples, n_windows, and the
+    band-limited data of picks.
+    """
+    sfreq = raw.info["sfreq"]
+    if sfreq <= 100:
+        raise ValueError("The 45-50 Hz low-pass requires a sampling rate above 100 Hz.")
+    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    picks, window_samples, n_windows = _prepare_channel_windows(
+        masked, window_length, occurrence_cutoff, "average"
+    )
+    filtered, reach = _band_limit(masked.get_data(picks=picks, reject_by_annotation=None), sfreq)
+    _widen_voltage_mask(masked, reach / sfreq)
+    return masked, picks, window_samples, n_windows, filtered
+
+
+def _require_variance(values, names, what, start, sfreq):
+    """Raise if a row of values (channels, samples) is constant: its r would be undefined."""
+    constant = np.ptp(values, axis=1) == 0
+    if constant.any():
+        raise ValueError(
+            f"{what} of {[names[i] for i in np.flatnonzero(constant)]} is constant in the "
+            f"window starting at {start / sfreq:g} s, so its r is undefined. Re-referenced "
+            "data should never be constant; inspect the recording."
+        )
+
+
+def _row_pearson(x, y):
+    """Pearson r between matching rows of x and y."""
+    x = x - x.mean(axis=1, keepdims=True)
+    y = y - y.mean(axis=1, keepdims=True)
+    return (x * y).sum(axis=1) / np.sqrt((x ** 2).sum(axis=1) * (y ** 2).sum(axis=1))
+
+
+def bad_ch_by_correlation(
+    raw,
+    window_length=2.0,
+    correlation_cutoff=0.4,
+    quantile=0.98,
+    occurrence_cutoff=0.01,
+    *,
+    return_details=False,
+):
+    """Return {"correlation": names} for channels that intermittently lose their shared signal.
+
+    PREP findNoisyChannels.m, Method 3, with signed r and 2-s windows. In each
+    retained window, correlate (Pearson r) every evaluated channel with every
+    other one and score it by the quantile of its r with the others (numpy's
+    default linear method; the self-correlation is excluded). At 0.98 with
+    110-128 partners, the score lies between the channel's 3rd and 4th best
+    partner, so it drops only when the channel loses the signal it shares even
+    with its closest neighbours, e.g., from a broken contact. Unlike PREP's
+    |r|, r is signed, so anticorrelated channels do not count as partners. A
+    window violates when the score is strictly below correlation_cutoff; flag
+    channels violating in strictly more than occurrence_cutoff of retained
+    windows, a few windows at the 1% default.
+
+    Score a copy band-limited to 1-45 Hz (_band_limit). Require re-referenced
+    data as in bad_ch_by_smallness, and sfreq > 100 Hz. Exclude existing bads
+    and non-EEG channels. Compute the temporary voltage mask on the input, as
+    in bad_ch_by_std, then widen each masked span on both sides by the
+    filters' reach, since filtering spreads masked artifacts into neighbouring
+    windows. Retain complete windows that overlap no widened mask or BAD
+    annotation. Raise if an evaluated channel is constant in a retained window,
+    in the input or after filtering: its r would be undefined, and
+    re-referenced data should never be constant. Add detections to
+    raw.info["bads"], preserving existing labels without duplicates. Input data
+    and annotations are unchanged.
+
+    With return_details=True, return (report, details), with the common fields
+    described in bad_ch_by_HFnoise. score and violates have shape (channels,
+    complete windows); unretained windows contain NaN. flagged_data_uv stores
+    the input, not band-limited, violating waveforms.
+    """
+    if not np.isfinite(correlation_cutoff) or not -1 <= correlation_cutoff <= 1:
+        raise ValueError("correlation_cutoff must be between -1 and 1.")
+    if not np.isfinite(quantile) or not 0 <= quantile <= 1:
+        raise ValueError("quantile must be between 0 and 1.")
+    masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
+        raw, window_length, occurrence_cutoff
+    )
+    names = [raw.ch_names[i] for i in picks]
+    others = ~np.eye(len(picks), dtype=bool)
+    counts = np.zeros(len(picks), dtype=int)
+    n_retained = 0
+    if return_details:
+        details = _init_window_details(raw, picks, window_samples, n_windows, ("score",))
+    for start, data in _unmasked_windows(
+        masked, picks, window_samples, n_windows, return_start=True
+    ):
+        window = filtered[:, start:start + window_samples]
+        _require_variance(data, names, "The input", start, raw.info["sfreq"])
+        _require_variance(window, names, "The band-limited signal", start, raw.info["sfreq"])
+        r = np.corrcoef(window)[others].reshape(len(picks), -1)
+        score = np.quantile(r, quantile, axis=1)
+        violates = score < correlation_cutoff
+        counts += violates
+        n_retained += 1
+        if return_details:
+            index = _record_window_details(details, start, window_samples, data, violates)
+            details["score"][:, index] = score
+    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"correlation": bad_names}
+    if return_details:
+        return report, _finish_window_details(details, window_samples)
+    return report
+
+
+def _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state):
+    """Draw each evaluated channel's predictor subsets and their spline weights.
+
+    For every EEG channel in raw, bad or not, in Raw order, draw n_subsets
+    random orderings of all other EEG channels from one generator seeded with
+    random_state, so the orderings do not depend on which channels are bad.
+    Each subset of an evaluated channel (one of picks) is the first
+    n_predictors evaluated channels of one of its orderings. The weights map a
+    subset to its target as interpolate_bads does: positions centred on the
+    origin interpolate_bads fits, then MNE's _make_interpolation_matrix.
+    Return subsets as rows of picks, shape (len(picks), n_subsets,
+    n_predictors), and the weights, of the same shape.
+    """
+    positions = np.array([raw.info["chs"][i]["loc"][:3] for i in picks])
+    if not np.isfinite(positions).all() or not np.abs(positions).sum(axis=1).all():
+        raise ValueError("Evaluated EEG channels need sensor positions; set a montage first.")
+    with mne.utils.use_log_level("warning"):
+        positions = positions - _check_origin("auto", raw.info)
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    row_of = np.full(len(raw.ch_names), -1)
+    row_of[picks] = np.arange(len(picks))
+    rng = np.random.default_rng(random_state)
+    subsets = np.empty((len(picks), n_subsets, n_predictors), dtype=int)
+    for index, target in enumerate(eeg):
+        orderings = rng.permuted(np.tile(np.delete(eeg, index), (n_subsets, 1)), axis=1)
+        if row_of[target] >= 0:
+            for k, ordering in enumerate(orderings):
+                subsets[row_of[target], k] = row_of[ordering[row_of[ordering] >= 0][:n_predictors]]
+    weights = np.array([
+        [_make_interpolation_matrix(positions[subset], positions[[row]])[0]
+         for subset in subsets[row]]
+        for row in range(len(picks))
+    ])
+    return subsets, weights
+
+
+def _ransac_median(weight_stack, window):
+    """Per-sample median of every channel's subset predictions in one window.
+
+    weight_stack has shape (n_subsets, channels, channels). Predict in float32,
+    whose sort is several times faster than any float64 median here, and
+    average the middle order statistics: the usual median of those values.
+    """
+    predictions = np.sort(weight_stack @ window.astype(np.float32), axis=0)
+    middle = len(predictions)
+    return (predictions[(middle - 1) // 2].astype(float) + predictions[middle // 2]) / 2
+
+
+def bad_ch_by_RANSAC(
+    raw,
+    window_length=2.0,
+    method="threshold",
+    correlation_cutoff=0.75,
+    robust_z_cutoff=5.0,
+    occurrence_cutoff=0.25,
+    n_subsets=50,
+    subset_fraction=0.25,
+    random_state=435656,
+    *,
+    return_details=False,
+):
+    """Return {"RANSAC": names} for channels the other channels persistently fail to predict.
+
+    PREP findNoisyChannels.m, Method 4, and EEGLAB clean_channels, changed so
+    that no channel predicts itself, the subset size is fixed, the median is
+    the usual one, r is Pearson's rather than their uncentred cosine, and
+    windows are 2 s long.
+
+    Each subset has round(subset_fraction * n) channels, n being all EEG
+    channels in raw, bad or not, so its size is the same in every recording:
+    32 for 129 channels. Every evaluated channel gets n_subsets subsets drawn
+    uniformly from the other evaluated channels (_ransac_predictors): they never
+    contain the channel itself, are reproducible from random_state, and change
+    little across robust-reference passes, since a newly bad channel is just
+    replaced by the next eligible one in its ordering. Map each subset to the
+    channel with MNE's spherical spline, take the per-sample median of the
+    n_subsets predicted traces, and correlate it with the channel in each
+    retained window (Pearson r).
+
+    method="threshold" flags a window when r is strictly below
+    correlation_cutoff (PREP style). method="robust_z" pools r over all
+    evaluated channels and retained windows, computes z = (median - r) /
+    (1.4826 * MAD), flooring a zero scale at machine epsilon, so that a low r
+    gives a high z, and flags a window when z is strictly above
+    robust_z_cutoff. Either way, flag channels violating in strictly more than
+    occurrence_cutoff of retained windows.
+
+    Selection, band-limiting, masking, the re-reference requirement, and the
+    error for constant channels follow bad_ch_by_correlation; also raise if a
+    median prediction is constant in a retained window. Require 3D positions
+    of the evaluated channels and a full subset besides each of them. Add
+    detections to raw.info["bads"], preserving existing labels without
+    duplicates. Input data and annotations are unchanged.
+
+    With return_details=True, return (report, details), with the common fields
+    described in bad_ch_by_HFnoise. r, robust_z (for both methods), and
+    violates (of this method) have shape (channels, complete windows);
+    unretained windows contain NaN. subsets holds each channel's predictor
+    names, shape (channels, n_subsets, subset size). noise_gain is each
+    channel's median, over its subsets, of the Euclidean norm of the spline
+    weights: how strongly independent predictor noise enters its prediction,
+    highest at the rim. flagged_data_uv stores the input violating waveforms;
+    flagged_filtered_uv and flagged_predicted_uv store the band-limited channel
+    and its median prediction in the same windows.
+    """
+    if method not in ("threshold", "robust_z"):
+        raise ValueError('method must be "threshold" or "robust_z".')
+    if not np.isfinite(correlation_cutoff) or not -1 <= correlation_cutoff <= 1:
+        raise ValueError("correlation_cutoff must be between -1 and 1.")
+    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
+        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
+    if not isinstance(n_subsets, int) or n_subsets < 1:
+        raise ValueError("n_subsets must be a positive integer.")
+    if not np.isfinite(subset_fraction) or not 0 < subset_fraction <= 1:
+        raise ValueError("subset_fraction must be greater than 0 and at most 1.")
+    masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
+        raw, window_length, occurrence_cutoff
+    )
+    n_predictors = int(round(subset_fraction * len(mne.pick_types(raw.info, eeg=True, exclude=[]))))
+    if n_predictors < 1:
+        raise ValueError("subset_fraction is too small to give a subset of at least one channel.")
+    if len(picks) <= n_predictors:
+        raise ValueError(f"RANSAC needs {n_predictors} predictors besides each channel, so at "
+                         f"least {n_predictors + 1} non-bad EEG channels; found {len(picks)}.")
+    subsets, weights = _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state)
+    weight_stack = np.zeros((n_subsets, len(picks), len(picks)), dtype=np.float32)
+    for k in range(n_subsets):
+        weight_stack[k, np.arange(len(picks))[:, None], subsets[:, k]] = weights[:, k]
+    names = [raw.ch_names[i] for i in picks]
+    sfreq = raw.info["sfreq"]
+    r = np.full((len(picks), n_windows), np.nan)
+    retained = np.zeros(n_windows, dtype=bool)
+    for start, data in _unmasked_windows(
+        masked, picks, window_samples, n_windows, return_start=True
+    ):
+        window = filtered[:, start:start + window_samples]
+        _require_variance(data, names, "The input", start, sfreq)
+        _require_variance(window, names, "The band-limited signal", start, sfreq)
+        median = _ransac_median(weight_stack, window)
+        _require_variance(median, names, "The median prediction", start, sfreq)
+        r[:, start // window_samples] = _row_pearson(window, median)
+        retained[start // window_samples] = True
+    if not retained.any():
+        raise ValueError("No complete unmasked windows remain for channel detection.")
+    pooled = r[:, retained]
+    z = (np.median(pooled) - r) / max(1.4826 * _mad(pooled, axis=None), np.finfo(float).eps)
+    violates = (r < correlation_cutoff if method == "threshold" else z > robust_z_cutoff) & retained
+    bad_names = _noisy_window_bads(raw, picks, violates.sum(axis=1), retained.sum(),
+                                   occurrence_cutoff)
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"RANSAC": bad_names}
+    if not return_details:
+        return report
+
+    details = _init_window_details(raw, picks, window_samples, n_windows, ("r", "robust_z"))
+    details["r"], details["robust_z"] = r, z
+    details["subsets"] = np.array(names)[subsets]
+    details["noise_gain"] = np.median(np.linalg.norm(weights, axis=2), axis=1)
+    predicted = {"flagged_filtered_uv": {name: [] for name in names},
+                 "flagged_predicted_uv": {name: [] for name in names}}
+    for index in np.flatnonzero(retained):
+        start = index * window_samples
+        data = masked.get_data(picks=picks, start=start, stop=start + window_samples,
+                               reject_by_annotation=None)
+        _record_window_details(details, start, window_samples, data, violates[:, index])
+        rows = np.flatnonzero(violates[:, index])
+        if len(rows):
+            window = filtered[:, start:start + window_samples]
+            median = _ransac_median(weight_stack, window)
+            for i in rows:
+                predicted["flagged_filtered_uv"][names[i]].append(window[i] * 1e6)
+                predicted["flagged_predicted_uv"][names[i]].append(median[i] * 1e6)
+    for field, waveforms in predicted.items():
+        details[field] = {name: np.asarray(windows).reshape(-1, window_samples)
+                          for name, windows in waveforms.items()}
+    return report, _finish_window_details(details, window_samples)
+
+
 def plot_bad_ch_report(raw, bad_ch_report):
     """Show bad-channel categories on an EEG sensor topoplot; return the figure.
 
@@ -1329,7 +1671,8 @@ def _robust_mean(raw, bads):
 
 
 def robust_average_reference_inplace(
-    raw, reference_channel=None, max_iterations=10, *, return_details=False,
+    raw, reference_channel=None, max_iterations=10, *, ransac_method="threshold",
+    return_details=False,
 ):
     """Robust-average-reference preloaded raw in place; return (report, bads, reference).
 
@@ -1342,11 +1685,14 @@ def robust_average_reference_inplace(
     channels, including the native reference (all zero) and the interpolated
     channels. Subtract this mean from every EEG channel of another copy, whose
     bad channels are not interpolated, and run bad_ch_by_voltage (no plot),
-    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std, and
-    bad_ch_by_BBnoise on it in that order, the detectors that require average
-    reference last. Each pass starts from the existing bads, and each detector
-    also excludes the channels flagged before it in the same pass. Stop when a
-    pass flags exactly the channels its robust mean interpolated. If a pass
+    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std,
+    bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC (with
+    method=ransac_method) on it in that order: the detectors that require
+    average reference after the others, and the cross-channel detectors last,
+    so that correlation's flags are not RANSAC predictors. Each pass starts
+    from the existing bads, and each detector also excludes the channels
+    flagged before it in the same pass. Stop when a pass flags exactly the
+    channels its robust mean interpolated. If a pass
     instead flags the set an earlier robust mean interpolated (none for the
     first), the passes would cycle: warn, treat every channel flagged within
     the cycle as bad, and recompute the robust mean with them interpolated.
@@ -1375,6 +1721,8 @@ def robust_average_reference_inplace(
         raise ValueError("raw must be preloaded.")
     if not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer.")
+    if ransac_method not in ("threshold", "robust_z"):
+        raise ValueError('ransac_method must be "threshold" or "robust_z".')
     reference_channel = _reference_channel(raw, "native", reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
@@ -1388,10 +1736,13 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_voltage, plot=False),
         bad_ch_by_HFnoise,
         bad_ch_by_pop,
-        # the next three require average reference
+        # the next five require average reference
         bad_ch_by_smallness,
         bad_ch_by_std,
-        bad_ch_by_BBnoise
+        bad_ch_by_BBnoise,
+        # cross-channel detectors last; RANSAC's predictors exclude correlation's flags
+        bad_ch_by_correlation,
+        partial(bad_ch_by_RANSAC, method=ransac_method),
     )
     flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
