@@ -324,31 +324,31 @@ def bad_ch_by_flatline(
 ):
     """Return {"flatline": names} for persistently flat EEG channels.
 
-    Require the native reference: run this before re-referencing. Also run it
-    before filtering or line-noise removal: both perturb a constant nonzero
-    signal by round-off, so its samples are no longer exactly equal, while
-    entirely zero channels stay zero. A supplied
-    reference_channel must be entirely zero, bad or not; other entirely zero
-    channels are then evaluated like any other. Without a name, exactly one
-    non-bad EEG channel must be entirely zero. Channel selection and
-    complete-window rules otherwise follow bad_ch_by_smallness, also excluding
-    the reference. A window is flat if all samples are
-    exactly equal, including constant nonzero signals. Suppress its flag if
-    at least 50% of the other eligible EEG channels are also flat in that
-    window. The target channel is excluded from this comparison, as are
-    existing bads/reference.
+    Require the native reference: run this before re-referencing. Also run
+    it before filtering or line-noise removal: both perturb a constant
+    nonzero signal by round-off, so its samples are no longer exactly equal,
+    while entirely zero channels stay zero. A supplied reference_channel
+    must be entirely zero, bad or not; other entirely zero channels are then
+    evaluated like any other. Without a name, exactly one non-bad EEG
+    channel must be entirely zero. Channel selection and complete-window
+    rules otherwise follow bad_ch_by_smallness, also excluding the
+    reference. A window is flat if all samples are exactly equal, including
+    constant nonzero signals. Suppress its flag if at least 50% of the other
+    eligible EEG channels are also flat in that window. The target channel
+    is excluded from this comparison, as are existing bads/reference.
 
     Return channels flagged in strictly more than occurrence_cutoff of all
-    complete windows, including suppressed windows in the denominator.
-    Add detections to raw.info["bads"], preserving existing labels without
+    complete windows, including suppressed windows in the denominator. Add
+    detections to raw.info["bads"], preserving existing labels without
     duplicates. Data and annotations are unchanged.
 
-    With return_details=True, return (report, details), with the common fields
-    described in bad_ch_by_HFnoise. All complete windows are retained, even
-    when annotated or suppressed. flat (0/1), other_flat_fraction, suppressed
-    (0/1), and violates (0/1) have shape (channels, windows). A suppressed flag
-    denotes a flat channel whose other_flat_fraction is at least 0.5.
-    flagged_data_uv includes only windows where violates == 1.
+    With return_details=True, return (report, details), with the common
+    fields described in bad_ch_by_HFnoise. All complete windows are
+    retained, even when annotated or suppressed. flat (0/1),
+    other_flat_fraction, suppressed (0/1), and violates (0/1) have shape
+    (channels, windows). A suppressed flag denotes a flat channel whose
+    other_flat_fraction is at least 0.5. flagged_data_uv includes only
+    windows where violates == 1.
     """
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "native", reference_channel
