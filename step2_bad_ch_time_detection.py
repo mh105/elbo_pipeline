@@ -115,7 +115,8 @@ def bad_ch_by_impedance(
         bad = readings[reject_by] > imp_cutoff
     bad_names = [name for name, flagged in zip(raw.ch_names, bad) if flagged]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    return {"impedance": bad_names}
+    report = {"impedance": bad_names}
+    return report
 
 
 def bad_ch_by_nan(raw, reference_channel=None):
@@ -133,7 +134,8 @@ def bad_ch_by_nan(raw, reference_channel=None):
         if not np.isfinite(data).all():
             bad_names.append(name)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    return {"nan": bad_names}
+    report = {"nan": bad_names}
+    return report
 
 
 def _zero_eeg_channels(raw, picks):
@@ -807,12 +809,14 @@ def bad_ch_by_voltage(
         fractions[row] = np.mean(np.abs(data) > voltage_threshold_uv / 1e6)
     bad_names = [raw.ch_names[i] for i in picks[fractions > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    result = {"voltage": bad_names}
+    report = {"voltage": bad_names}
     if return_details:
-        result = result, {"ch_names": [raw.ch_names[i] for i in picks],
-                          "exceed_fraction": fractions}
+        details = {
+            "ch_names": [raw.ch_names[i] for i in picks],
+            "exceed_fraction": fractions,
+        }
     if not plot:
-        return result
+        return (report, details) if return_details else report
 
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
     times = raw.times
@@ -849,7 +853,7 @@ def bad_ch_by_voltage(
     if bad_names:
         ax.legend(title="Flagged channels", loc="upper left", bbox_to_anchor=(1.01, 1))
     plt.show()
-    return result
+    return (report, details) if return_details else report
 
 
 def bad_ch_by_smallness(
