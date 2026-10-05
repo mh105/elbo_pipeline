@@ -47,6 +47,10 @@ from mne.bem import _check_origin  # private: the origin interpolate_bads fits
 from mne.channels.interpolation import _make_interpolation_matrix  # private: MNE's spherical spline
 import numpy as np
 from scipy.signal import fftconvolve, firwin
+from flatline import (
+    _detect_flatline_data, _validate_flatlines, _flatline_windows,
+    _global_flatline_segments,
+)
 from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
 
 
@@ -314,73 +318,88 @@ def bad_ch_by_smallness(
     return report
 
 
+def detect_flatline(raw, reference_channel=None):
+    """Return sparse native-reference flat intervals without changing raw.
+
+    Union consecutive ten-sample blocks whose range is at most 1e-3 µV,
+    detected on the input and on a full-record 1-Hz high-passed copy. Bounds
+    are crop-relative half-open sample indices. The dictionary records channel
+    identities and sampling/crop metadata for validation by later consumers.
+    Run bad_ch_by_nan first; the native zero reference is exempt.
+    """
+    reference_channel = _reference_channel(raw, "native", reference_channel)
+    return _detect_flatline_data(raw, reference_channel)
+
+
 def bad_ch_by_flatline(
     raw,
     window_length=2.0,
     occurrence_cutoff=0.25,
     reference_channel=None,
     *,
+    flatlines=None,
     return_details=False,
 ):
-    """Return {"flatline": names} for persistently flat EEG channels.
+    """Flag channels with flat segments in more than occurrence_cutoff windows.
 
-    Require the native reference: run this before re-referencing. Also run
-    it before filtering or line-noise removal: both perturb a constant
-    nonzero signal by round-off, so its samples are no longer exactly equal,
-    while entirely zero channels stay zero. A supplied reference_channel
-    must be entirely zero, bad or not; other entirely zero channels are then
-    evaluated like any other. Without a name, exactly one non-bad EEG
-    channel must be entirely zero. Channel selection and complete-window
-    rules otherwise follow bad_ch_by_smallness, also excluding the
-    reference. A window is flat if all samples are exactly equal, including
-    constant nonzero signals. Suppress its flag if at least 50% of the other
-    eligible EEG channels are also flat in that window. The target channel
-    is excluded from this comparison, as are existing bads/reference.
+    Require native-reference data and exclude existing bads/reference/non-EEG
+    channels. Any overlap with a detect_flatline segment marks the channel's
+    complete window. Omit windows overlapping BAD annotations, including
+    global dropouts added by mask_segment_by_flatline; ignore the partial tail.
+    If flatlines is omitted, detect on the supplied data before scoring.
 
-    Return channels flagged in strictly more than occurrence_cutoff of all
-    complete windows, including suppressed windows in the denominator. Add
-    detections to raw.info["bads"], preserving existing labels without
-    duplicates. Data and annotations are unchanged.
-
-    With return_details=True, return (report, details), with the common
-    fields described in bad_ch_by_HFnoise. All complete windows are
-    retained, even when annotated or suppressed. flat (0/1),
-    other_flat_fraction, suppressed (0/1), and violates (0/1) have shape
-    (channels, windows). A suppressed flag denotes a flat channel whose
-    other_flat_fraction is at least 0.5. flagged_data_uv includes only
-    windows where violates == 1.
+    Add detections to info['bads']; leave data/annotations unchanged. Details
+    follow the other window detectors, with flat and violates equal to the
+    mapped segment mask in retained windows and NaN in excluded windows.
     """
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "native", reference_channel
     )
+    if flatlines is None:
+        flatlines = detect_flatline(raw, reference_channel)
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
+    n_retained = 0
     if return_details:
-        details = _init_window_details(
-            raw, picks, window_samples, n_windows, ("flat", "other_flat_fraction", "suppressed")
-        )
-    for start in range(0, n_windows * window_samples, window_samples):
-        data = raw.get_data(
-            picks=picks, start=start, stop=start + window_samples,
-            reject_by_annotation=None,
-        )
-        if not np.isfinite(data).all():
-            raise ValueError("Nonfinite data in eligible channels; run bad_ch_by_nan first.")
-        flat = np.all(data == data[:, :1], axis=1)
-        other_flat_count = flat.sum() - flat.astype(int)
-        violates = flat & (other_flat_count < 0.5 * (len(picks) - 1))
+        details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
+    for start, data in _unmasked_windows(
+        raw, picks, window_samples, n_windows, return_start=True
+    ):
+        violates = flat[:, start // window_samples]
         counts += violates
+        n_retained += 1
         if return_details:
             window = _record_window_details(details, start, window_samples, data, violates)
-            details["flat"][:, window] = flat
-            details["other_flat_fraction"][:, window] = other_flat_count / (len(picks) - 1)
-            details["suppressed"][:, window] = flat & ~violates
-
-    bad_names = [raw.ch_names[i] for i in picks[counts / n_windows > occurrence_cutoff]]
+            details["flat"][:, window] = violates
+    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"flatline": bad_names}
     if return_details:
         return report, _finish_window_details(details, window_samples)
     return report
+
+
+def mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
+    """Append exact BAD_by_flatline dropout annotations; return None.
+
+    A dropout has strictly more than channel_fraction_cutoff of all original
+    EEG channels simultaneously flat. The denominator includes the exempt
+    native reference and existing bad channels. Annotate before whole-channel
+    flatline rejection, and carry these annotations through preprocessing.
+    Raise if flatness makes the entire recording globally bad.
+    """
+    _validate_flatlines(raw, flatlines)
+    segments = _global_flatline_segments(flatlines, channel_fraction_cutoff)
+    if flatlines is not None:
+        flatlines["global_channel_fraction_cutoff"] = float(channel_fraction_cutoff)
+    if segments:
+        bounds = np.asarray(segments) / raw.info["sfreq"]
+        raw.annotations.append(
+            raw.first_time + bounds[:, 0], bounds[:, 1] - bounds[:, 0],
+            ["BAD_by_flatline"] * len(bounds),
+        )
+    if segments == [[0, raw.n_times]]:
+        raise ValueError("Global flatline dropout covers the entire recording; inspect the data.")
 
 
 def mask_segment_by_voltage(
@@ -1825,12 +1844,13 @@ if __name__ == "__main__":
     crop_tmax = encm_onsets.max() - raw.first_time + 2.5
     raw.crop(tmin=crop_tmin, tmax=crop_tmax)
 
-    # %% Initial bad channels: nonfinite values and flat lines, on the unfiltered data
-    # because line-noise removal and filtering break exact flatness
+    # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}
     # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
     bad_ch_report.update(bad_ch_by_nan(raw))
-    bad_ch_report.update(bad_ch_by_flatline(raw))
+    flatlines = detect_flatline(raw)
+    mask_segment_by_flatline(raw, flatlines)
+    bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
 
     # %% Line noise removal
     raw_prep = raw.copy()

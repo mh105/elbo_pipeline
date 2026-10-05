@@ -16,6 +16,8 @@ from step2_bad_ch_time_detection import (
     bad_ch_by_flatline,
     bad_ch_by_nan,
     bad_ch_by_smallness,
+    detect_flatline,
+    mask_segment_by_flatline,
 )
 
 
@@ -159,35 +161,37 @@ class TestBadChByFlatline(unittest.TestCase):
                 self.assertEqual(raw.info["bads"], expected)
                 np.testing.assert_array_equal(raw.get_data(), original)
 
-    def test_half_of_other_channels_suppresses_including_exact_boundary(self):
-        for flat_channels, expected in ((2, ["E0", "E1"]), (3, []), (5, [])):
+    def test_peer_flatness_does_not_suppress_channel_flags(self):
+        for flat_channels in (2, 3, 5):
             with self.subTest(flat_channels=flat_channels):
+                expected = [f"E{i}" for i in range(flat_channels)]
                 variances = np.ones((4, 5))
                 variances[:, :flat_channels] = 0
                 raw = make_raw(variances)
                 self.assertEqual(bad_ch_by_flatline(raw), {"flatline": expected})
                 self.assertEqual(raw.info["bads"], expected)
 
-    def test_suppressed_windows_stay_in_occurrence_denominator(self):
+    def test_global_dropout_windows_leave_occurrence_denominator(self):
         variances = np.ones((4, 5))
         variances[:3] = 0
         variances[3, 0] = 0
         raw = make_raw(variances)
-        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": []})
-        self.assertEqual(raw.info["bads"], [])
+        flatlines = detect_flatline(raw)
+        mask_segment_by_flatline(raw, flatlines)
+        self.assertEqual(bad_ch_by_flatline(raw, flatlines=flatlines), {"flatline": ["E0"]})
+        self.assertEqual(raw.info["bads"], ["E0"])
 
-    def test_bads_and_auxiliary_do_not_change_other_channel_fraction(self):
-        # With five eligible channels, two flat peers are exactly 50% of others.
+    def test_bads_and_auxiliary_are_excluded_from_channel_flags(self):
         raw = make_raw([[0, 0, 0, 1, 1, 1, 1]])
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
-        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": []})
-        self.assertEqual(raw.info["bads"], ["E5"])
+        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": ["E0", "E1", "E2"]})
+        self.assertEqual(raw.info["bads"], ["E5", "E0", "E1", "E2"])
 
-    def test_custom_parameters_and_tiny_variation_is_not_flat(self):
+    def test_custom_parameters_and_tiny_variation_is_flat(self):
         variances = np.ones((4, 5))
         variances[:2, 0] = 0
-        for cutoff, expected in ((0.25, ["E0"]), (0.5, [])):
+        for cutoff, expected in ((0.25, ["E0", "E1"]), (0.5, ["E1"])):
             with self.subTest(cutoff=cutoff):
                 raw = make_raw(variances, window_samples=100)
                 raw._data[1] = 2e-6
@@ -200,7 +204,7 @@ class TestBadChByFlatline(unittest.TestCase):
 
 
 class TestWindowRules(unittest.TestCase):
-    def test_partial_tail_ignored_annotations_included_and_raw_start_respected(self):
+    def test_partial_tail_and_bad_annotations_excluded_with_raw_start_respected(self):
         for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
             with self.subTest(detector=detector.__name__):
                 variances = np.ones((5, 9))
@@ -214,6 +218,9 @@ class TestWindowRules(unittest.TestCase):
                 # Only one of four full windows violates the rule.
                 self.assertEqual(detector(raw), {criterion: []})
                 self.assertEqual(raw.info["bads"], [])
+                if detector is bad_ch_by_flatline:
+                    self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: []})
+                raw.set_annotations(None)
                 expected = ["E0", "M0"] if average else ["E0"]
                 self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: expected})
                 self.assertEqual(raw.info["bads"], expected)

@@ -76,7 +76,7 @@ class TestWindowDetails(unittest.TestCase):
                     & (details["variance_uv2"] < details["lower_cutoff_uv2"]),
                 )
 
-    def test_flatline_suppression_exclusions_and_partial_tail(self):
+    def test_flatline_global_exclusions_and_partial_tail(self):
         variances = np.ones((5, 7))
         variances[0, :3] = 0
         variances[1:3, 0] = 0
@@ -85,18 +85,18 @@ class TestWindowDetails(unittest.TestCase):
         raw.crop(tmax=8.99)
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
-        raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_included"]))
+        raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_excluded"]))
+        flatlines = step2.detect_flatline(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
         original = raw.copy()
         expected = step2.bad_ch_by_flatline(raw.copy())
         report, details = step2.bad_ch_by_flatline(raw, return_details=True)
         self.assertEqual(report, expected)
         self.assertEqual(report, {"flatline": ["E0"]})
-        self.assert_window_details(original, raw, report, details, 200, [True] * 4)
+        self.assert_window_details(original, raw, report, details, 200, [False, False, True, True])
         self.assertEqual(details["ch_names"], [f"E{i}" for i in range(5)])
-        np.testing.assert_array_equal(details["flat"][0], [1, 1, 1, 0])
-        np.testing.assert_array_equal(details["other_flat_fraction"][0], [0.5, 0, 0, 0])
-        np.testing.assert_array_equal(details["suppressed"][0], [1, 0, 0, 0])
-        np.testing.assert_array_equal(details["violates"][0], [0, 1, 1, 0])
+        np.testing.assert_array_equal(details["flat"][0], [np.nan, np.nan, 1, 0])
+        np.testing.assert_array_equal(details["violates"][0], [np.nan, np.nan, 1, 0])
 
     def test_noise_details_preserve_mask_gaps_metrics_and_channel_order(self):
         for detector, factory in ((step2.bad_ch_by_std, std_raw),
