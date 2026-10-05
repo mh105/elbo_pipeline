@@ -51,6 +51,10 @@ from flatline import (
     _detect_flatline_data, _validate_flatlines, _flatline_windows,
     _global_flatline_segments,
 )
+from spherical_spline import (
+    _spline_geometry, _spline_weights, _flatline_aware_mean,
+    _interpolate_bads_and_flatlines_inplace,
+)
 from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line_noise_inplace  # noqa: F401
 
 
@@ -1762,31 +1766,27 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
 
 # %% Robust average reference
 
-def _robust_mean(raw, bads):
-    """Mean over all EEG channels of a copy with the named bads spherically interpolated."""
-    interpolated = raw.copy()
-    interpolated.info["bads"] = list(bads)
-    if bads:
-        interpolated.interpolate_bads(reset_bads=False, on_bad_position="raise", verbose=False)
-    eeg = mne.pick_types(interpolated.info, eeg=True, exclude=[])
-    return interpolated._data[eeg].mean(axis=0)
+def _robust_mean(raw, bads, flatlines=None, geometry=None):
+    """Mean of genuine channels and spline repairs, using cached configuration weights."""
+    return _flatline_aware_mean(raw, bads, flatlines, geometry)
 
 
 def robust_average_reference_inplace(
     raw, reference_channel=None, max_iterations=10, *, ransac_method="threshold",
-    return_details=False,
+    flatlines=None, return_details=False,
 ):
     """Robust-average-reference preloaded raw in place; return (report, bads, reference).
 
     Require the native reference, as in bad_ch_by_flatline. Existing bads stay
     bad and are never re-evaluated. Non-bad EEG data must be finite.
 
-    Each pass takes the robust mean: on a copy, interpolate the existing EEG
-    bads and the channels the previous pass flagged (none in the first pass)
-    with MNE's spherical splines at default settings, then average all EEG
-    channels, including the native reference (all zero) and the interpolated
-    channels. Subtract this mean from every EEG channel of another copy, whose
-    bad channels are not interpolated, and run bad_ch_by_voltage (no plot),
+    Each pass takes the robust mean after spherical repair of existing EEG
+    bads and the previous pass's flags, plus exact local flat spans. For each
+    configuration, repair their union using genuine, nonflat donors. Cached
+    weights combine repair and averaging into one projection without making
+    reconstructed channel traces. Subtract this mean from every EEG channel
+    of another copy, whose bad channels are not interpolated, and run
+    bad_ch_by_voltage (no plot),
     bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std,
     bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC (with
     method=ransac_method) on it in that order: the detectors that require
@@ -1800,7 +1800,8 @@ def robust_average_reference_inplace(
     the cycle as bad, and recompute the robust mean with them interpolated.
     Raise if neither has happened within max_iterations passes.
 
-    Then interpolate every bad EEG channel in raw, subtract the last robust
+    Then reconstruct whole-channel bads and exact local flat spans in raw,
+    using the same cached geometry/configurations, and subtract the last robust
     mean from every EEG channel, and remove the EEG channels from
     raw.info["bads"], so all EEG channels average to zero. Non-EEG channels are
     unchanged. Unless the reference channel was interpolated, verify that it
@@ -1817,7 +1818,10 @@ def robust_average_reference_inplace(
     channels it flagged), and each criterion's details from its detector with
     return_details=True. Each detector's details cover the channels it
     evaluated, without the existing bads and the channels flagged before it in
-    that pass. A non-bad channel's final trace in raw is the signal they saw.
+    that pass. Known local flat observations are excluded from the applicable
+    detectors; their final repaired traces differ from the invalid inputs
+    those detectors excluded. Pass the dictionary from detect_flatline before
+    filtering; its alignment is validated, and global annotations are retained.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -1826,30 +1830,32 @@ def robust_average_reference_inplace(
     if ransac_method not in ("threshold", "robust_z"):
         raise ValueError('ransac_method must be "threshold" or "robust_z".')
     reference_channel = _reference_channel(raw, "native", reference_channel)
+    _validate_flatlines(raw, flatlines)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
     orig_bads = list(raw.info["bads"])
     initial = [name for name in eeg_names if name in orig_bads]
     if not np.isfinite(raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]).all():
         raise ValueError("Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first.")
+    geometry = _spline_geometry(raw)
 
     detectors = (
         # the first three can also run on native reference
         partial(bad_ch_by_voltage, plot=False),
-        bad_ch_by_HFnoise,
+        partial(bad_ch_by_HFnoise, flatlines=flatlines),
         bad_ch_by_pop,
         # the next five require average reference
-        bad_ch_by_smallness,
-        bad_ch_by_std,
-        bad_ch_by_BBnoise,
+        partial(bad_ch_by_smallness, flatlines=flatlines),
+        partial(bad_ch_by_std, flatlines=flatlines),
+        partial(bad_ch_by_BBnoise, flatlines=flatlines),
         # cross-channel detectors last; RANSAC's predictors exclude correlation's flags
-        bad_ch_by_correlation,
+        partial(bad_ch_by_correlation, flatlines=flatlines),
         partial(bad_ch_by_RANSAC, method=ransac_method),
     )
     flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
-        reference = _robust_mean(raw, initial + flagged)
+        reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
         referenced = raw.copy()
         referenced._data[eeg] -= reference
         report, pass_details = {}, {"interpolated": initial + flagged}
@@ -1881,7 +1887,7 @@ def robust_average_reference_inplace(
             warnings.warn(f"Robust average reference cycled: pass {len(history) + 1} would "
                           f"repeat pass {start + 1}, with {flipping} flipping. Treating every "
                           f"channel flagged in the cycle as bad: {flagged}.", stacklevel=2)
-            reference = _robust_mean(raw, initial + flagged)
+            reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
             break
         flagged = new
     else:
@@ -1889,9 +1895,7 @@ def robust_average_reference_inplace(
                            f"passes; bad channels flagged per pass: {history}")
 
     bads = [name for name in eeg_names if name in initial or name in flagged]
-    raw.info["bads"] = bads
-    if bads:
-        raw.interpolate_bads(reset_bads=True, on_bad_position="raise", verbose=False)
+    _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines, geometry)
     raw._data[eeg] -= reference
     raw.info["bads"] = [name for name in orig_bads if name not in eeg_names]
     if reference_channel not in bads and not np.array_equal(
@@ -1980,7 +1984,9 @@ if __name__ == "__main__":
 
     # %% Robust average reference: interpolate all bad channels, which info["bads"]
     # no longer lists; bad_ch_report keeps them by criterion.
-    robust_report, interpolated_bads, robust_reference = robust_average_reference_inplace(raw_bads)
+    robust_report, interpolated_bads, robust_reference = robust_average_reference_inplace(
+        raw_bads, flatlines=flatlines
+    )
     for criterion, names in robust_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
     plot_bad_ch_report(raw_bads, bad_ch_report)
