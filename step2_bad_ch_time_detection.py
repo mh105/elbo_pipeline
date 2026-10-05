@@ -1989,8 +1989,7 @@ def robust_average_reference_inplace(
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-02"
-    raw = load_raw_data(subject_id)
+    raw = load_raw_data("sub-02")
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}

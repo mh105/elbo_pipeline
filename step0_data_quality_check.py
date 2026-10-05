@@ -247,8 +247,7 @@ def plot_sensor_locations(raw, sphere, selected=()):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-03"
-    raw = load_raw_data(subject_id)
+    raw = load_raw_data("sub-03")
 
     # %% Inspect all annotations/events and counts before the quality check
     # regexp=None retains BAD*/EDGE* annotations that MNE normally excludes.

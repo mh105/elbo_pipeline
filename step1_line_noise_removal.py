@@ -77,8 +77,7 @@ def remove_line_noise_inplace(raw, raw_prep, clean):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-02"
-    raw = load_raw_data(subject_id)
+    raw = load_raw_data("sub-02")
 
     # %% Line noise removal
 
