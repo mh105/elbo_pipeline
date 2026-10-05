@@ -56,6 +56,7 @@ from step1_line_noise_removal import ZapLine_notch, Interpolate_fft, remove_line
 # %% Part 1: Bad-channel detection
 
 # Local, time-invariant criteria
+
 def bad_ch_by_impedance(
     raw,
     initial_impedance,
