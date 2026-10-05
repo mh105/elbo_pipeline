@@ -341,9 +341,13 @@ def mask_segment_by_voltage(
 ):
     """Append BAD_voltage_mask annotations to raw in place; return None.
 
-    Exclude existing bads and non-EEG channels. Accept the native reference,
-    excluded as in bad_ch_by_voltage, or re-referenced data. With
-    require_average=True, require re-referenced data as in bad_ch_by_smallness.
+    Use only EEG channels not listed in raw.info["bads"]. On native-referenced
+    data, also exclude the all-zero reference channel (e.g., Cz). After
+    re-referencing, include the former reference channel if it is not bad.
+    These selected channels form both the exceedance count and the denominator
+    for channel_fraction_cutoff; bads, non-EEG channels, and the native zero
+    reference contribute to neither. With require_average=True, require
+    re-referenced data with no entirely zero EEG channel.
     A channel exceeds the threshold in a window if any sample is strictly outside
     +/-voltage_threshold_uv. Annotate the entire window when strictly more
     than channel_fraction_cutoff of eligible channels exceed it, even if
