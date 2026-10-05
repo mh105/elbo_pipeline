@@ -9,6 +9,7 @@ from scipy.linalg import solve
 from flatline import _flatline_configurations, _validate_flatlines
 
 
+# Bound temporary donor-data copies (8 MiB for 128 float64 channels).
 _SAMPLE_CHUNK = 8192
 
 
