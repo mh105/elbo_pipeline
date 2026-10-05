@@ -2333,8 +2333,11 @@ def robust_average_reference_inplace(
         raise RuntimeError(f"Reference channel {reference_channel} does not hold minus the "
                            "robust mean after re-referencing.")
     if return_details:
-        details = {"iterations": iterations, "final_reference": reference,
-                   "initial_bads": initial}
+        details = {
+            "initial_bads": initial,
+            "iterations": iterations,
+            "final_reference": reference
+        }
         return robust_bad_ch_report, details
     return robust_bad_ch_report
 
@@ -2399,9 +2402,7 @@ if __name__ == "__main__":
 
     # %% Robust average reference: interpolate all bad channels, which info["bads"]
     # no longer lists; bad_ch_report keeps them by criterion.
-    robust_bad_ch_report = robust_average_reference_inplace(
-        raw_bads, flatlines=flatlines
-    )
+    robust_bad_ch_report = robust_average_reference_inplace(raw_bads, flatlines=flatlines)
     for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
     plot_bad_ch_report(raw_bads, bad_ch_report)
