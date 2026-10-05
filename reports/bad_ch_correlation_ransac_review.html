@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Correlation &amp; RANSAC bad-channel detectors: PREP vs EEGLAB vs eegprep</title>
+<style>
+  :root { --fg:#1d2330; --mute:#5b6475; --line:#d9dee7; --bg2:#f5f7fa; --acc:#2d5fa8; --warn:#a1470f; --bug:#b3261e; --ok:#1e7a3c; }
+  body { font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--fg); max-width: 1180px; margin: 28px auto; padding: 0 22px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 30px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--acc); color: var(--acc); }
+  h3 { font-size: 14.5px; margin: 18px 0 6px; }
+  .meta { color: var(--mute); font-size: 12.5px; margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 5px 8px; vertical-align: top; text-align: left; }
+  th { background: #e9eef6; font-weight: 600; }
+  td:first-child { font-weight: 600; white-space: nowrap; background: var(--bg2); }
+  table.plain td:first-child { white-space: normal; }
+  code { font: 12px Menlo, Consolas, monospace; background: #eef1f5; padding: 0 3px; border-radius: 3px; }
+  .cite { color: var(--mute); font-size: 11.5px; }
+  .b { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 0 5px; border-radius: 3px; color: #fff; vertical-align: 1px; }
+  .bug { background: var(--bug); } .q { background: var(--warn); } .ok { background: var(--ok); } .same { background: #6b7280; }
+  ul { margin: 4px 0 8px; padding-left: 20px; } li { margin: 2px 0; }
+  .key li { margin: 5px 0; }
+  .note { color: var(--mute); font-size: 12.5px; }
+  ol.dec > li { margin: 7px 0; }
+  ol.dec .lean { color: var(--acc); }
+  .grp { font-weight: 700; margin: 14px 0 2px; color: var(--fg); }
+</style>
+</head>
+<body>
+
+<h1>Correlation &amp; RANSAC bad-channel detectors: PREP vs EEGLAB clean_rawdata (MATLAB) vs eegprep (Python)</h1>
+<div class="meta">2026-10-02; plan (§8) and first results (§9) updated 2026-10-05 · for <code>step2_bad_ch_time_detection.py</code>: <code>bad_ch_by_correlation</code> and <code>bad_ch_by_RANSAC</code>, implemented in commit a50f46a</div>
+<div class="meta"><b>Sources.</b> PREP: Bigdely-Shamlo et al. 2015 + EEG-Clean-Tools v0.57.0 (commit 0914132). EEGLAB: clean_rawdata d4b143f; its <code>.m</code> files are identical to <code>eeglab2026.0.0/plugins/clean_rawdata</code>. EEGPrep: Delorme et al. 2026 + eegprep 0.3.0 source.</div>
+<div class="meta"><b>Method.</b> Independent readers went through every source line by line, and their claims were re-checked adversarially against the source. MATLAB R2026a and Python were then run on the same sub-02 data. Citations are <code>file:line</code> in those repos.</div>
+
+<h2>1. Bottom line</h2>
+<ul class="key">
+  <li><b>RANSAC is the same algorithm in both code bases.</b> PREP's RANSAC is a port of Kothe's <code>clean_channels</code>.
+    <ul>
+      <li>Shared core: the same spherical-spline code; 50 random subsets of 25% of the channels, shared by all targets and windows; the per-sample lower median of the 50 predictions; and an uncentred cosine in 5-s windows.</li>
+      <li>Differences: thresholds (0.75 vs 0.8), the time rule (more than 40% vs more than 50% of the recording), the RNG, which channels may predict, and where it runs. PREP runs inside its robust-reference loop; EEGLAB runs it once, with no re-referencing.</li>
+    </ul></li>
+  <li><b>The two "correlation" detectors use different statistics and play different roles.</b>
+    <ul>
+      <li><b>PREP</b> runs it on every call, next to RANSAC. The score is the 98th percentile of |r| over all channels, which is about the 3rd-best partner at 129 channels. A channel is bad if that score is below 0.4 in more than 1% of 1-s windows.</li>
+      <li><b>EEGLAB</b> uses <code>clean_channels_nolocs</code> only as a fallback when RANSAC cannot run. It asks whether at least k = ceil(0.1·C) partners reach |r| ≥ 0.45 (k = 13 at 129 channels), in 2-s windows. A channel is bad if it fails in more than 50% of the time.</li>
+    </ul></li>
+  <li><b>EEGLAB's MATLAB and Python versions are aligned</b> <span class="b ok">VERIFIED</span>.
+    <ul>
+      <li>Same inputs and parameters flag the same channels on both paths, with bit-identical random draws and subsets.</li>
+      <li>Numerical differences are ≤ 1e-10. The closest any value came to its threshold was 7e-5.</li>
+      <li>The two diverge only on malformed inputs (§5).</li>
+    </ul></li>
+  <li><b>Your suspicion is correct: without locations, HF noise is skipped in BOTH versions.</b>
+    <ul>
+      <li>The HF z-scores are computed before the location check and then discarded on the error path. <code>LineNoiseCriterion</code> is never passed to <code>clean_channels_nolocs</code>.</li>
+      <li>Test: a channel with HF z = 15.3 was removed when locations were present and kept when they were absent, in both languages.</li>
+      <li>No comment, docstring or commit message says this is intended. The history points to a leftover: the location-free function dates from 2010, the location+HF function was added in 2014, and the older one was kept as a fallback.</li>
+      <li>The "more than 75% removed" guard also reroutes to this HF-blind path.</li>
+    </ul></li>
+  <li><b>Neither code base follows the PREP paper exactly.</b> Both carry defects we should not copy: the target is in its own predictor subset, the subset sampler is biased toward the middle of the channel list, the last window is dropped, the filter band depends on the sampling rate, the cosine is uncentred, and some paths skip or switch detectors silently (§6).</li>
+  <li><b>Their thresholds do not transfer to our data.</b> EEGLAB at default settings flagged 12 of 129 channels by RANSAC (plus 3 by HF) on 120 s of sub-02, with nothing injected (plain average reference, 0.5 Hz high-pass).</li>
+</ul>
+
+<h2>2. Where the detectors sit</h2>
+<table>
+  <tr><th style="width:15%"></th><th style="width:42%">PREP</th><th>EEGLAB clean_rawdata = eegprep</th></tr>
+  <tr><td>Entry point</td><td><code>findNoisyChannels.m</code>. It is called repeatedly inside the robust-reference loop, with flags accumulated as a union, then once more on the final referenced data.</td><td><code>clean_artifacts</code> calls <code>clean_channels</code> (needs locations), or <code>clean_channels_nolocs</code> as a fallback. Single pass.</td></tr>
+  <tr><td>Run together</td><td>NaN, NoData, deviation, HF, correlation, dropout, and low-SNR (= HF ∩ correlation); RANSAC runs last.</td><td>With locations: RANSAC <b>OR</b> HF. Without: location-free correlation only.</td></tr>
+  <tr><td>Reference of tested data</td><td>Data minus the current reference estimate: first the median, then the mean with the current bads interpolated. The channels being tested are not interpolated.</td><td>None; the input's own reference is used. The EEGPrep paper applies the common average reference <i>before</i> clean_rawdata; <code>bids_preproc.py</code> applies it <i>after</i>.</td></tr>
+  <tr><td>Pre-filter</td><td>A 1 Hz high-pass (<code>removeTrend</code>) before each call. Then an order-100 FIR low-pass (45 Hz pass, 50 Hz stop) if srate &gt; 100. <span class="cite">findNoisyChannels.m:163-168</span></td><td>
+    <ul>
+      <li>High-pass: <code>clean_drifts</code> 0.25–0.75 Hz. This is the scripted default; in the GUI, Highpass is off by default.</li>
+      <li>RANSAC: the same order-100 low-pass, if srate &gt; 100.</li>
+      <li>Location-free path: 50 and 60 Hz notches only; 65 Hz to Nyquist is kept. <span class="cite">clean_channels_nolocs.m:99</span></li>
+    </ul></td></tr>
+  <tr><td>No locations</td><td>Error. RANSAC can only be disabled with <code>ransacOff</code>.</td><td>Falls back to the location-free path. MATLAB falls back on <i>any</i> error; Python only on a ValueError that mentions "location". <span class="cite">clean_artifacts.m:253-262; clean_artifacts.py:235-247</span></td></tr>
+</table>
+
+<h2>3. Correlation detector</h2>
+<table>
+  <tr><th style="width:15%"></th><th style="width:42%">PREP bad-by-correlation</th><th>EEGLAB <code>clean_channels_nolocs</code></th></tr>
+  <tr><td>Role</td><td>Always on, alongside RANSAC</td><td>Fallback only</td></tr>
+  <tr><td>Data</td><td>X: 1 Hz high-pass, low-pass at about 45 Hz, current reference</td><td>50/60 Hz notches, no low-pass. srate ≤ 110 raises an error, which aborts <code>clean_artifacts</code>.</td></tr>
+  <tr><td>Channels in matrix</td><td>All evaluated channels except NaN/flat ones. Channels already bad by deviation or HF are included.</td><td>All channels</td></tr>
+  <tr><td>Window</td><td>1 s, non-overlapping. The offsets <code>1:F:S−F</code> drop the last window. <span class="b q">OFF-BY-ONE</span></td><td>2 s, same offsets</td></tr>
+  <tr><td>Per-window score</td><td>Pearson r per window, then |r| with the diagonal set to 0 but kept, then MATLAB <code>quantile(·,0.98)</code> over nCh values.
+    <ul>
+      <li>128 channels: 0.94·(3rd-largest) + 0.06·(4th-largest).</li>
+      <li>≤ 25 channels: the maximum.</li>
+    </ul>
+    <span class="cite">findNoisyChannels.m:202-210</span></td>
+    <td>Sorted |r|, self included. A window is flagged if <b>fewer than k = ceil(0.1·C)</b> other channels reach |r| ≥ 0.45 (k = 13 at 129 channels). It is a plain order statistic, with no interpolation. <span class="cite">clean_channels_nolocs.m:89,111-112</span></td></tr>
+  <tr><td>Window threshold</td><td>&lt; 0.4 (strict)</td><td>&lt; 0.45 (strict)</td></tr>
+  <tr><td>Channel rule</td><td>Fraction of bad windows &gt; 0.01, i.e. 6 bad 1-s windows in 10 min</td><td>Flagged samples &gt; 0.5·S. S includes the tail that was never analysed.</td></tr>
+  <tr><td>Coupled rules</td><td>
+    <ul>
+      <li>Dropout: a window with NaN r gets score 0, counts as a bad window, and also feeds its own &gt; 1% rule.</li>
+      <li>Low-SNR = HF ∩ correlation. These channels become "unusable".</li>
+    </ul></td><td>None</td></tr>
+  <tr><td>What it effectively tests</td><td>"Fewer than about 3 partners with |r| ≥ 0.4". On a dense cap this is a local test. It fires only on near-total loss of shared signal. A bad cluster of 3–4 or more channels rescues itself.</td><td>"Fewer than 13 partners with |r| ≥ 0.45". This penalises rim channels, which have few neighbours. It tolerates small shorted groups, as its docstring intends.</td></tr>
+</table>
+
+<h2>4. RANSAC / predictability detector</h2>
+<table>
+  <tr><th style="width:15%"></th><th style="width:42%">PREP</th><th>EEGLAB <code>clean_channels</code> (MATLAB = Python)</th></tr>
+  <tr><td>Predictor pool = evaluated set</td><td>Evaluated channels minus NaN/flat, deviation, correlation and dropout channels.
+    <ul>
+      <li><b>HF-only channels stay in.</b> The paper says all channels flagged by other criteria are removed.</li>
+      <li>Channels outside the pool are never scored by RANSAC.</li>
+    </ul>
+    <span class="cite">findNoisyChannels.m:229-246</span></td><td>All located channels. Channels flagged by HF are not excluded. No iteration.</td></tr>
+  <tr><td>Subset size</td><td><code>round(0.25·nEval)</code>, where nEval is counted <i>before</i> the exclusions above, so the effective fraction grows as channels are flagged.</td><td><code>round(0.25·C)</code>, where C includes unlocated channels. <span class="cite">clean_channels.m:70</span></td></tr>
+  <tr><td>Subsets / RNG</td><td>
+    <ul>
+      <li>50 subsets, one set shared by all targets and windows.</li>
+      <li>A private <code>RandStream</code> (mt19937ar, seed 435656) on each call; the sampler deletes each picked channel from the list.</li>
+      <li>Deterministic, but subset membership reshuffles whenever the pool changes.</li>
+    </ul></td><td>
+    <ul>
+      <li>50 subsets, shared.</li>
+      <li><code>rng('default')</code> resets MATLAB's <i>global</i> stream; this equals numpy <code>RandomState(5489)</code>.</li>
+      <li>Commit 2ee0662 (2025-12-21) switched MATLAB to a swap-based sampler that matches Python. EEGLAB releases from 2022-03 to 2025-12 therefore draw different subsets, and releases before 2022-03 were not reproducible.</li>
+    </ul></td></tr>
+  <tr><td>Sampler bias</td><td colspan="2"><span class="b q">BOTH</span> Both samplers use <code>round((n−1)·U)</code>, which gives the end positions half the probability. In the test, the last channel in the list was drawn at 0.133 instead of 0.248.</td></tr>
+  <tr><td>Target in own subset</td><td colspan="2"><span class="b bug">BOTH</span> Yes. Each subset is mapped onto <i>all</i> channels, including the subset's own members. The PREP paper (p. 9, left column) describes the predicted channel as excluded from its subset; neither paper discusses the issue.
+    <ul>
+      <li>With the fixed seed, each channel is in 5–21 of the 50 subsets. Self-weight on EGI-128: median 0.58, range 0.23–0.97.</li>
+      <li>Effect on sub-02 (EEGLAB code): median r rises by +0.088 for poorly predicted channels vs +0.013 for the rest. E4 and E49 are removed only when the target is excluded. In a PREP test, a bad channel's score went from 0.654 to 0.709.</li>
+    </ul>
+    <span class="cite">findNoisyChannels.m (calc_projector); clean_channels.m:181</span></td></tr>
+  <tr><td>Spline</td><td colspan="2"><span class="b same">SAME CODE</span> Kothe/Perrin spline: λ = 1e-5, m = 4, Legendre series summed to tol = eps (at most 500 terms). Positions are scaled to unit length without centring. PREP's <i>repair</i> step uses a different model (<code>eeg_interp</code>, λ = 0, 7 terms). For comparison, MNE <code>interpolate_bads</code> uses m = 4, 50 terms, α = 1e-5 and centres on a fitted sphere.</td></tr>
+  <tr><td>Aggregation</td><td colspan="2"><span class="b same">SAME</span> At each sample, the 50 predictions are sorted and the 25th is kept (<code>round(end/2)</code>). This is the "lower median": the usual median would average the 25th and 26th. On sub-02 this changed r by a median of 6e-5 and changed no decision. Because the median is taken sample by sample, the result stitches together different subsets' predictions and is not any single spatial interpolation.</td></tr>
+  <tr><td>Similarity</td><td colspan="2"><span class="b q">BOTH</span> Uncentred, signed cosine Σxy/(‖x‖‖y‖), i.e. Pearson r without removing the window means. It is biased by each window's DC offset and drift, so with the high-pass off it flags DC-offset channels. Being signed, it also flags polarity-flipped channels, as signed Pearson r would. <span class="cite">clean_channels.m:130</span></td></tr>
+  <tr><td>Window</td><td>5 s. The paper also says 4 s in places.</td><td>5 s</td></tr>
+  <tr><td>Window threshold</td><td>&lt; 0.75</td><td>&lt; 0.8. The <code>clean_channels.m</code> header says 0.85, and the EEGLAB tutorial uses 0.87.</td></tr>
+  <tr><td>Channel rule</td><td>#flagged × 5 s &gt; 0.4·S</td><td>&gt; 0.5·S via <code>clean_artifacts</code>, or 0.4 if <code>clean_channels</code> is called directly. Strict.</td></tr>
+  <tr><td>HF coupling</td><td>A separate criterion: whole recording, z &gt; 5 (1.4826·MAD).</td><td>Whole-recording HF z &gt; 4, OR-ed into the removal mask. <span class="cite">clean_channels.m:88-101,142</span></td></tr>
+  <tr><td>Guards</td><td>If the pool is too small, RANSAC is skipped with only a warning. Missing or NaN XYZ raises an error. srate ≤ 100 silently turns off both the low-pass and HF.</td><td>
+    <ul>
+      <li>≤ 50% of channels located: error, then fallback to the location-free path.</li>
+      <li>More than 75% of channels removed: error, then the same fallback, which loses HF.</li>
+      <li><code>ChannelCriterion 'off'</code> becomes a threshold of 0, which still flags r &lt; 0.</li>
+    </ul></td></tr>
+</table>
+
+<h2>5. EEGLAB MATLAB vs Python alignment</h2>
+<h3>Numerical test</h3>
+<p class="note">Data: sub-02 run-1, 100–220 s, 0.5 Hz high-pass, 250 Hz, average reference. Four injected faults: independent 1/f noise (E31), strong HF (E52), 50% bad time (E92), and moderate HF (E83). Scripts are in the session scratchpad (<code>parity/</code>).</p>
+<table class="plain">
+  <tr><th>Test</th><th>Result</th></tr>
+  <tr><td><code>clean_channels</code> at <code>clean_artifacts</code> parameters</td><td><span class="b ok">IDENTICAL</span> 15 channels removed on clean data, 18 on injected data</td></tr>
+  <tr><td><code>clean_channels_nolocs</code></td><td><span class="b ok">IDENTICAL</span> None removed on clean data; E31 and E52 on injected data</td></tr>
+  <tr><td><code>clean_artifacts</code> with locations (flatline + drifts + channels)</td><td><span class="b ok">IDENTICAL</span> 21 removed on clean data, 20 on injected data</td></tr>
+  <tr><td>Dispatch with no or empty XYZ</td><td><span class="b ok">IDENTICAL</span> Both fall back to the location-free path, and HF is never evaluated. E83 (HF z = 15.3) is removed when locations are present and kept when they are absent, in both.</td></tr>
+  <tr><td>RNG and subsets</td><td><span class="b ok">BIT-IDENTICAL</span> 2000 random draws; all 50 subsets</td></tr>
+  <tr><td>Intermediate values</td><td>Interpolation matrix ≤ 4e-11; window correlations ≤ 8e-11; HF z ≤ 4e-13. The closest value to a threshold was 7e-5.</td></tr>
+  <tr><td>Determinism</td><td>Identical across fresh sessions. MATLAB also resets the caller's global RNG.</td></tr>
+</table>
+<h3>Divergences (edge cases only; none apply to our data)</h3>
+<table class="plain">
+  <tr><th style="width:30%">Condition</th><th>MATLAB</th><th>Python</th></tr>
+  <tr><td>Standalone <code>clean_channels</code> HF default</td><td>4</td><td>5.0. Hidden when called through <code>clean_artifacts</code>. On sub-02 this flips Cz (z = 4.92). The repo's parity test compares 4 against 5.</td></tr>
+  <tr><td>Exactly 50% of channels located</td><td>Location-free fallback</td><td>RANSAC + HF on the located half</td></tr>
+  <tr><td>NaN coordinates</td><td>Counted as located. The interpolation matrix fills with NaN, so RANSAC is silently off and only HF flags.</td><td>Treated as missing: dropped, or fallback if all are NaN</td></tr>
+  <tr><td>Electrode at (0,0,0)</td><td>NaN weights</td><td>Finite but meaningless. The flag sets differ by about 6 channels.</td></tr>
+  <tr><td>Empty <code>chanlocs</code></td><td>Location-free fallback</td><td>IndexError (crash)</td></tr>
+  <tr><td>Non-integer srate near 100 Hz</td><td>Rounded first</td><td>Not rounded, so the low-pass and HF switch on or off</td></tr>
+  <tr><td>Fallback trigger</td><td>Any error</td><td>Only a ValueError that mentions "location"</td></tr>
+  <tr><td><code>[]</code> / <code>None</code> passed for parameters</td><td>Low-level default used</td><td>Treated as "off"</td></tr>
+</table>
+
+<h2>6. Defects and questionable choices not to inherit</h2>
+<table class="plain">
+  <tr><th style="width:27%">Issue</th><th style="width:9%">PREP</th><th style="width:9%">EEGLAB</th><th>Consequence</th></tr>
+  <tr><td>Target in its own predictor subset</td><td>✓</td><td>✓</td><td>Raises bad channels' predictability; contradicts the PREP paper</td></tr>
+  <tr><td>End-biased subset sampler</td><td>✓</td><td>✓</td><td>The first and last channels in the list are under-used as predictors</td></tr>
+  <tr><td>Offsets <code>1:F:S−F</code></td><td>✓</td><td>✓</td><td>The last full window is never analysed</td></tr>
+  <tr><td>Time rule divides by all samples S, not by the windows actually scored</td><td>✓ (RANSAC)</td><td>✓</td><td>Unscored samples count as clean time, so a slightly larger share of the scored windows must be bad than the nominal fraction (at most one extra window; e.g. 13 of 23 instead of 12 of 23 at 50%)</td></tr>
+  <tr><td>Fixed-order FIR whose band depends on srate</td><td>✓</td><td>✓</td><td>The 101-tap 45/50 Hz low-pass feeds the HF ratio, PREP's correlation and RANSAC in both. Zero-phase gain at 40 / 45 / 50 Hz: 1.00 / 0.78 / 0.01 at 250 Hz, but 0.71 / 0.39 / 0.13 at 1000 Hz. Our <code>_prep_hf_ratio</code> (HFnoise) ported this filter until 2026-10-02. Since then <code>_lowpass_45_hz</code> sizes a Hamming FIR from the 45–50 Hz transition (661 taps at 1000 Hz), so the band is the same at any sampling rate. HFnoise and both new detectors use it.</td></tr>
+  <tr><td>Uncentred cosine</td><td>✓</td><td>✓</td><td>RANSAC window score only; the correlation criteria use Pearson r. It equals Pearson when window means are ~0. On sub-02 the difference is negligible at 0.5 Hz / 5-s windows, but at our 0.3 Hz / 2-s windows it changed 2.7% of window flags and 2 removals.</td></tr>
+  <tr><td>Per-sample lower median</td><td>✓</td><td>✓</td><td>Lower vs usual median is negligible (no decision changed on sub-02). The sample-by-sample stitching makes the prediction hard to diagnose.</td></tr>
+  <tr><td>Correlation score rank depends on montage size</td><td>✓ (98th pct)</td><td>✓ (k = 0.1·C)</td><td>A fixed cutoff such as 0.4 means different things at 32 vs 128 channels</td></tr>
+  <tr><td>Silent skip or switch</td><td>RANSAC skipped with a warning; HF off at srate ≤ 100</td><td>Falls back to an HF-blind path; "off" is not off</td><td>Results cannot be compared across recordings</td></tr>
+  <tr><td>Thresholds tuned on a different high-pass</td><td>1 Hz</td><td>0.25–0.75 Hz</td><td>We use 0.3 Hz, with 2-s windows and the 129-channel net</td></tr>
+</table>
+
+<h2>7. Evidence from our data <span class="note">(exploratory: sub-02, plain average reference, no prior bad-channel removal)</span></h2>
+<ul>
+  <li><b>EEGLAB at defaults</b> (100–220 s):
+    <ul>
+      <li>RANSAC flagged E10, E16, E19, E20, E29, E30, E37, E87, E105, E112, E113 and E127.</li>
+      <li>HF flagged E55, E62 and Cz.</li>
+      <li>Injected faults also lowered a neighbour's score: E4's bad windows rose from 9/23 to 12/23.</li>
+    </ul></li>
+  <li><b>PREP-style score</b> (3rd-best |r|; 1–40 Hz, 2-s windows, 300–500 s): median 0.91, 1st percentile 0.56. An injected independent-noise channel scored about 0.17. A 0.4 cutoff therefore fires only on near-total loss of signal.</li>
+  <li><b>Median signed r with the 6 nearest neighbours:</b> 1st percentile 0.08, so it spreads channels out much more. Some central channels (E30, E13, E87) had weak or negative r with neighbours 2–3 cm away.</li>
+  <li><b>MNE spline noise gain</b> ‖w‖₂: leave-one-out median 0.47, versus 0.87 with 25% subsets. At the rim and around the eyes it is 0.81 (E126/E127) and 0.71 (E48/E119), so those channels are inherently less predictable.</li>
+  <li><b>Leave-one-out weights</b> are dominated by the 6 nearest neighbours (summed weight ≈ 1.06). A single bad neighbour carries weight ≈ 0.18, and a bridged twin would predict its target well.</li>
+  <li><b>Reference dependence:</b> the spline residual x − W·x<sub>S</sub> does not depend on the reference, because each row of W sums to 1 (verified for MNE). r does depend on it.</li>
+</ul>
+
+<h2>8. Implementation plan</h2>
+<p class="note">Decisions as of 2026-10-03; every detail is confirmed. Implemented in step2 and committed as a50f46a (2026-10-04); first results are in §9.</p>
+
+<h3>Both detectors</h3>
+<table class="plain">
+  <tr><th style="width:18%">Item</th><th>Specification</th></tr>
+  <tr><td>Roles</td><td>
+    <ul>
+      <li><b>Correlation</b> catches intermittent loss of shared signal: a channel that sometimes shows only its own signal, e.g. from broken contact.</li>
+      <li><b>RANSAC</b> catches channels that are persistently inconsistent with the field the other channels predict.</li>
+      <li>Bridged electrodes are out of scope for now.</li>
+    </ul></td></tr>
+  <tr><td>Reference</td><td>Require average reference: raise if any EEG channel, bad or not, is entirely zero, as in smallness, std and BBnoise. Exclude existing bads and non-EEG channels. Evaluate Cz as a normal channel.</td></tr>
+  <tr><td>Band</td><td>Filter an internal copy of the whole recording before windowing. The robust-reference loop and the other detectors stay at 0.3 Hz.
+    <ul>
+      <li>High-pass: 1 Hz, MNE's default FIR (1 Hz passband edge, −6 dB at 0.5 Hz, 3.3 s long).</li>
+      <li>Low-pass: 45 Hz passband, 50 Hz stopband, from <code>_lowpass_45_hz</code>, which <code>_prep_hf_ratio</code> also calls (Hamming FIR sized from the 5 Hz transition, 0.66 s long).</li>
+      <li><code>_band_limit</code> applies both filters and returns their combined reach, used to widen the masks.</li>
+    </ul></td></tr>
+  <tr><td>Windows</td><td>Complete non-overlapping 2-s windows from the first sample; the trailing partial window is dropped.</td></tr>
+  <tr><td>Masking</td><td>Compute the temporary voltage mask on the 0.3 Hz input. Widen each masked span on both sides by the filters' spread, then skip windows that overlap a mask or a BAD annotation. All fractions count retained windows only.
+    <ul>
+      <li>Widen by the filters' combined reach, computed from their lengths: about 2.3 s each way. That is 1.65 s for the high-pass, applied once, plus 0.66 s for the low-pass, applied forward and backward. The plan first said 2.0 s, because it counted the low-pass as a single pass.</li>
+    </ul></td></tr>
+  <tr><td>Place in the loop</td><td>In <code>robust_average_reference_inplace</code>, after BBnoise. Develop and test them inside the loop directly; the data they test there are not interpolated.
+    <ul>
+      <li>Correlation runs before RANSAC, as in PREP. Channels it flags then don't serve as RANSAC predictors.</li>
+      <li><code>ransac_method="threshold"</code> (default) or <code>"robust_z"</code> chooses RANSAC's flagging rule.</li>
+    </ul></td></tr>
+  <tr><td>Flat electrodes</td><td>Neither detector can catch them. Average referencing turns a constant into minus the mean, which is exactly what Cz becomes: sub-10's E119, flat in 412 of 414 raw windows, has r = 1.000 with Cz in all of them. <code>bad_ch_by_flatline</code> must catch them. It missed them while it ran after line-noise removal and the 0.3 Hz high-pass, which break exact equality. Since 2026-10-03 it runs on the unfiltered data right after cropping, and it now flags sub-10's E119. Tabled: electrodes flat in no more than 25% of windows still pass, e.g. sub-17's E119 (18%).</td></tr>
+  <tr><td>Cycles</td><td>No new mechanism. The existing cycle rule only compares flagged sets, so it doesn't matter which detector flags a channel. It needs every detector to be deterministic; for RANSAC that comes from the fixed seed.</td></tr>
+  <tr><td>Guards</td><td>Raise in house style; never skip a detector or switch algorithms silently. Raise on:
+    <ul>
+      <li>missing, NaN or zero-norm positions;</li>
+      <li>fewer than 32 predictors per target;</li>
+      <li>a constant evaluated channel in any retained window, in the input or the band-limited copy, or a constant RANSAC median prediction;</li>
+      <li>no retained windows;</li>
+      <li>sfreq ≤ 100 Hz.</li>
+    </ul></td></tr>
+</table>
+
+<h3>Correlation detector (PREP-style)</h3>
+<table class="plain">
+  <tr><th style="width:18%">Item</th><th>Specification</th></tr>
+  <tr><td>Per-window score</td><td>For each evaluated channel, compute its signed Pearson r with every other evaluated channel. The score is the 98th percentile of those values.
+    <ul>
+      <li>The self-correlation is excluded, and the quantile is numpy's default (linear). At 110–128 partners this falls between the 3rd and 4th best partner, as in PREP.</li>
+    </ul></td></tr>
+  <tr><td>Window rule</td><td>A window is bad if the score is &lt; 0.4 (strict).
+    <ul>
+      <li>Zero variance raises a <code>ValueError</code> instead of being handled. The check covers any evaluated channel in any retained window, both in the band-limited copy, where r would be undefined, and in the input, since filtering turns an exactly constant input into round-off noise that would otherwise pass silently. The same rule applies in RANSAC, also to a constant median prediction. It should never happen: no recording had a constant channel after average referencing (0 of 13,827 windows in 33 recordings). If it ever does, the error forces an inspection.</li>
+    </ul></td></tr>
+  <tr><td>Channel rule</td><td>A channel is bad if it is bad in strictly more than 1% of retained windows. In a 14-min recording that means 5 or more of about 415 windows.</td></tr>
+  <tr><td>Details</td><td>House fields, plus the per-window score (channels × windows).</td></tr>
+</table>
+
+<h3>RANSAC detector</h3>
+<table class="plain">
+  <tr><th style="width:18%">Item</th><th>Specification</th></tr>
+  <tr><td>Predictors</td><td>A fixed 32 channels per subset: round(0.25 × 129), 25% of <i>all</i> EEG channels, so the count is the same in every subject. Each subset is drawn uniformly from the non-bad channels, never including the target, using a fixed-seed local RNG. There are 50 subsets per target.
+    <ul>
+      <li>Subsets are drawn separately for each target, as the PREP paper describes. Excluding the target then leaves every target exactly 50 predictions. The shared-bag alternative leaves a varying ~35 after excluding the subsets that contain the target.</li>
+      <li>The RNG gives each target 50 random orderings of all other EEG channel names, fixed regardless of which channels are bad. Each subset takes the first 32 non-bad channels of its ordering. Subsets are then uniform, reproducible, and stable across passes: a newly bad channel is just replaced by the next one in the ordering.</li>
+      <li>Build the subsets and spline weights once per call; together they take a few MB. Compute the 50 predicted traces window by window, so they are never held for the whole recording.</li>
+    </ul></td></tr>
+  <tr><td>Prediction</td><td>Use MNE's spherical spline (<code>_make_interpolation_matrix</code>, origin as in <code>interpolate_bads</code>) from each subset to the target. Take the per-sample median of the 50 predicted traces: the usual median, from sorting float32 predictions, about 4× faster than a float64 median, with r changing by about 1e-7. Then compute one Pearson r per window between the channel and that median trace.</td></tr>
+  <tr><td>Flagging</td><td>Implement both rules behind a <code>method</code> argument and compare them on test runs. The details hold r and z for both rules either way.
+    <ul>
+      <li><b>Threshold:</b> a window is bad if r &lt; 0.75; a channel is bad if it is bad in more than 25% of retained windows.</li>
+      <li><b>Robust z:</b> pool r over the channel × retained-window matrix. z = (median − r) / (1.4826·MAD), so that a <i>low</i> r gives a high z. A window is bad if z &gt; 5; a channel is bad if it is bad in more than 25% of retained windows.</li>
+      <li>On a 120-s sub-02 crop, z = 5 fell at r = 0.72, and the two rules flagged nearly the same channels (18 vs 20). §9 compares them across all recordings.</li>
+    </ul></td></tr>
+  <tr><td>Details</td><td>House fields, plus:
+    <ul>
+      <li>per-window r and z (channels × windows);</li>
+      <li>the subsets;</li>
+      <li>the input, band-limited and median-predicted waveforms in flagged windows;</li>
+      <li>each channel's median noise gain ‖w‖₂ over its subsets, as a read-out for later diagnosis of rim bias; not used for flagging.</li>
+    </ul></td></tr>
+</table>
+
+<h3>Tabled</h3>
+<ul>
+  <li>The balance for frontal and face electrodes, including std flagging most frontal channels.</li>
+  <li>RANSAC's rim and periocular bias: look at more subjects first.</li>
+  <li>A median-over-windows rule: revisit together with std.</li>
+</ul>
+
+<h2>9. First results of the implementation</h2>
+<p class="note">2026-10-03 to 2026-10-05; exploratory. Scripts are in the session scratchpad.</p>
+
+<h3>Full robust-reference loop</h3>
+<table class="plain">
+  <tr><th style="width:30%"></th><th>sub-02 threshold</th><th>sub-02 robust z</th><th>sub-03 threshold</th><th>sub-03 robust z</th></tr>
+  <tr><td>New bad channels (12 and 13 without the new detectors)</td><td>30</td><td>28</td><td>31</td><td>45</td></tr>
+  <tr><td>Flagged by RANSAC</td><td>14</td><td>11</td><td>14</td><td>24</td></tr>
+  <tr><td>Flagged by correlation</td><td>4</td><td>5</td><td>5</td><td>2</td></tr>
+  <tr><td>Passes</td><td>4, cycle</td><td>3, cycle</td><td>5, cycle</td><td>3</td></tr>
+</table>
+<ul>
+  <li><b>Cycles</b> come from channels right at the 1% correlation cutoff. On sub-02, E45, E98 and E102 have 4–5 bad windows out of 414, against the more than 4.1 required, so they flip between passes.</li>
+  <li><b>RANSAC finds persistent outliers:</b> sub-02's E87, E112 and E30 have median r of 0.27–0.48.</li>
+  <li><b>sub-03's E43 and E44 have negative median r but are not inverted.</b> They correlate +0.90 to +0.98 with their closest neighbours (each other, E38, E128), but are uncorrelated with E39 and anticorrelated with E33 (−0.81), 2.7–4.3 cm away. That is a steep periocular field the spline can't follow: the rim bias, tabled.</li>
+  <li><b>Polarity inversion</b> (synthetic test): correlation misses it, because the inverted channel finds positive partners among channels anticorrelated with its true neighbours. RANSAC catches it, and a test covers this.</li>
+  <li><b>Runtime</b> per call on a 14-min recording: correlation about 5 s, RANSAC about 23 s (37 s with details).</li>
+</ul>
+
+<h3>Predictability across all 33 recordings <span class="note">(first pass: only the initial bads interpolated into the robust mean)</span></h3>
+<ul>
+  <li><b>High r is normal here.</b> Median RANSAC r over all channel-windows is 0.925–0.987, with a median of 0.965.</li>
+  <li><b>Why:</b> Pearson r weights frequencies by power, and most 1–45 Hz power is slow and spatially smooth.
+    <ul>
+      <li>PC1 explains 28–87% of the variance. In 26 recordings it sits on frontal or periocular channels, with most power at 1–4 Hz (eye activity).</li>
+      <li>With PC1 removed, median r is still 0.90–0.98.</li>
+      <li>sub-03, the highest at 0.987: about 91% of its power is at 1–4 Hz, predicted at r = 0.991, while 30–45 Hz is predicted at 0.908 but carries about 1% of the power. It still has a long low tail: 10% of channel-windows are below 0.78, and 18 channels have median r below 0.9.</li>
+    </ul></li>
+  <li><b>Ceiling effect.</b> r cannot exceed 1, so its spread shrinks as the median approaches 1 (Spearman −0.92 across recordings).
+    <ul>
+      <li>The raw-r robust-z cutoff therefore ranges from r = 0.56 to 0.90 and is strictest in the most predictable recordings (sub-03: 28 flags).</li>
+      <li>The fixed 0.75 rule instead flags more in less predictable recordings (Spearman −0.42; sub-11: 22 flags, sub-07: 0).</li>
+      <li>Flags per recording: median 11 for the fixed rule and 13 for robust z, 10 of them in common.</li>
+      <li>Robust z on Fisher-transformed r removes the coupling but flags nothing at z = 5, so it would need its own calibration.</li>
+    </ul></li>
+  <li><b>No sign of widespread bridging.</b> MNE's <code>compute_bridged_electrodes</code> reports 1,153 pairs in sub-03 and 3,606 in sub-20, against none in 30 recordings. Most are 7–17 cm apart, too far for salt bridges: its cutoff hit its 16 µV² limit. sub-10's 6 pairs (adjacent, about 1.2 µV²) look genuine.</li>
+  <li><b>What RANSAC measures here:</b> mostly whether a channel follows the slow, largely ocular field. A channel noisy only above about 8 Hz may still score high; HFnoise covers that.</li>
+</ul>
+
+<h3>Open</h3>
+<ul>
+  <li>Fixed threshold vs robust z. Leaning: the fixed threshold, which is interpretable and avoids the ceiling effect. Its cutoff level and the 25% rule still need calibrating.</li>
+  <li>The 1% correlation rule, given the flips at its edge.</li>
+</ul>
+
+</body>
+</html>
