@@ -243,6 +243,7 @@ def _finish_window_details(details, window_samples):
 
 
 # Local signal properties with time-dependent occurrence criteria
+
 def _near_constant_segments(data, min_samples, tolerance_v):
     """Union blocks of min_samples consecutive samples within tolerance_v volts."""
     if len(data) < min_samples:
