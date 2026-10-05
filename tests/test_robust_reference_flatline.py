@@ -50,8 +50,10 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
                            return_value={criterion: []})) for name, criterion in CRITERIA.items()}
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))
-            step2.robust_average_reference_inplace(raw, flatlines=flatlines)
+            report = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
+        self.assertEqual(report["initial"], ["T7"])
+        self.assertEqual(set().union(*report.values()), {"T7"})
         for name, detector in detectors.items():
             self.assertEqual(detector.call_count, 1)
             kwargs = detector.call_args.kwargs
@@ -78,21 +80,25 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
 
         def flag_f4(referenced, **kwargs):
             referenced.info["bads"] = list(dict.fromkeys(referenced.info["bads"] + ["F4"]))
-            return {"HFnoise": ["F4"]}
+            return {"HFnoise": ["F4"]}, {}
 
         with ExitStack() as stack:
             detectors = {name: stack.enter_context(patch.object(step2, name,
-                           return_value={criterion: []})) for name, criterion in CRITERIA.items()}
+                           return_value=({criterion: []}, {}))) for name, criterion in CRITERIA.items()}
             detectors["bad_ch_by_HFnoise"].side_effect = flag_f4
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))
             kernel = stack.enter_context(patch.object(step2, "_calc_g", wraps=step2._calc_g))
-            report, bads, reference = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
+            report, details = step2.robust_average_reference_inplace(
+                raw, flatlines=flatlines, return_details=True,
+            )
+        reference = details["final_reference"]
         self.assertEqual(geometry.call_count, 1)
         self.assertEqual(kernel.call_count, 1)
         self.assertEqual(detectors["bad_ch_by_HFnoise"].call_count, 2)
+        self.assertEqual(report["initial"], ["T7"])
         self.assertEqual(report["HFnoise"], ["F4"])
-        self.assertEqual(bads, ["F4", "T7"])
+        self.assertEqual(set().union(*report.values()), {"F4", "T7"})
         self.assertEqual(raw.info["bads"], ["EOG"])
         eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
         mean = expected._data[eeg].mean(axis=0)

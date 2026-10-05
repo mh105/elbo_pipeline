@@ -66,7 +66,8 @@ def scheduled_detector(schedule):
         names = schedule[min(len(calls), len(schedule) - 1)]
         calls.append(names)
         raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + names))
-        return {"HFnoise": list(names)}
+        result = {"HFnoise": list(names)}
+        return (result, {}) if kwargs.get("return_details", False) else result
     return detector, calls
 
 
@@ -76,14 +77,15 @@ class TestRobustAverageReference(unittest.TestCase):
         raw._data[NAMES.index("T7"), 100:200] = np.nan  # Interpolation never reads bads.
         raw.info["bads"] = ["T7", "EOG"]
         native = raw.copy()
-        report, bads, reference = step2.robust_average_reference_inplace(raw)
+        report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        reference = details["final_reference"]
 
-        self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
+        self.assertEqual(report, {"initial": ["T7"], "voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
                                   "BBnoise": [], "smallness": [], "correlation": [],
                                   "RANSAC": []})
-        self.assertEqual(bads, ["T7", "O1"])
+        self.assertEqual(set().union(*report.values()), {"T7", "O1"})
         self.assertEqual(raw.info["bads"], ["EOG"])
-        expected, mean = interpolated_average(native, bads)
+        expected, mean = interpolated_average(native, ["T7", "O1"])
         eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
         np.testing.assert_allclose(raw._data[eeg], expected._data[eeg], rtol=0, atol=1e-15)
         np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
@@ -94,23 +96,30 @@ class TestRobustAverageReference(unittest.TestCase):
 
     def test_details_describe_each_pass_without_changing_the_result(self):
         raw = make_native_raw(noisy="O1")
+        raw.info["bads"] = ["T7", "EOG"]
         expected = raw.copy()
-        expected_result = step2.robust_average_reference_inplace(expected)
-        *result, details = step2.robust_average_reference_inplace(raw, return_details=True)
-        self.assertEqual(result[:2], list(expected_result[:2]))
-        np.testing.assert_array_equal(result[2], expected_result[2])
+        expected_report = step2.robust_average_reference_inplace(expected)
+        report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        self.assertIsInstance(expected_report, dict)
+        self.assertEqual(report, expected_report)
+        self.assertEqual(report["initial"], ["T7"])
+        self.assertEqual(set(details), {"iterations", "final_reference"})
+        np.testing.assert_array_equal(details["final_reference"], -expected._data[NAMES.index("Cz")])
+        self.assertEqual(details["final_reference"].shape, (raw.n_times,))
+        self.assertEqual(details["final_reference"].dtype, np.dtype(np.float64))
         np.testing.assert_array_equal(raw.get_data(), expected.get_data())
-        self.assertEqual([d["interpolated"] for d in details], [[], ["O1"]])
-        self.assertEqual([d["flagged"] for d in details], [["O1"], ["O1"]])
+        iterations = details["iterations"]
+        self.assertEqual([d["interpolated"] for d in iterations], [["T7"], ["T7", "O1"]])
+        self.assertEqual([d["flagged"] for d in iterations], [["O1"], ["O1"]])
         for criterion in ("voltage", "smallness", "HFnoise", "pop", "std", "BBnoise",
                           "correlation", "RANSAC"):
-            self.assertIn(criterion, details[-1])
+            self.assertIn(criterion, iterations[-1])
         # std flags O1, so the detectors that run after it in the pass no longer evaluate it.
-        self.assertIn("O1", details[-1]["std"]["ch_names"])
+        self.assertIn("O1", iterations[-1]["std"]["ch_names"])
         for criterion in ("BBnoise", "correlation", "RANSAC"):
-            self.assertNotIn("O1", details[-1][criterion]["ch_names"])
-        self.assertNotIn("O1", details[-1]["RANSAC"]["subsets"])
-        voltage = details[-1]["voltage"]
+            self.assertNotIn("O1", iterations[-1][criterion]["ch_names"])
+        self.assertNotIn("O1", iterations[-1]["RANSAC"]["subsets"])
+        voltage = iterations[-1]["voltage"]
         self.assertEqual(len(voltage["exceed_fraction"]), len(voltage["ch_names"]))
         self.assertTrue((voltage["exceed_fraction"] <= 0.25).all())
 
@@ -124,10 +133,12 @@ class TestRobustAverageReference(unittest.TestCase):
                 native = raw.copy()
                 detector, calls = scheduled_detector(schedule)
                 with patch.object(step2, "bad_ch_by_HFnoise", detector):
-                    report, bads, reference = step2.robust_average_reference_inplace(raw)
+                    report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+                reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
+                self.assertEqual(report["initial"], [])
                 self.assertEqual(report["HFnoise"], final)
-                self.assertEqual(bads, final)
+                self.assertEqual(set().union(*report.values()), set(final))
                 expected, mean = interpolated_average(native, final)
                 np.testing.assert_allclose(raw.get_data(), expected.get_data(),
                                            rtol=0, atol=1e-15)
@@ -149,10 +160,12 @@ class TestRobustAverageReference(unittest.TestCase):
                                  rf"{re.escape(repr(flipping))} flipping.*as bad: "
                                  rf"{re.escape(repr(final))}"
                 ):
-                    report, bads, reference = step2.robust_average_reference_inplace(raw)
+                    report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+                reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
+                self.assertEqual(report["initial"], [])
                 self.assertEqual(report["HFnoise"], final)
-                self.assertEqual(bads, final)
+                self.assertEqual(set().union(*report.values()), set(final))
                 expected, mean = interpolated_average(native, final)
                 np.testing.assert_allclose(raw.get_data(), expected.get_data(),
                                            rtol=0, atol=1e-15)
