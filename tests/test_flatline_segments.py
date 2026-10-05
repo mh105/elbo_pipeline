@@ -36,7 +36,7 @@ def identity_filter(data, *args, **kwargs):
 
 def prescribed_segments(raw, by_name):
     with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-        result = step2._detect_flatline_data(raw, "Cz")
+        result = step2.detect_flatline(raw, "Cz")
     result["ch_names"] = list(by_name)
     result["segments"] = list(by_name.values())
     result["raw_segments"] = deepcopy(result["segments"])
@@ -50,7 +50,7 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[0, 3:13] = 2e-6
         raw._data[0, 24:33] = 2e-6
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-            result = step2._detect_flatline_data(raw, "Cz")
+            result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(result["segments"], [[[3, 13]]])
         self.assertNotIn("Cz", result["ch_names"])
@@ -63,7 +63,7 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[1, 5:15] = np.linspace(0, 1.001e-9, 10)
         raw._data[2, 5:25] = np.arange(20) * 0.4e-9
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-            result = step2._detect_flatline_data(raw, "Cz")
+            result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(result["segments"], [[[5, 15]]])
 
@@ -75,7 +75,7 @@ class TestFlatlineDetection(unittest.TestCase):
         def filtered(data, *args, **kwargs):
             return highpass.copy() if np.array_equal(data, raw._data[0]) else data.copy()
         with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
-            result = step2._detect_flatline_data(raw, "Cz")
+            result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["raw_segments"], [[[5, 15]]])
         self.assertEqual(result["highpass_segments"], [[[5, 24]]])
         self.assertEqual(result["segments"], [[[5, 24]]])
@@ -86,7 +86,7 @@ class TestFlatlineDetection(unittest.TestCase):
         raw.info["bads"] = ["E1"]
         raw.set_annotations(mne.Annotations([2], [1], ["BAD_test"]))
         original = raw.copy()
-        result = step2._detect_flatline_data(raw, "Cz")
+        result = step2.detect_flatline(raw, "Cz")
         row = result["ch_names"].index("E0")
         self.assertEqual(result["raw_segments"][row], [])
         self.assertTrue(any(start <= 500 and stop >= 1500
@@ -101,14 +101,14 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[1, 10] = np.nan
         raw.info["bads"] = ["E0", "E1"]
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter) as hp:
-            result = step2._detect_flatline_data(raw, "Cz")
+            result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(len(result["eeg_ch_names"]), 8)
         self.assertEqual(hp.call_count, 6)
         raw.info["bads"] = ["E0"]
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
             with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
-                step2._detect_flatline_data(raw, "Cz")
+                step2.detect_flatline(raw, "Cz")
 
     def test_ten_samples_do_not_depend_on_sampling_rate_or_reference_bad_label(self):
         for sfreq in (100, 1000):
@@ -117,13 +117,13 @@ class TestFlatlineDetection(unittest.TestCase):
                 raw._data[0] = 0
                 raw.info["bads"] = ["Cz"]
                 with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-                    result = step2._detect_flatline_data(raw, "Cz")
+                    result = step2.detect_flatline(raw, "Cz")
                 self.assertEqual(result["ch_names"], ["E0"])
                 self.assertEqual(result["segments"], [[[0, 10]]])
         raw = make_raw(n_times=9)
         raw._data[0] = 0
         with patch.object(step2.mne.filter, "filter_data") as hp:
-            result = step2._detect_flatline_data(raw, "Cz")
+            result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["ch_names"], [])
         hp.assert_not_called()
 

@@ -270,17 +270,19 @@ def _merge_segments(segments):
     return merged
 
 
-def _detect_flatline_data(raw, reference_channel):
-    """Detect original/1-Hz-high-passed flat segments without changing Raw.
+def detect_flatline(raw, reference_channel=None):
+    """Return sparse native-reference flat intervals without changing raw.
 
-    Include finite existing bad EEG channels, but exempt the native reference.
-    An already bad nonfinite channel is unavailable rather than flat. Store
-    only flagged channels; all sample bounds are relative to this Raw.
+    Union consecutive ten-sample blocks whose range is at most 1e-3 µV,
+    detected on the input and on a full-record 1-Hz high-passed copy. Bounds
+    are crop-relative half-open sample indices. The dictionary records channel
+    identities and sampling/crop metadata for validation by later consumers.
+    Run bad_ch_by_nan first; the native zero reference is exempt. Include
+    finite existing bad EEG channels; skip already bad nonfinite channels.
     """
+    reference_channel = _reference_channel(raw, "native", reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
-    if reference_channel not in eeg_names:
-        raise ValueError("reference_channel must name an EEG channel in raw.")
     result = {
         "ch_names": [], "segments": [], "raw_segments": [], "highpass_segments": [],
         "eeg_ch_names": eeg_names, "raw_ch_names": list(raw.ch_names),
@@ -461,19 +463,6 @@ def _flatline_configurations(raw, flatlines):
             pending = start, stop, pattern
     if pending is not None:
         yield pending
-
-
-def detect_flatline(raw, reference_channel=None):
-    """Return sparse native-reference flat intervals without changing raw.
-
-    Union consecutive ten-sample blocks whose range is at most 1e-3 µV,
-    detected on the input and on a full-record 1-Hz high-passed copy. Bounds
-    are crop-relative half-open sample indices. The dictionary records channel
-    identities and sampling/crop metadata for validation by later consumers.
-    Run bad_ch_by_nan first; the native zero reference is exempt.
-    """
-    reference_channel = _reference_channel(raw, "native", reference_channel)
-    return _detect_flatline_data(raw, reference_channel)
 
 
 def bad_ch_by_flatline(
