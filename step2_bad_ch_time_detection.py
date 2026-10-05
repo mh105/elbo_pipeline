@@ -2279,7 +2279,7 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_RANSAC, method=ransac_method, flatlines=flatlines,
                 _geometry=geometry),
     )
-    flagged, used, history, reports, iterations = [], [], [], [], []
+    flagged, used, reports, iterations = [], [], [], []
     for _ in range(max_iterations):
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
         reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
@@ -2296,9 +2296,8 @@ def robust_average_reference_inplace(
                if name in referenced.info["bads"] and name not in initial]
         pass_details["flagged"] = new
         iterations.append(pass_details)
-        history.append(new)
         reports.append(robust_bad_ch_report)
-        print(f"Robust average reference pass {len(history)}: bad channels {new}")
+        print(f"Robust average reference pass {len(iterations)}: bad channels {new}")
         if set(new) == set(flagged):
             break
         start = next((p for p, earlier in enumerate(used[:-1]) if set(earlier) == set(new)), None)
@@ -2313,7 +2312,7 @@ def robust_average_reference_inplace(
                             if any(name in r[criterion] for r in cycle_reports)]
                 for criterion in robust_bad_ch_report
             }
-            warnings.warn(f"Robust average reference cycled: pass {len(history) + 1} would "
+            warnings.warn(f"Robust average reference cycled: pass {len(iterations) + 1} would "
                           f"repeat pass {start + 1}, with {flipping} flipping. Treating every "
                           f"channel flagged in the cycle as bad: {flagged}.", stacklevel=2)
             reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
@@ -2321,7 +2320,8 @@ def robust_average_reference_inplace(
         flagged = new
     else:
         raise RuntimeError(f"Robust average reference did not converge in {max_iterations} "
-                           f"passes; bad channels flagged per pass: {history}")
+                           f"passes; bad channels flagged per pass: "
+                           f"{[p['flagged'] for p in iterations]}")
 
     bads = [name for name in eeg_names if name in initial or name in flagged]
     _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines, geometry)
