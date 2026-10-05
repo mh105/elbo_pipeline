@@ -243,19 +243,22 @@ def _finish_window_details(details, window_samples):
 
 
 # Local signal properties with time-dependent occurrence criteria
-def _near_constant_segments(data):
-    """Union all ten-sample blocks whose full range is at most one nanovolt."""
-    if len(data) < 10:
+def _near_constant_segments(data, min_samples):
+    """Union blocks of min_samples consecutive samples within one nanovolt."""
+    if len(data) < min_samples:
         return []
-    high = maximum_filter1d(data, size=10, origin=-5, mode="nearest")[:-9]
-    low = minimum_filter1d(data, size=10, origin=-5, mode="nearest")[:-9]
+    n_starts = len(data) - min_samples + 1
+    high = maximum_filter1d(data, size=min_samples, origin=-(min_samples // 2),
+                            mode="nearest")[:n_starts]
+    low = minimum_filter1d(data, size=min_samples, origin=-(min_samples // 2),
+                           mode="nearest")[:n_starts]
     starts = np.flatnonzero(high - low <= 1e-9)
     if not len(starts):
         return []
     changes = np.zeros(len(data) + 1, dtype=np.int16)
     changes[starts] += 1
-    changes[starts + 10] -= 1
-    flat = np.cumsum(changes[:-1], dtype=np.int16) > 0
+    changes[starts + min_samples] -= 1
+    flat = np.cumsum(changes[:-1]) > 0
     return np.flatnonzero(np.diff(np.r_[False, flat, False])).reshape(-1, 2).tolist()
 
 
@@ -270,16 +273,22 @@ def _merge_segments(segments):
     return merged
 
 
-def detect_flatline(raw, reference_channel=None):
+def detect_flatline(raw, reference_channel=None, *, min_samples=10):
     """Return sparse native-reference flat intervals without changing raw.
 
-    Union consecutive ten-sample blocks whose range is at most 1e-3 µV,
-    detected on the input and on a full-record 1-Hz high-passed copy. Bounds
-    are crop-relative half-open sample indices. The dictionary records channel
-    identities and sampling/crop metadata for validation by later consumers.
+    Union blocks of min_samples consecutive samples with range at most 1e-3 µV,
+    detected on the input and on a full-record 1-Hz high-passed copy.
+    min_samples must be a positive integer (default 10), independent of
+    sampling rate. Bounds are crop-relative half-open sample indices. The
+    dictionary records min_samples, channel identities, and sampling/crop
+    metadata for validation by later consumers.
     Run bad_ch_by_nan first; the native zero reference is exempt. Include
     finite existing bad EEG channels; skip already bad nonfinite channels.
     """
+    if (isinstance(min_samples, (bool, np.bool_))
+            or not isinstance(min_samples, (int, np.integer)) or min_samples < 1):
+        raise ValueError("min_samples must be a positive integer.")
+    min_samples = int(min_samples)
     reference_channel = _reference_channel(raw, "native", reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
@@ -288,7 +297,7 @@ def detect_flatline(raw, reference_channel=None):
         "eeg_ch_names": eeg_names, "raw_ch_names": list(raw.ch_names),
         "sfreq": float(raw.info["sfreq"]), "first_samp": int(raw.first_samp),
         "n_times": int(raw.n_times), "reference_channel": reference_channel,
-        "min_samples": 10, "tolerance_v": 1e-9, "highpass_hz": 1.0,
+        "min_samples": min_samples, "tolerance_v": 1e-9, "highpass_hz": 1.0,
         "global_channel_fraction_cutoff": 0.25,
     }
     for pick in eeg:
@@ -300,13 +309,13 @@ def detect_flatline(raw, reference_channel=None):
             if name in raw.info["bads"]:
                 continue
             raise ValueError("Nonfinite data in EEG channels; run bad_ch_by_nan first.")
-        original = _near_constant_segments(data)
+        original = _near_constant_segments(data, min_samples)
         filtered = []
-        if len(data) >= 10:
+        if len(data) >= min_samples:
             highpass = mne.filter.filter_data(
                 data, raw.info["sfreq"], l_freq=1.0, h_freq=None, verbose=False,
             )
-            filtered = _near_constant_segments(highpass)
+            filtered = _near_constant_segments(highpass, min_samples)
         combined = _merge_segments(original + filtered)
         if combined:
             result["ch_names"].append(name)

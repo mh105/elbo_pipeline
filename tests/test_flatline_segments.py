@@ -57,6 +57,53 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertEqual(result["min_samples"], 10)
         self.assertEqual(result["tolerance_v"], 1e-9)
 
+    def test_custom_min_samples_applies_to_raw_and_highpass_detection(self):
+        for min_samples in (5, 6, 15, np.int64(7)):
+            with self.subTest(min_samples=min_samples):
+                raw = make_raw(n_times=70, n_eeg=4)
+                raw._data[0, 3:3 + min_samples] = 2e-6
+                raw._data[1, 35:35 + min_samples - 1] = 4e-6
+                highpass = raw._data[1].copy()
+                highpass[45:45 + min_samples] = 3e-6
+
+                def filtered(data, *args, **kwargs):
+                    return highpass.copy() if np.array_equal(data, raw._data[1]) else data.copy()
+
+                with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
+                    result = step2.detect_flatline(raw, "Cz", min_samples=min_samples)
+                self.assertEqual(result["ch_names"], ["E0", "E1"])
+                self.assertEqual(result["raw_segments"], [[[3, 3 + min_samples]], []])
+                expected = [[[3, 3 + min_samples]], [[45, 45 + min_samples]]]
+                self.assertEqual(result["highpass_segments"], expected)
+                self.assertEqual(result["segments"], expected)
+                self.assertEqual(result["min_samples"], min_samples)
+                self.assertIs(type(result["min_samples"]), int)
+
+    def test_custom_min_samples_handles_short_recordings(self):
+        for min_samples in (1, 3, 4):
+            with self.subTest(min_samples=min_samples):
+                raw = make_raw(n_times=3, n_eeg=2)
+                raw._data[0] = 2e-6
+                with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter) as hp:
+                    result = step2.detect_flatline(raw, "Cz", min_samples=min_samples)
+                qualifies = min_samples <= raw.n_times
+                self.assertEqual(result["segments"], [[[0, 3]]] if qualifies else [])
+                self.assertEqual(hp.call_count, int(qualifies))
+
+    def test_large_min_samples_preserves_one_contiguous_flat_segment(self):
+        raw = make_raw(n_times=65536, n_eeg=2)
+        raw._data[0] = 2e-6
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2.detect_flatline(raw, "Cz", min_samples=32768)
+        self.assertEqual(result["ch_names"], ["E0"])
+        self.assertEqual(result["segments"], [[[0, raw.n_times]]])
+
+    def test_min_samples_requires_a_positive_integer(self):
+        raw = make_raw()
+        for min_samples in (0, -1, 2.5, 10.0, np.nan, np.inf, "10", None, True, np.bool_(True)):
+            with self.subTest(min_samples=min_samples), self.assertRaisesRegex(ValueError, "min_samples"):
+                step2.detect_flatline(raw, "Cz", min_samples=min_samples)
+
     def test_full_range_includes_tolerance_and_does_not_chain_adjacent_differences(self):
         raw = make_raw(n_times=50)
         raw._data[0, 5:15] = np.linspace(0, 1e-9, 10)
