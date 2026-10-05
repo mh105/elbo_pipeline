@@ -816,7 +816,9 @@ def bad_ch_by_voltage(
             "exceed_fraction": fractions,
         }
     if not plot:
-        return (report, details) if return_details else report
+        if return_details:
+            return report, details
+        return report
 
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
     times = raw.times
@@ -853,7 +855,9 @@ def bad_ch_by_voltage(
     if bad_names:
         ax.legend(title="Flagged channels", loc="upper left", bbox_to_anchor=(1.01, 1))
     plt.show()
-    return (report, details) if return_details else report
+    if return_details:
+        return report, details
+    return report
 
 
 def bad_ch_by_smallness(
