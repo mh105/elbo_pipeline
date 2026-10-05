@@ -56,6 +56,60 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertNotIn("Cz", result["ch_names"])
         self.assertEqual(result["min_samples"], 10)
         self.assertEqual(result["tolerance_v"], 1e-9)
+        self.assertEqual(result["highpass_hz"], 1.0)
+        for key in ("global_channel_fraction_cutoff", "global_ch_names", "global_segments"):
+            self.assertNotIn(key, result)
+
+    def test_custom_tolerance_applies_to_raw_and_highpass_detection(self):
+        raw = make_raw(n_times=50, n_eeg=4)
+        tolerance_v = 2e-9
+        raw._data[0, 5:9] = np.linspace(0, tolerance_v, 4)
+        raw._data[1, 15:19] = np.linspace(0, 2.001e-9, 4)
+        highpass = raw._data[2].copy()
+        highpass[25:29] = np.linspace(0, tolerance_v, 4)
+
+        def filtered(data, *args, **kwargs):
+            return highpass.copy() if np.array_equal(data, raw._data[2]) else data.copy()
+
+        with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
+            default = step2.detect_flatline(raw, "Cz", min_samples=4)
+            result = step2.detect_flatline(raw, "Cz", min_samples=4, tolerance_v=tolerance_v)
+        self.assertEqual(default["segments"], [])
+        self.assertEqual(result["ch_names"], ["E0", "E2"])
+        self.assertEqual(result["raw_segments"], [[[5, 9]], []])
+        self.assertEqual(result["highpass_segments"], [[[5, 9]], [[25, 29]]])
+        self.assertEqual(result["segments"], [[[5, 9]], [[25, 29]]])
+        self.assertEqual(result["tolerance_v"], tolerance_v)
+
+    def test_zero_tolerance_requires_exact_equality(self):
+        raw = make_raw(n_times=50, n_eeg=3)
+        raw._data[0, 5:15] = 2e-6
+        raw._data[1, 25:35] = np.linspace(0, 1e-12, 10)
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2.detect_flatline(raw, "Cz", tolerance_v=0)
+        self.assertEqual(result["ch_names"], ["E0"])
+        self.assertEqual(result["segments"], [[[5, 15]]])
+        self.assertEqual(result["tolerance_v"], 0.0)
+
+    def test_custom_highpass_cutoff_is_used_and_recorded(self):
+        raw = make_raw(n_times=50, n_eeg=2)
+        highpass = raw._data[0].copy()
+        highpass[5:15] = 2e-6
+        with patch.object(step2.mne.filter, "filter_data", return_value=highpass) as hp:
+            result = step2.detect_flatline(raw, "Cz", highpass_hz=2.5)
+        self.assertEqual(hp.call_count, 1)
+        self.assertEqual(hp.call_args.kwargs, {"l_freq": 2.5, "h_freq": None, "verbose": False})
+        self.assertEqual(result["raw_segments"], [[]])
+        self.assertEqual(result["highpass_segments"], [[[5, 15]]])
+        self.assertEqual(result["highpass_hz"], 2.5)
+
+    def test_tolerance_and_highpass_cutoff_require_valid_ranges(self):
+        raw = make_raw()
+        for name, values in (("tolerance_v", (-1e-9, np.nan, np.inf)),
+                             ("highpass_hz", (0, -1, 50, 51, np.nan, np.inf))):
+            for value in values:
+                with self.subTest(parameter=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    step2.detect_flatline(raw, "Cz", **{name: value})
 
     def test_custom_min_samples_applies_to_raw_and_highpass_detection(self):
         for min_samples in (5, 6, 15, np.int64(7)):
@@ -176,6 +230,18 @@ class TestFlatlineDetection(unittest.TestCase):
 
 
 class TestFlatlineApplication(unittest.TestCase):
+    def test_global_metadata_is_added_only_by_flatline_masking(self):
+        raw = make_raw(n_times=50, n_eeg=9)
+        raw.info["bads"] = ["E7"]
+        result = prescribed_segments(raw, {"E0": [[10, 20]], "E1": [[10, 20]]})
+        for key in ("global_channel_fraction_cutoff", "global_ch_names", "global_segments"):
+            self.assertNotIn(key, result)
+        step2.mask_segment_by_flatline(raw, result, channel_fraction_cutoff=0.2)
+        self.assertEqual(result["global_channel_fraction_cutoff"], 0.2)
+        self.assertEqual(result["global_ch_names"], [f"E{i}" for i in range(7)])
+        self.assertEqual(result["global_segments"], [[10, 20]])
+        np.testing.assert_array_equal(raw.annotations.description, ["BAD_by_flatline"])
+
     def test_window_overlap_half_open_boundaries_and_partial_tail(self):
         mask = step2._segments_to_windows([[19, 30], [40, 49]], 10, 4)
         np.testing.assert_array_equal(mask, [False, True, True, False])

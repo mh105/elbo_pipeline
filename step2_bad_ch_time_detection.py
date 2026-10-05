@@ -243,8 +243,8 @@ def _finish_window_details(details, window_samples):
 
 
 # Local signal properties with time-dependent occurrence criteria
-def _near_constant_segments(data, min_samples):
-    """Union blocks of min_samples consecutive samples within one nanovolt."""
+def _near_constant_segments(data, min_samples, tolerance_v):
+    """Union blocks of min_samples consecutive samples within tolerance_v volts."""
     if len(data) < min_samples:
         return []
     n_starts = len(data) - min_samples + 1
@@ -252,7 +252,7 @@ def _near_constant_segments(data, min_samples):
                             mode="nearest")[:n_starts]
     low = minimum_filter1d(data, size=min_samples, origin=-(min_samples // 2),
                            mode="nearest")[:n_starts]
-    starts = np.flatnonzero(high - low <= 1e-9)
+    starts = np.flatnonzero(high - low <= tolerance_v)
     if not len(starts):
         return []
     changes = np.zeros(len(data) + 1, dtype=np.int16)
@@ -273,14 +273,19 @@ def _merge_segments(segments):
     return merged
 
 
-def detect_flatline(raw, reference_channel=None, *, min_samples=10):
+def detect_flatline(
+    raw, reference_channel=None, *, min_samples=10, tolerance_v=1e-9, highpass_hz=1.0,
+):
     """Return sparse native-reference flat intervals without changing raw.
 
-    Union blocks of min_samples consecutive samples with range at most 1e-3 µV,
-    detected on the input and on a full-record 1-Hz high-passed copy.
+    Union blocks of min_samples consecutive samples with range at most
+    tolerance_v volts, detected on the input and on a full-record copy filtered
+    with a high-pass cutoff of highpass_hz.
     min_samples must be a positive integer (default 10), independent of
-    sampling rate. Bounds are crop-relative half-open sample indices. The
-    dictionary records min_samples, channel identities, and sampling/crop
+    sampling rate. tolerance_v must be finite and nonnegative (default 1e-9 V,
+    or 1e-3 µV). highpass_hz must be finite, positive, and below Nyquist (default
+    1 Hz). Bounds are crop-relative half-open sample indices. The dictionary
+    records these detection settings, channel identities, and sampling/crop
     metadata for validation by later consumers.
     Run bad_ch_by_nan first; the native zero reference is exempt. Include
     finite existing bad EEG channels; skip already bad nonfinite channels.
@@ -288,7 +293,13 @@ def detect_flatline(raw, reference_channel=None, *, min_samples=10):
     if (isinstance(min_samples, (bool, np.bool_))
             or not isinstance(min_samples, (int, np.integer)) or min_samples < 1):
         raise ValueError("min_samples must be a positive integer.")
+    if not np.isfinite(tolerance_v) or tolerance_v < 0:
+        raise ValueError("tolerance_v must be finite and nonnegative (volts).")
+    if not np.isfinite(highpass_hz) or not 0 < highpass_hz < raw.info["sfreq"] / 2:
+        raise ValueError("highpass_hz must be finite, positive, and below the Nyquist frequency.")
     min_samples = int(min_samples)
+    tolerance_v = float(tolerance_v)
+    highpass_hz = float(highpass_hz)
     reference_channel = _reference_channel(raw, "native", reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
@@ -297,8 +308,7 @@ def detect_flatline(raw, reference_channel=None, *, min_samples=10):
         "eeg_ch_names": eeg_names, "raw_ch_names": list(raw.ch_names),
         "sfreq": float(raw.info["sfreq"]), "first_samp": int(raw.first_samp),
         "n_times": int(raw.n_times), "reference_channel": reference_channel,
-        "min_samples": min_samples, "tolerance_v": 1e-9, "highpass_hz": 1.0,
-        "global_channel_fraction_cutoff": 0.25,
+        "min_samples": min_samples, "tolerance_v": tolerance_v, "highpass_hz": highpass_hz,
     }
     for pick in eeg:
         name = raw.ch_names[pick]
@@ -309,13 +319,13 @@ def detect_flatline(raw, reference_channel=None, *, min_samples=10):
             if name in raw.info["bads"]:
                 continue
             raise ValueError("Nonfinite data in EEG channels; run bad_ch_by_nan first.")
-        original = _near_constant_segments(data, min_samples)
+        original = _near_constant_segments(data, min_samples, tolerance_v)
         filtered = []
         if len(data) >= min_samples:
             highpass = mne.filter.filter_data(
-                data, raw.info["sfreq"], l_freq=1.0, h_freq=None, verbose=False,
+                data, raw.info["sfreq"], l_freq=highpass_hz, h_freq=None, verbose=False,
             )
-            filtered = _near_constant_segments(highpass, min_samples)
+            filtered = _near_constant_segments(highpass, min_samples, tolerance_v)
         combined = _merge_segments(original + filtered)
         if combined:
             result["ch_names"].append(name)
