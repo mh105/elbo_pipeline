@@ -52,8 +52,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
                                                          wraps=step2._spline_geometry))
             report = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
-        self.assertEqual(report["initial"], ["T7"])
-        self.assertEqual(set().union(*report.values()), {"T7"})
+        self.assertEqual(report, {criterion: [] for criterion in CRITERIA.values()})
         for name, detector in detectors.items():
             self.assertEqual(detector.call_count, 1)
             kwargs = detector.call_args.kwargs
@@ -96,9 +95,9 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
         self.assertEqual(geometry.call_count, 1)
         self.assertEqual(kernel.call_count, 1)
         self.assertEqual(detectors["bad_ch_by_HFnoise"].call_count, 2)
-        self.assertEqual(report["initial"], ["T7"])
+        self.assertEqual(details["initial_bads"], ["T7"])
         self.assertEqual(report["HFnoise"], ["F4"])
-        self.assertEqual(set().union(*report.values()), {"F4", "T7"})
+        self.assertEqual(set().union(*report.values()), {"F4"})
         self.assertEqual(raw.info["bads"], ["EOG"])
         eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
         mean = expected._data[eeg].mean(axis=0)

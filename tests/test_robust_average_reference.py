@@ -80,10 +80,11 @@ class TestRobustAverageReference(unittest.TestCase):
         report, details = step2.robust_average_reference_inplace(raw, return_details=True)
         reference = details["final_reference"]
 
-        self.assertEqual(report, {"initial": ["T7"], "voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
+        self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
                                   "BBnoise": [], "smallness": [], "correlation": [],
                                   "RANSAC": []})
-        self.assertEqual(set().union(*report.values()), {"T7", "O1"})
+        self.assertEqual(details["initial_bads"], ["T7"])
+        self.assertEqual(set().union(*report.values()), {"O1"})
         self.assertEqual(raw.info["bads"], ["EOG"])
         expected, mean = interpolated_average(native, ["T7", "O1"])
         eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
@@ -102,8 +103,11 @@ class TestRobustAverageReference(unittest.TestCase):
         report, details = step2.robust_average_reference_inplace(raw, return_details=True)
         self.assertIsInstance(expected_report, dict)
         self.assertEqual(report, expected_report)
-        self.assertEqual(report["initial"], ["T7"])
-        self.assertEqual(set(details), {"iterations", "final_reference"})
+        self.assertNotIn("initial", report)
+        self.assertNotIn("initial_bads", report)
+        self.assertEqual(details["initial_bads"], ["T7"])
+        self.assertIsInstance(details, dict)
+        self.assertEqual(set(details), {"iterations", "final_reference", "initial_bads"})
         np.testing.assert_array_equal(details["final_reference"], -expected._data[NAMES.index("Cz")])
         self.assertEqual(details["final_reference"].shape, (raw.n_times,))
         self.assertEqual(details["final_reference"].dtype, np.dtype(np.float64))
@@ -136,7 +140,7 @@ class TestRobustAverageReference(unittest.TestCase):
                     report, details = step2.robust_average_reference_inplace(raw, return_details=True)
                 reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
-                self.assertEqual(report["initial"], [])
+                self.assertEqual(details["initial_bads"], [])
                 self.assertEqual(report["HFnoise"], final)
                 self.assertEqual(set().union(*report.values()), set(final))
                 expected, mean = interpolated_average(native, final)
@@ -163,7 +167,7 @@ class TestRobustAverageReference(unittest.TestCase):
                     report, details = step2.robust_average_reference_inplace(raw, return_details=True)
                 reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
-                self.assertEqual(report["initial"], [])
+                self.assertEqual(details["initial_bads"], [])
                 self.assertEqual(report["HFnoise"], final)
                 self.assertEqual(set().union(*report.values()), set(final))
                 expected, mean = interpolated_average(native, final)

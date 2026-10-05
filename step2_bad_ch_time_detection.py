@@ -2231,14 +2231,14 @@ def robust_average_reference_inplace(
     unchanged. Unless the reference channel was interpolated, verify that it
     now holds exactly minus the robust mean.
 
-    Return {criterion: names}, with "initial" containing existing bad EEG
-    channels and the other entries containing the last pass's detections
-    (after a cycle, each criterion's channels across the cycling passes).
-    The union of these lists is the final set of whole EEG channels interpolated.
+    Return robust_bad_ch_report, the last pass's {criterion: names} (after a
+    cycle, each criterion's channels across the cycling passes).
 
-    With return_details=True, return (report, details). details["final_reference"]
-    is the subtracted robust mean in volts, shape (n_times,); adding it back to
-    every EEG channel restores the reconstructed signals before re-referencing.
+    With return_details=True, return (robust_bad_ch_report, details).
+    details["initial_bads"] contains existing bad EEG channels in Raw order.
+    details["final_reference"] is the subtracted robust mean in volts, shape
+    (n_times,); adding it back to every EEG channel restores the reconstructed
+    signals before re-referencing.
     details["iterations"] is a list with one dict per pass: interpolated (the
     channels interpolated for its robust mean), flagged (the
     channels it flagged), and each criterion's details from its detector with
@@ -2279,25 +2279,25 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_RANSAC, method=ransac_method, flatlines=flatlines,
                 _geometry=geometry),
     )
-    flagged, used, history, reports, details = [], [], [], [], []
+    flagged, used, history, reports, iterations = [], [], [], [], []
     for _ in range(max_iterations):
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
         reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
         referenced = raw.copy()
         referenced._data[eeg] -= reference
-        report, pass_details = {}, {"interpolated": initial + flagged}
+        robust_bad_ch_report, pass_details = {}, {"interpolated": initial + flagged}
         for detector in detectors:
             result = detector(referenced, return_details=return_details)
             if return_details:
                 result, detector_details = result
                 pass_details[next(iter(result))] = detector_details
-            report.update(result)
+            robust_bad_ch_report.update(result)
         new = [name for name in eeg_names
                if name in referenced.info["bads"] and name not in initial]
         pass_details["flagged"] = new
-        details.append(pass_details)
+        iterations.append(pass_details)
         history.append(new)
-        reports.append(report)
+        reports.append(robust_bad_ch_report)
         print(f"Robust average reference pass {len(history)}: bad channels {new}")
         if set(new) == set(flagged):
             break
@@ -2308,9 +2308,11 @@ def robust_average_reference_inplace(
             flagged = [name for name in eeg_names if any(name in names for names in cycle)]
             flipping = [name for name in flagged if not all(name in names for names in cycle)]
             cycle_reports = reports[max(start, 1) - 1:]
-            report = {criterion: [name for name in eeg_names
-                                  if any(name in r[criterion] for r in cycle_reports)]
-                      for criterion in report}
+            robust_bad_ch_report = {
+                criterion: [name for name in eeg_names
+                            if any(name in r[criterion] for r in cycle_reports)]
+                for criterion in robust_bad_ch_report
+            }
             warnings.warn(f"Robust average reference cycled: pass {len(history) + 1} would "
                           f"repeat pass {start + 1}, with {flipping} flipping. Treating every "
                           f"channel flagged in the cycle as bad: {flagged}.", stacklevel=2)
@@ -2330,10 +2332,11 @@ def robust_average_reference_inplace(
     ):
         raise RuntimeError(f"Reference channel {reference_channel} does not hold minus the "
                            "robust mean after re-referencing.")
-    report = {"initial": initial, **report}
     if return_details:
-        return report, {"iterations": details, "final_reference": reference}
-    return report
+        details = {"iterations": iterations, "final_reference": reference,
+                   "initial_bads": initial}
+        return robust_bad_ch_report, details
+    return robust_bad_ch_report
 
 
 # %% Part 2: Definitive bad-time detection (to be developed)
@@ -2396,10 +2399,10 @@ if __name__ == "__main__":
 
     # %% Robust average reference: interpolate all bad channels, which info["bads"]
     # no longer lists; bad_ch_report keeps them by criterion.
-    robust_report = robust_average_reference_inplace(
+    robust_bad_ch_report = robust_average_reference_inplace(
         raw_bads, flatlines=flatlines
     )
-    for criterion, names in robust_report.items():
+    for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
     plot_bad_ch_report(raw_bads, bad_ch_report)
 
