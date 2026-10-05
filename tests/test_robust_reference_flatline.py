@@ -12,7 +12,6 @@ pipeline_dir = Path(__file__).resolve().parents[1]
 if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
-import spherical_spline as spline
 import step2_bad_ch_time_detection as step2
 from test_flatline_interpolation import flatlines_for, mne_reconstruction
 from test_robust_average_reference import NAMES, make_native_raw
@@ -50,7 +49,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
             detectors = {name: stack.enter_context(patch.object(step2, name,
                            return_value={criterion: []})) for name, criterion in CRITERIA.items()}
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
-                                                         wraps=spline._spline_geometry))
+                                                         wraps=step2._spline_geometry))
             step2.robust_average_reference_inplace(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
         for name, detector in detectors.items():
@@ -86,8 +85,8 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
                            return_value={criterion: []})) for name, criterion in CRITERIA.items()}
             detectors["bad_ch_by_HFnoise"].side_effect = flag_f4
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
-                                                         wraps=spline._spline_geometry))
-            kernel = stack.enter_context(patch.object(spline, "_calc_g", wraps=spline._calc_g))
+                                                         wraps=step2._spline_geometry))
+            kernel = stack.enter_context(patch.object(step2, "_calc_g", wraps=step2._calc_g))
             report, bads, reference = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
         self.assertEqual(kernel.call_count, 1)

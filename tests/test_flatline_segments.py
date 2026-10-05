@@ -12,7 +12,7 @@ pipeline_dir = Path(__file__).resolve().parents[1]
 if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
-import flatline
+import step2_bad_ch_time_detection as step2
 
 
 def make_raw(n_times=100, n_eeg=8, sfreq=100, first_samp=0, auxiliary=False):
@@ -35,8 +35,8 @@ def identity_filter(data, *args, **kwargs):
 
 
 def prescribed_segments(raw, by_name):
-    with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter):
-        result = flatline._detect_flatline_data(raw, "Cz")
+    with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+        result = step2._detect_flatline_data(raw, "Cz")
     result["ch_names"] = list(by_name)
     result["segments"] = list(by_name.values())
     result["raw_segments"] = deepcopy(result["segments"])
@@ -49,8 +49,8 @@ class TestFlatlineDetection(unittest.TestCase):
         raw = make_raw(n_times=50)
         raw._data[0, 3:13] = 2e-6
         raw._data[0, 24:33] = 2e-6
-        with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter):
-            result = flatline._detect_flatline_data(raw, "Cz")
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2._detect_flatline_data(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(result["segments"], [[[3, 13]]])
         self.assertNotIn("Cz", result["ch_names"])
@@ -62,8 +62,8 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[0, 5:15] = np.linspace(0, 1e-9, 10)
         raw._data[1, 5:15] = np.linspace(0, 1.001e-9, 10)
         raw._data[2, 5:25] = np.arange(20) * 0.4e-9
-        with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter):
-            result = flatline._detect_flatline_data(raw, "Cz")
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2._detect_flatline_data(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(result["segments"], [[[5, 15]]])
 
@@ -74,8 +74,8 @@ class TestFlatlineDetection(unittest.TestCase):
         highpass[13:24] = 2e-6
         def filtered(data, *args, **kwargs):
             return highpass.copy() if np.array_equal(data, raw._data[0]) else data.copy()
-        with patch.object(flatline.mne.filter, "filter_data", side_effect=filtered):
-            result = flatline._detect_flatline_data(raw, "Cz")
+        with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
+            result = step2._detect_flatline_data(raw, "Cz")
         self.assertEqual(result["raw_segments"], [[[5, 15]]])
         self.assertEqual(result["highpass_segments"], [[[5, 24]]])
         self.assertEqual(result["segments"], [[[5, 24]]])
@@ -86,7 +86,7 @@ class TestFlatlineDetection(unittest.TestCase):
         raw.info["bads"] = ["E1"]
         raw.set_annotations(mne.Annotations([2], [1], ["BAD_test"]))
         original = raw.copy()
-        result = flatline._detect_flatline_data(raw, "Cz")
+        result = step2._detect_flatline_data(raw, "Cz")
         row = result["ch_names"].index("E0")
         self.assertEqual(result["raw_segments"][row], [])
         self.assertTrue(any(start <= 500 and stop >= 1500
@@ -100,15 +100,15 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[0, 20:40] = 3e-6
         raw._data[1, 10] = np.nan
         raw.info["bads"] = ["E0", "E1"]
-        with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter) as hp:
-            result = flatline._detect_flatline_data(raw, "Cz")
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter) as hp:
+            result = step2._detect_flatline_data(raw, "Cz")
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(len(result["eeg_ch_names"]), 8)
         self.assertEqual(hp.call_count, 6)
         raw.info["bads"] = ["E0"]
-        with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter):
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
             with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
-                flatline._detect_flatline_data(raw, "Cz")
+                step2._detect_flatline_data(raw, "Cz")
 
     def test_ten_samples_do_not_depend_on_sampling_rate_or_reference_bad_label(self):
         for sfreq in (100, 1000):
@@ -116,23 +116,23 @@ class TestFlatlineDetection(unittest.TestCase):
                 raw = make_raw(n_times=10, sfreq=sfreq)
                 raw._data[0] = 0
                 raw.info["bads"] = ["Cz"]
-                with patch.object(flatline.mne.filter, "filter_data", side_effect=identity_filter):
-                    result = flatline._detect_flatline_data(raw, "Cz")
+                with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+                    result = step2._detect_flatline_data(raw, "Cz")
                 self.assertEqual(result["ch_names"], ["E0"])
                 self.assertEqual(result["segments"], [[[0, 10]]])
         raw = make_raw(n_times=9)
         raw._data[0] = 0
-        with patch.object(flatline.mne.filter, "filter_data") as hp:
-            result = flatline._detect_flatline_data(raw, "Cz")
+        with patch.object(step2.mne.filter, "filter_data") as hp:
+            result = step2._detect_flatline_data(raw, "Cz")
         self.assertEqual(result["ch_names"], [])
         hp.assert_not_called()
 
 
 class TestFlatlineApplication(unittest.TestCase):
     def test_window_overlap_half_open_boundaries_and_partial_tail(self):
-        mask = flatline._segments_to_windows([[19, 30], [40, 49]], 10, 4)
+        mask = step2._segments_to_windows([[19, 30], [40, 49]], 10, 4)
         np.testing.assert_array_equal(mask, [False, True, True, False])
-        np.testing.assert_array_equal(flatline._segments_to_windows([[20, 30]], 10, 4),
+        np.testing.assert_array_equal(step2._segments_to_windows([[20, 30]], 10, 4),
                                       [False, False, True, False])
 
     def test_masks_follow_picks_and_metadata_allow_filtering_and_bad_label_changes(self):
@@ -140,13 +140,13 @@ class TestFlatlineApplication(unittest.TestCase):
         result = prescribed_segments(raw, {"E0": [[19, 30]], "E1": [[35, 49]]})
         raw.info["bads"] = ["E0", "Cz"]
         raw._data += 1e-6  # Referencing/filtering preserves alignment, not amplitudes.
-        flatline._validate_flatlines(raw, result)
+        step2._validate_flatlines(raw, result)
         picks = [raw.ch_names.index(name) for name in ("E1", "Cz", "E0")]
-        mask = flatline._flatline_windows(raw, result, picks, 10, 4)
+        mask = step2._flatline_windows(raw, result, picks, 10, 4)
         np.testing.assert_array_equal(mask,
                                       [[False, False, False, True], [False] * 4,
                                        [False, True, True, False]])
-        np.testing.assert_array_equal(flatline._flatline_windows(raw, None, picks, 10, 4),
+        np.testing.assert_array_equal(step2._flatline_windows(raw, None, picks, 10, 4),
                                       np.zeros((3, 4), dtype=bool))
 
     def test_metadata_rejects_crop_resampling_channel_reordering_and_malformed_segments(self):
@@ -156,31 +156,31 @@ class TestFlatlineApplication(unittest.TestCase):
                    raw.copy().reorder_channels(list(reversed(raw.ch_names)))]
         for other in changed:
             with self.subTest(other=other), self.assertRaisesRegex(ValueError, "alignment"):
-                flatline._validate_flatlines(other, result)
+                step2._validate_flatlines(other, result)
         for intervals in ([[20, 10]], [[10.5, 20]], [[10, 101]], [[10, 30], [20, 40]]):
             malformed = deepcopy(result)
             malformed["segments"] = [intervals]
             with self.subTest(intervals=intervals), self.assertRaisesRegex(ValueError, "intervals"):
-                flatline._validate_flatlines(raw, malformed)
+                step2._validate_flatlines(raw, malformed)
 
     def test_global_threshold_uses_only_eligible_channels_and_strict_boundary(self):
         raw = make_raw(n_times=50, n_eeg=9)
         result = prescribed_segments(raw, {
             "E0": [[4, 20]], "E1": [[10, 30]], "E2": [[12, 18]],
         })
-        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
-        self.assertEqual(flatline._global_flatline_segments(result, names), [[12, 18]])
+        names = [raw.ch_names[i] for i in step2._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(step2._global_flatline_segments(result, names), [[12, 18]])
         result["segments"][2] = []
-        self.assertEqual(flatline._global_flatline_segments(result, names), [])  # 2/8 == 25%.
+        self.assertEqual(step2._global_flatline_segments(result, names), [])  # 2/8 == 25%.
         raw.info["bads"] = ["E3", "E4"]
-        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
-        self.assertEqual(flatline._global_flatline_segments(result, names), [[10, 20]])
+        names = [raw.ch_names[i] for i in step2._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(step2._global_flatline_segments(result, names), [[10, 20]])
         raw.info["bads"] = ["E0", "E3", "E4"]
-        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
-        self.assertEqual(flatline._global_flatline_segments(result, names), [])
+        names = [raw.ch_names[i] for i in step2._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(step2._global_flatline_segments(result, names), [])
         for cutoff in (-0.1, 1.1, np.nan):
             with self.subTest(cutoff=cutoff), self.assertRaises(ValueError):
-                flatline._global_flatline_segments(result, names, cutoff)
+                step2._global_flatline_segments(result, names, cutoff)
 
     def test_configurations_cover_recording_use_full_raw_indices_and_omit_global_spans(self):
         raw = make_raw(n_times=50, auxiliary=True)
@@ -189,8 +189,8 @@ class TestFlatlineApplication(unittest.TestCase):
         })
         expected = [(0, 4, ()), (4, 10, (1,)), (10, 20, ()),
                     (20, 30, (2,)), (30, 50, ())]
-        self.assertEqual(list(flatline._flatline_configurations(raw, result)), expected)
-        self.assertEqual(list(flatline._flatline_configurations(raw, None)), [(0, 50, ())])
+        self.assertEqual(list(step2._flatline_configurations(raw, result)), expected)
+        self.assertEqual(list(step2._flatline_configurations(raw, None)), [(0, 50, ())])
 
 
 if __name__ == "__main__":

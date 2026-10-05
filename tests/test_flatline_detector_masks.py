@@ -13,7 +13,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
-from flatline import _flatline_configurations
+from step2_bad_ch_time_detection import _flatline_configurations
 
 
 SFREQ = 250

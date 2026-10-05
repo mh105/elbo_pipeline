@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from test_bad_ch_cross_channel import WINDOW, field_raw, step2
-from spherical_spline import _spline_geometry
+from step2_bad_ch_time_detection import _spline_geometry
 
 
 def flatline_result(raw, by_name):
