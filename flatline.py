@@ -136,23 +136,35 @@ def _flatline_windows(raw, flatlines, picks, window_samples, n_windows):
     return mask
 
 
-def _global_flatline_segments(flatlines, channel_fraction_cutoff=0.25):
-    """Intervals with strictly more than the cutoff of all EEG channels flat.
+def _mask_eeg_picks(raw, reference_channel):
+    """Select mask numerator/denominator channels, excluding bads and reference."""
+    exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
+    picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
+    if len(picks) == 0:
+        raise ValueError("No usable EEG channels remain after exclusions.")
+    return picks
 
-    The denominator includes the exempt native reference and is independent
-    of later bad-channel labels. Count channels simultaneously, not windows.
+
+def _global_flatline_segments(flatlines, eligible_ch_names, channel_fraction_cutoff=0.25):
+    """Intervals with strictly more than the cutoff of eligible EEG channels flat.
+
+    Count only the supplied non-bad, non-reference channels, simultaneously
+    rather than per scoring window. Use this same pool for the denominator.
     """
     if not np.isfinite(channel_fraction_cutoff) or not 0 <= channel_fraction_cutoff <= 1:
         raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
     if flatlines is None:
         return []
     changes = defaultdict(int)
-    for intervals in flatlines["segments"]:
+    eligible = set(eligible_ch_names)
+    for name, intervals in zip(flatlines["ch_names"], flatlines["segments"]):
+        if name not in eligible:
+            continue
         for start, stop in intervals:
             changes[start] += 1
             changes[stop] -= 1
     count, previous, spans = 0, 0, []
-    threshold = channel_fraction_cutoff * len(flatlines["eeg_ch_names"])
+    threshold = channel_fraction_cutoff * len(eligible)
     for position in sorted(changes):
         if count > threshold and position > previous:
             if spans and spans[-1][1] == previous:
@@ -168,8 +180,10 @@ def _flatline_configurations(raw, flatlines):
     """Yield sample spans and locally flat full-Raw channel IDs.
 
     Cover the whole recording, merge identical neighbours, and omit local
-    channels inside global dropout intervals. These patterns are independent
-    of whole-channel bads, which callers combine with each pattern.
+    channels inside global dropout intervals. Reuse the intervals saved when
+    mask_segment_by_flatline annotated the native data, despite later changes
+    to bad labels. Without that mask call, derive intervals from current bads.
+    Callers combine each local pattern with their whole-channel bads.
     """
     _validate_flatlines(raw, flatlines)
     if flatlines is None:
@@ -181,9 +195,14 @@ def _flatline_configurations(raw, flatlines):
         for start, stop in intervals:
             events[start].append((pick, True))
             events[stop].append((pick, False))
-    for start, stop in _global_flatline_segments(
-        flatlines, flatlines.get("global_channel_fraction_cutoff", 0.25)
-    ):
+    global_segments = flatlines.get("global_segments")
+    if global_segments is None:
+        picks = _mask_eeg_picks(raw, flatlines["reference_channel"])
+        global_segments = _global_flatline_segments(
+            flatlines, [raw.ch_names[i] for i in picks],
+            flatlines.get("global_channel_fraction_cutoff", 0.25),
+        )
+    for start, stop in global_segments:
         events[start].append((None, True))
         events[stop].append((None, False))
     positions = sorted({0, raw.n_times, *events})

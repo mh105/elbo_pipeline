@@ -13,6 +13,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
+from flatline import _flatline_configurations
 
 
 SFREQ = 250
@@ -110,6 +111,93 @@ class TestPublicFlatlineStages(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "entire recording"):
             step2.mask_segment_by_flatline(raw, flatlines)
         self.assertIn("BAD_by_flatline", raw.annotations.description)
+
+    def test_masks_share_good_eeg_pool_excluding_native_reference_and_auxiliary_bads(self):
+        for reference_is_bad in (False, True):
+            with self.subTest(reference_is_bad=reference_is_bad):
+                raw = native_raw(n_nonreference=11)
+                raw.set_channel_types({"E9": "eog", "E10": "misc"})
+                raw.info["bads"] = ["E0", "E1", "E9"] + (["Cz"] if reference_is_bad else [])
+                for row in (0, 1, 2, 3, 9, 10):
+                    raw._data[row, 20:40] = 600e-6
+                for row in (0, 1, 9, 10):
+                    raw._data[row, 60:80] = 600e-6
+                flatlines = flatlines_for(raw, {
+                    "E0": [[20, 40], [60, 80]], "E1": [[20, 40], [60, 80]],
+                    "E2": [[20, 40]], "E3": [[20, 40]],
+                })
+                voltage = raw.copy()
+                original = raw.copy()
+                step2.mask_segment_by_flatline(raw, flatlines, reference_channel="Cz")
+                step2.mask_segment_by_voltage(voltage, window_length=10 / SFREQ)
+                self.assertEqual(flatlines["global_ch_names"], [f"E{i}" for i in range(2, 9)])
+                self.assertEqual(flatlines["global_segments"], [[20, 40]])  # 2/7 > 25%.
+                np.testing.assert_array_equal(raw.annotations.onset, voltage.annotations.onset)
+                np.testing.assert_array_equal(raw.annotations.duration, voltage.annotations.duration)
+                np.testing.assert_allclose(raw.annotations.onset, [20 / SFREQ])
+                np.testing.assert_allclose(raw.annotations.duration, [20 / SFREQ])
+                self.assertEqual(raw.info["bads"], original.info["bads"])
+                np.testing.assert_array_equal(raw.get_data(), original.get_data())
+
+    def test_mask_cutoff_is_strict_and_excludes_existing_bad_flat_channels(self):
+        raw = native_raw(n_nonreference=8)
+        flatlines = flatlines_for(raw, {"E0": [[20, 40]], "E1": [[20, 40]]})
+        raw._data[:2, 20:40] = 600e-6
+        voltage = raw.copy()
+        step2.mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_voltage(voltage, window_length=10 / SFREQ)
+        self.assertEqual(len(raw.annotations), 0)  # 2/8 is exactly 25%.
+        self.assertEqual(len(voltage.annotations), 0)
+        raw.info["bads"] = ["E6", "E7"]
+        step2.mask_segment_by_flatline(raw, flatlines)
+        self.assertEqual(flatlines["global_segments"], [[20, 40]])  # 2/6 > 25%.
+        only_bad = native_raw(n_nonreference=8)
+        only_bad.info["bads"] = ["E0", "E1", "E2", "E3"]
+        flatlines = flatlines_for(only_bad, {name: [[0, only_bad.n_times]]
+                                            for name in only_bad.info["bads"]})
+        step2.mask_segment_by_flatline(only_bad, flatlines)
+        self.assertEqual(len(only_bad.annotations), 0)
+        self.assertEqual(flatlines["global_segments"], [])
+
+    def test_flatline_mask_requires_native_reference_and_matching_detection_reference(self):
+        raw = native_raw()
+        flatlines = flatlines_for(raw, {})
+        with self.assertRaisesRegex(ValueError, "native reference"):
+            step2.mask_segment_by_flatline(average(raw.copy()), flatlines)
+        with self.assertRaisesRegex(ValueError, "not entirely zero"):
+            step2.mask_segment_by_flatline(raw, flatlines, reference_channel="E0")
+        raw._data[0] = 0
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            step2.mask_segment_by_flatline(raw, flatlines)
+        with self.assertRaisesRegex(ValueError, "match the reference"):
+            step2.mask_segment_by_flatline(raw, flatlines, reference_channel="E0")
+        step2.mask_segment_by_flatline(raw, flatlines, reference_channel="Cz")
+
+    def test_masks_raise_when_no_eligible_eeg_channels_remain(self):
+        raw = native_raw()
+        flatlines = flatlines_for(raw, {})
+        raw.info["bads"] = raw.ch_names[:-1]
+        for mask, args in ((step2.mask_segment_by_flatline, (flatlines,)),
+                           (step2.mask_segment_by_voltage, ())):
+            with self.subTest(mask=mask.__name__), self.assertRaisesRegex(ValueError, "No usable EEG"):
+                mask(raw, *args)
+        self.assertEqual(len(raw.annotations), 0)
+
+    def test_saved_global_intervals_survive_reference_and_bad_label_changes(self):
+        raw = native_raw(n_nonreference=7)
+        flatlines = flatlines_for(raw, {name: [[20, 40]] for name in ("E0", "E1", "E2")})
+        step2.mask_segment_by_flatline(raw, flatlines)
+        raw.info["bads"] = ["E0", "E1", "E2"]
+        average(raw)
+        self.assertEqual(flatlines["global_segments"], [[20, 40]])
+        self.assertEqual(list(_flatline_configurations(raw, flatlines)), [(0, raw.n_times, ())])
+        unmasked = native_raw(n_nonreference=12)
+        flatlines = flatlines_for(unmasked, {"E0": [[20, 40]], "E1": [[20, 40]]})
+        step2.mask_segment_by_flatline(unmasked, flatlines)
+        unmasked.info["bads"] = [f"E{i}" for i in range(2, 10)]
+        self.assertEqual(flatlines["global_segments"], [])
+        self.assertEqual(list(_flatline_configurations(unmasked, flatlines)),
+                         [(0, 20, ()), (20, 40, (0, 1)), (40, unmasked.n_times, ())])
 
 
 class TestLocalFlatlineMetricMasks(unittest.TestCase):

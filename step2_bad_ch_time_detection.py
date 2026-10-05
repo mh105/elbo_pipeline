@@ -46,7 +46,7 @@ import numpy as np
 from scipy.signal import fftconvolve, firwin
 from flatline import (
     _detect_flatline_data, _validate_flatlines, _flatline_windows,
-    _global_flatline_segments,
+    _global_flatline_segments, _mask_eeg_picks,
 )
 from spherical_spline import (
     _spline_geometry, _spline_weights, _flatline_aware_mean,
@@ -307,20 +307,31 @@ def bad_ch_by_flatline(
     return report
 
 
-def mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
+def mask_segment_by_flatline(
+    raw, flatlines, channel_fraction_cutoff=0.25, *, reference_channel=None,
+):
     """Append exact BAD_by_flatline dropout annotations; return None.
 
-    A dropout has strictly more than channel_fraction_cutoff of all original
-    EEG channels simultaneously flat. The denominator includes the exempt
-    native reference and existing bad channels. Annotate before whole-channel
-    flatline rejection, and carry these annotations through preprocessing.
-    Record the selected global cutoff in flatlines for subsequent local repair.
+    Require native-reference data, resolving reference_channel as detect_flatline
+    does. Use only EEG channels not in raw.info["bads"], excluding the native
+    reference from both the flat count and the denominator. A dropout has
+    strictly more than channel_fraction_cutoff of that pool simultaneously flat.
+    Annotate before whole-channel flatline rejection, and carry these annotations
+    through preprocessing. Save the eligible names, cutoff, and global intervals
+    in flatlines so later local repair uses the same dropout decision.
     Raise if flatness makes the entire recording globally bad.
     """
+    reference_channel = _reference_channel(raw, "native", reference_channel)
     _validate_flatlines(raw, flatlines)
-    segments = _global_flatline_segments(flatlines, channel_fraction_cutoff)
+    if flatlines is not None and flatlines["reference_channel"] != reference_channel:
+        raise ValueError("reference_channel must match the reference used by detect_flatline.")
+    picks = _mask_eeg_picks(raw, reference_channel)
+    names = [raw.ch_names[i] for i in picks]
+    segments = _global_flatline_segments(flatlines, names, channel_fraction_cutoff)
     if flatlines is not None:
         flatlines["global_channel_fraction_cutoff"] = float(channel_fraction_cutoff)
+        flatlines["global_ch_names"] = names
+        flatlines["global_segments"] = segments
     if segments:
         bounds = np.asarray(segments) / raw.info["sfreq"]
         raw.annotations.append(
@@ -368,12 +379,7 @@ def mask_segment_by_voltage(
     if window_samples < 1:
         raise ValueError("window_length must cover at least one sample.")
     reference_channel = _reference_channel(raw, "average" if require_average else "either")
-    exclude = raw.info["bads"] + ([] if reference_channel is None else [reference_channel])
-    picks = mne.pick_types(
-        raw.info, eeg=True, exclude=exclude
-    )
-    if len(picks) == 0:
-        raise ValueError("No usable EEG channels remain after exclusions.")
+    picks = _mask_eeg_picks(raw, reference_channel)
 
     # Read one channel at a time; retain only counts for the short mask windows.
     starts = np.arange(0, raw.n_times, window_samples)

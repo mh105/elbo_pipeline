@@ -163,27 +163,32 @@ class TestFlatlineApplication(unittest.TestCase):
             with self.subTest(intervals=intervals), self.assertRaisesRegex(ValueError, "intervals"):
                 flatline._validate_flatlines(raw, malformed)
 
-    def test_global_threshold_uses_all_eeg_including_reference_and_strict_boundary(self):
-        raw = make_raw(n_times=50)
+    def test_global_threshold_uses_only_eligible_channels_and_strict_boundary(self):
+        raw = make_raw(n_times=50, n_eeg=9)
         result = prescribed_segments(raw, {
             "E0": [[4, 20]], "E1": [[10, 30]], "E2": [[12, 18]],
         })
-        self.assertEqual(flatline._global_flatline_segments(result), [[12, 18]])
+        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(flatline._global_flatline_segments(result, names), [[12, 18]])
         result["segments"][2] = []
-        self.assertEqual(flatline._global_flatline_segments(result), [])  # 2/8 == 25%.
-        raw.info["bads"] = ["E0", "E1", "E3", "E4", "E5"]
-        self.assertEqual(flatline._global_flatline_segments(result), [])
+        self.assertEqual(flatline._global_flatline_segments(result, names), [])  # 2/8 == 25%.
+        raw.info["bads"] = ["E3", "E4"]
+        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(flatline._global_flatline_segments(result, names), [[10, 20]])
+        raw.info["bads"] = ["E0", "E3", "E4"]
+        names = [raw.ch_names[i] for i in flatline._mask_eeg_picks(raw, "Cz")]
+        self.assertEqual(flatline._global_flatline_segments(result, names), [])
         for cutoff in (-0.1, 1.1, np.nan):
             with self.subTest(cutoff=cutoff), self.assertRaises(ValueError):
-                flatline._global_flatline_segments(result, cutoff)
+                flatline._global_flatline_segments(result, names, cutoff)
 
     def test_configurations_cover_recording_use_full_raw_indices_and_omit_global_spans(self):
         raw = make_raw(n_times=50, auxiliary=True)
         result = prescribed_segments(raw, {
             "E0": [[4, 20]], "E1": [[10, 30]], "E2": [[12, 18]],
         })
-        expected = [(0, 4, ()), (4, 10, (1,)), (10, 12, (1, 2)), (12, 18, ()),
-                    (18, 20, (1, 2)), (20, 30, (2,)), (30, 50, ())]
+        expected = [(0, 4, ()), (4, 10, (1,)), (10, 20, ()),
+                    (20, 30, (2,)), (30, 50, ())]
         self.assertEqual(list(flatline._flatline_configurations(raw, result)), expected)
         self.assertEqual(list(flatline._flatline_configurations(raw, None)), [(0, 50, ())])
 

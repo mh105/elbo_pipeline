@@ -37,8 +37,10 @@ def native_with_flatlines(global_dropout=False):
         for name in ["F4", "F8", "FC5", "FC1", "FC2", "FC6"]:
             spans[name] = [[450, 550]]
             raw._data[NAMES.index(name), 450:550] = 0
-        raw.set_annotations(mne.Annotations([450 / 250], [100 / 250], ["BAD_flatline"]))
-    return raw, flatlines_for(raw, spans)
+    flatlines = flatlines_for(raw, spans)
+    if global_dropout:
+        step2.mask_segment_by_flatline(raw, flatlines, reference_channel="Cz")
+    return raw, flatlines
 
 
 class TestRobustReferenceFlatlines(unittest.TestCase):
