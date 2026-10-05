@@ -43,8 +43,6 @@ from pathlib import Path
 import warnings
 import matplotlib.pyplot as plt
 import mne
-from mne.bem import _check_origin  # private: the origin interpolate_bads fits
-from mne.channels.interpolation import _make_interpolation_matrix  # private: MNE's spherical spline
 import numpy as np
 from scipy.signal import fftconvolve, firwin
 from flatline import (
@@ -247,8 +245,6 @@ def _finish_window_details(details, window_samples):
     return details
 
 
-
-
 def detect_flatline(raw, reference_channel=None):
     """Return sparse native-reference flat intervals without changing raw.
 
@@ -317,6 +313,7 @@ def mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
     EEG channels simultaneously flat. The denominator includes the exempt
     native reference and existing bad channels. Annotate before whole-channel
     flatline rejection, and carry these annotations through preprocessing.
+    Record the selected global cutoff in flatlines for subsequent local repair.
     Raise if flatness makes the entire recording globally bad.
     """
     _validate_flatlines(raw, flatlines)
@@ -1284,7 +1281,7 @@ def bad_ch_by_correlation(
     return report
 
 
-def _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state):
+def _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state, *, _geometry=None):
     """Draw each evaluated channel's predictor subsets and their spline weights.
 
     For every EEG channel in raw, bad or not, in Raw order, draw n_subsets
@@ -1297,23 +1294,25 @@ def _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state):
     Return subsets as rows of picks, shape (len(picks), n_subsets,
     n_predictors), and the weights, of the same shape.
     """
-    positions = np.array([raw.info["chs"][i]["loc"][:3] for i in picks])
-    if not np.isfinite(positions).all() or not np.abs(positions).sum(axis=1).all():
-        raise ValueError("Evaluated EEG channels need sensor positions; set a montage first.")
-    with mne.utils.use_log_level("warning"):
-        positions = positions - _check_origin("auto", raw.info)
+    geometry = _spline_geometry(raw) if _geometry is None else _geometry
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     row_of = np.full(len(raw.ch_names), -1)
     row_of[picks] = np.arange(len(picks))
-    rng = np.random.default_rng(random_state)
+    cache = geometry.setdefault("ransac_orderings", {})
+    key = (tuple(eeg), n_subsets, random_state)
+    if key not in cache:
+        rng = np.random.default_rng(random_state)
+        cache[key] = np.array([
+            rng.permuted(np.tile(np.delete(eeg, index), (n_subsets, 1)), axis=1)
+            for index in range(len(eeg))
+        ])
     subsets = np.empty((len(picks), n_subsets, n_predictors), dtype=int)
     for index, target in enumerate(eeg):
-        orderings = rng.permuted(np.tile(np.delete(eeg, index), (n_subsets, 1)), axis=1)
         if row_of[target] >= 0:
-            for k, ordering in enumerate(orderings):
+            for k, ordering in enumerate(cache[key][index]):
                 subsets[row_of[target], k] = row_of[ordering[row_of[ordering] >= 0][:n_predictors]]
     weights = np.array([
-        [_make_interpolation_matrix(positions[subset], positions[[row]])[0]
+        [_spline_weights(geometry, picks[subset], picks[[row]])[0]
          for subset in subsets[row]]
         for row in range(len(picks))
     ])
@@ -1327,7 +1326,8 @@ def _ransac_median(weight_stack, window):
     whose sort is several times faster than any float64 median here, and
     average the middle order statistics: the usual median of those values.
     """
-    predictions = np.sort(weight_stack @ window.astype(np.float32), axis=0)
+    predictions = np.sort(weight_stack.astype(np.float32, copy=False)
+                          @ window.astype(np.float32), axis=0)
     middle = len(predictions)
     return (predictions[(middle - 1) // 2].astype(float) + predictions[middle // 2]) / 2
 
@@ -1344,6 +1344,8 @@ def bad_ch_by_RANSAC(
     random_state=435656,
     *,
     return_details=False,
+    flatlines=None,
+    _geometry=None,
 ):
     """Return {"RANSAC": names} for channels the other channels persistently fail to predict.
 
@@ -1361,19 +1363,26 @@ def bad_ch_by_RANSAC(
     replaced by the next eligible one in its ordering. Map each subset to the
     channel with MNE's spherical spline, take the per-sample median of the
     n_subsets predicted traces, and correlate it with the channel in each
-    retained window (Pearson r).
+    retained window (Pearson r). flatlines is the original detect_flatline
+    result. In each window, omit its flat channels from all predictor subsets,
+    replacing them by the next eligible channels in the fixed orderings.
+    Prepare each observed eligibility configuration once, using shared cached
+    geometry and weights; prediction does not refit splines inside windows.
 
     method="threshold" flags a window when r is strictly below
     correlation_cutoff (PREP style). method="robust_z" pools r over all
     evaluated channels and retained windows, computes z = (median - r) /
     (1.4826 * MAD), flooring a zero scale at machine epsilon, so that a low r
     gives a high z, and flags a window when z is strictly above
-    robust_z_cutoff. Either way, flag channels violating in strictly more than
+    robust_z_cutoff. Known flat target windows are automatic violations, with
+    missing r, and remain in that target's occurrence denominator. Pool only
+    finite measured correlations for robust_z. Either way, flag channels violating in strictly more than
     occurrence_cutoff of retained windows.
 
     Selection, band-limiting, masking, the re-reference requirement, and the
     error for constant channels follow bad_ch_by_correlation; also raise if a
-    median prediction is constant in a retained window. Require 3D positions
+    median prediction is constant in a retained window, checking only the
+    non-flat targets actually scored. Require 3D positions
     of the evaluated channels and a full subset besides each of them. Add
     detections to raw.info["bads"], preserving existing labels without
     duplicates. Input data and annotations are unchanged.
@@ -1387,7 +1396,12 @@ def bad_ch_by_RANSAC(
     weights: how strongly independent predictor noise enters its prediction,
     highest at the rim. flagged_data_uv stores the input violating waveforms;
     flagged_filtered_uv and flagged_predicted_uv store the band-limited channel
-    and its median prediction in the same windows.
+    and its median prediction in the same windows, with NaN predictions for
+    known flat targets. configuration_index maps windows to configurations
+    (-1 for unretained windows); configurations holds their active ch_names,
+    subsets, and noise_gain. noise_gain_by_window records the actual gains,
+    with NaN for flat or unretained targets. Legacy subsets and noise_gain
+    describe the baseline configuration with no local exclusions.
     """
     if method not in ("threshold", "robust_z"):
         raise ValueError('method must be "threshold" or "robust_z".')
@@ -1408,29 +1422,65 @@ def bad_ch_by_RANSAC(
     if len(picks) <= n_predictors:
         raise ValueError(f"RANSAC needs {n_predictors} predictors besides each channel, so at "
                          f"least {n_predictors + 1} non-bad EEG channels; found {len(picks)}.")
-    subsets, weights = _ransac_predictors(raw, picks, n_subsets, n_predictors, random_state)
-    weight_stack = np.zeros((n_subsets, len(picks), len(picks)), dtype=np.float32)
-    for k in range(n_subsets):
-        weight_stack[k, np.arange(len(picks))[:, None], subsets[:, k]] = weights[:, k]
     names = [raw.ch_names[i] for i in picks]
     sfreq = raw.info["sfreq"]
-    r = np.full((len(picks), n_windows), np.nan)
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     retained = np.zeros(n_windows, dtype=bool)
-    for start, data in _unmasked_windows(
+    for start, _ in _unmasked_windows(
         masked, picks, window_samples, n_windows, return_start=True
     ):
-        window = filtered[:, start:start + window_samples]
-        _require_variance(data, names, "The input", start, sfreq)
-        _require_variance(window, names, "The band-limited signal", start, sfreq)
-        median = _ransac_median(weight_stack, window)
-        _require_variance(median, names, "The median prediction", start, sfreq)
-        r[:, start // window_samples] = _row_pearson(window, median)
         retained[start // window_samples] = True
     if not retained.any():
         raise ValueError("No complete unmasked windows remain for channel detection.")
-    pooled = r[:, retained]
+    geometry = _spline_geometry(raw) if _geometry is None else _geometry
+    patterns = [np.ones(len(picks), dtype=bool)]
+    pattern_of = {patterns[0].tobytes(): 0}
+    configuration_index = np.full(n_windows, -1, dtype=int)
+    for index in np.flatnonzero(retained):
+        eligible = ~flat[:, index]
+        if eligible.sum() <= n_predictors:
+            raise ValueError(
+                f"RANSAC needs {n_predictors} predictors besides each channel, so at least "
+                f"{n_predictors + 1} eligible EEG channels in the window starting at "
+                f"{index * window_samples / sfreq:g} s; found {eligible.sum()}."
+            )
+        key = eligible.tobytes()
+        if key not in pattern_of:
+            pattern_of[key] = len(patterns)
+            patterns.append(eligible)
+        configuration_index[index] = pattern_of[key]
+    configurations = []
+    for eligible in patterns:
+        rows = np.flatnonzero(eligible)
+        subsets, weights = _ransac_predictors(
+            raw, picks[rows], n_subsets, n_predictors, random_state, _geometry=geometry
+        )
+        subsets = rows[subsets]
+        stack = np.zeros((n_subsets, len(rows), len(picks)), dtype=np.float32)
+        for k in range(n_subsets):
+            stack[k, np.arange(len(rows))[:, None], subsets[:, k]] = weights[:, k]
+        configurations.append({
+            "rows": rows, "subsets": subsets, "stack": stack,
+            "noise_gain": np.median(np.linalg.norm(weights, axis=2), axis=1),
+        })
+    r = np.full((len(picks), n_windows), np.nan)
+    for index in np.flatnonzero(retained):
+        start = index * window_samples
+        configuration = configurations[configuration_index[index]]
+        rows = configuration["rows"]
+        active_names = [names[row] for row in rows]
+        data = masked.get_data(picks=picks[rows], start=start, stop=start + window_samples,
+                               reject_by_annotation=None)
+        window = filtered[:, start:start + window_samples]
+        _require_variance(data, active_names, "The input", start, sfreq)
+        _require_variance(window[rows], active_names, "The band-limited signal", start, sfreq)
+        median = _ransac_median(configuration["stack"], window)
+        _require_variance(median, active_names, "The median prediction", start, sfreq)
+        r[rows, index] = _row_pearson(window[rows], median)
+    pooled = r[np.isfinite(r)]
     z = (np.median(pooled) - r) / max(1.4826 * _mad(pooled, axis=None), np.finfo(float).eps)
-    violates = (r < correlation_cutoff if method == "threshold" else z > robust_z_cutoff) & retained
+    violates = ((r < correlation_cutoff if method == "threshold" else z > robust_z_cutoff)
+                | flat) & retained
     bad_names = _noisy_window_bads(raw, picks, violates.sum(axis=1), retained.sum(),
                                    occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
@@ -1440,8 +1490,17 @@ def bad_ch_by_RANSAC(
 
     details = _init_window_details(raw, picks, window_samples, n_windows, ("r", "robust_z"))
     details["r"], details["robust_z"] = r, z
-    details["subsets"] = np.array(names)[subsets]
-    details["noise_gain"] = np.median(np.linalg.norm(weights, axis=2), axis=1)
+    details["subsets"] = np.array(names)[configurations[0]["subsets"]]
+    details["noise_gain"] = configurations[0]["noise_gain"]
+    details["flat"] = flat
+    details["configuration_index"] = configuration_index
+    details["configurations"] = [
+        {"ch_names": [names[row] for row in configuration["rows"]],
+         "subsets": np.array(names)[configuration["subsets"]],
+         "noise_gain": configuration["noise_gain"]}
+        for configuration in configurations
+    ]
+    details["noise_gain_by_window"] = np.full(r.shape, np.nan)
     predicted = {"flagged_filtered_uv": {name: [] for name in names},
                  "flagged_predicted_uv": {name: [] for name in names}}
     for index in np.flatnonzero(retained):
@@ -1449,13 +1508,19 @@ def bad_ch_by_RANSAC(
         data = masked.get_data(picks=picks, start=start, stop=start + window_samples,
                                reject_by_annotation=None)
         _record_window_details(details, start, window_samples, data, violates[:, index])
+        configuration = configurations[configuration_index[index]]
+        details["noise_gain_by_window"][configuration["rows"], index] = configuration["noise_gain"]
         rows = np.flatnonzero(violates[:, index])
         if len(rows):
             window = filtered[:, start:start + window_samples]
-            median = _ransac_median(weight_stack, window)
-            for i in rows:
+            scored = rows[~flat[rows, index]]
+            median = np.full((len(rows), window_samples), np.nan)
+            if len(scored):
+                active = np.searchsorted(configuration["rows"], scored)
+                median[~flat[rows, index]] = _ransac_median(configuration["stack"][:, active], window)
+            for prediction, i in zip(median, rows):
                 predicted["flagged_filtered_uv"][names[i]].append(window[i] * 1e6)
-                predicted["flagged_predicted_uv"][names[i]].append(median[i] * 1e6)
+                predicted["flagged_predicted_uv"][names[i]].append(prediction * 1e6)
     for field, waveforms in predicted.items():
         details[field] = {name: np.asarray(windows).reshape(-1, window_samples)
                           for name, windows in waveforms.items()}
@@ -1850,7 +1915,8 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_BBnoise, flatlines=flatlines),
         # cross-channel detectors last; RANSAC's predictors exclude correlation's flags
         partial(bad_ch_by_correlation, flatlines=flatlines),
-        partial(bad_ch_by_RANSAC, method=ransac_method),
+        partial(bad_ch_by_RANSAC, method=ransac_method, flatlines=flatlines,
+                _geometry=geometry),
     )
     flagged, used, history, reports, details = [], [], [], [], []
     for _ in range(max_iterations):
