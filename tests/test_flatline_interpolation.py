@@ -33,8 +33,11 @@ def make_raw(n_times=1200):
 def flatlines_for(raw, spans):
     names = list(spans)
     segments = [np.array(spans[name], dtype=int).reshape(-1, 2) for name in names]
-    return {"ch_names": names, "segments": segments, "raw_segments": segments,
-            "highpass_segments": [np.empty((0, 2), dtype=int) for _ in names],
+    return {"ch_names": names, "segments": segments,
+            "segments_on_subtypes": {
+                "segments_on_raw": segments,
+                "segments_on_highpass": [np.empty((0, 2), dtype=int) for _ in names],
+            },
             "eeg_ch_names": [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])],
             "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],
             "first_samp": raw.first_samp, "n_times": raw.n_times, "reference_channel": "Cz",

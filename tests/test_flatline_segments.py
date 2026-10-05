@@ -39,8 +39,10 @@ def prescribed_segments(raw, by_name):
         result = step2.detect_flatline(raw, "Cz")
     result["ch_names"] = list(by_name)
     result["segments"] = list(by_name.values())
-    result["raw_segments"] = deepcopy(result["segments"])
-    result["highpass_segments"] = [[] for _ in by_name]
+    result["segments_on_subtypes"] = {
+        "segments_on_raw": deepcopy(result["segments"]),
+        "segments_on_highpass": [[] for _ in by_name],
+    }
     return result
 
 
@@ -76,8 +78,8 @@ class TestFlatlineDetection(unittest.TestCase):
             result = step2.detect_flatline(raw, "Cz", min_samples=4, tolerance_v=tolerance_v)
         self.assertEqual(default["segments"], [])
         self.assertEqual(result["ch_names"], ["E0", "E2"])
-        self.assertEqual(result["raw_segments"], [[[5, 9]], []])
-        self.assertEqual(result["highpass_segments"], [[[5, 9]], [[25, 29]]])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"], [[[5, 9]], []])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_highpass"], [[[5, 9]], [[25, 29]]])
         self.assertEqual(result["segments"], [[[5, 9]], [[25, 29]]])
         self.assertEqual(result["tolerance_v"], tolerance_v)
 
@@ -99,8 +101,8 @@ class TestFlatlineDetection(unittest.TestCase):
             result = step2.detect_flatline(raw, "Cz", highpass_hz=2.5)
         self.assertEqual(hp.call_count, 1)
         self.assertEqual(hp.call_args.kwargs, {"l_freq": 2.5, "h_freq": None, "verbose": False})
-        self.assertEqual(result["raw_segments"], [[]])
-        self.assertEqual(result["highpass_segments"], [[[5, 15]]])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"], [[]])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_highpass"], [[[5, 15]]])
         self.assertEqual(result["highpass_hz"], 2.5)
 
     def test_tolerance_and_highpass_cutoff_require_valid_ranges(self):
@@ -126,9 +128,10 @@ class TestFlatlineDetection(unittest.TestCase):
                 with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
                     result = step2.detect_flatline(raw, "Cz", min_samples=min_samples)
                 self.assertEqual(result["ch_names"], ["E0", "E1"])
-                self.assertEqual(result["raw_segments"], [[[3, 3 + min_samples]], []])
+                self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"],
+                                 [[[3, 3 + min_samples]], []])
                 expected = [[[3, 3 + min_samples]], [[45, 45 + min_samples]]]
-                self.assertEqual(result["highpass_segments"], expected)
+                self.assertEqual(result["segments_on_subtypes"]["segments_on_highpass"], expected)
                 self.assertEqual(result["segments"], expected)
                 self.assertEqual(result["min_samples"], min_samples)
                 self.assertIs(type(result["min_samples"]), int)
@@ -177,8 +180,12 @@ class TestFlatlineDetection(unittest.TestCase):
             return highpass.copy() if np.array_equal(data, raw._data[0]) else data.copy()
         with patch.object(step2.mne.filter, "filter_data", side_effect=filtered):
             result = step2.detect_flatline(raw, "Cz")
-        self.assertEqual(result["raw_segments"], [[[5, 15]]])
-        self.assertEqual(result["highpass_segments"], [[[5, 24]]])
+        self.assertEqual(result["segments_on_subtypes"], {
+            "segments_on_raw": [[[5, 15]]],
+            "segments_on_highpass": [[[5, 24]]],
+        })
+        for key in ("raw_segments", "highpass_segments"):
+            self.assertNotIn(key, result)
         self.assertEqual(result["segments"], [[[5, 24]]])
 
     def test_highpass_detects_drift_without_changing_raw(self):
@@ -189,9 +196,9 @@ class TestFlatlineDetection(unittest.TestCase):
         original = raw.copy()
         result = step2.detect_flatline(raw, "Cz")
         row = result["ch_names"].index("E0")
-        self.assertEqual(result["raw_segments"][row], [])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"][row], [])
         self.assertTrue(any(start <= 500 and stop >= 1500
-                            for start, stop in result["highpass_segments"][row]))
+                            for start, stop in result["segments_on_subtypes"]["segments_on_highpass"][row]))
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         self.assertEqual(raw.info["bads"], original.info["bads"])
         self.assertEqual(raw.annotations, original.annotations)
@@ -226,6 +233,10 @@ class TestFlatlineDetection(unittest.TestCase):
         with patch.object(step2.mne.filter, "filter_data") as hp:
             result = step2.detect_flatline(raw, "Cz")
         self.assertEqual(result["ch_names"], [])
+        self.assertEqual(result["segments_on_subtypes"], {
+            "segments_on_raw": [],
+            "segments_on_highpass": [],
+        })
         hp.assert_not_called()
 
 

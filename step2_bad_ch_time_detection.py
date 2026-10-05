@@ -310,7 +310,10 @@ def detect_flatline(
     finite, positive, and below Nyquist (default 1 Hz). Bounds are
     crop-relative half-open sample indices. The dictionary records these
     detection settings, channel identities, and sampling/crop metadata for
-    validation by later consumers. Run bad_ch_by_nan first; the native zero
+    validation by later consumers. segments contains the merged intervals;
+    segments_on_subtypes stores the separate segments_on_raw and
+    segments_on_highpass lists. All are aligned with ch_names.
+    Run bad_ch_by_nan first; the native zero
     reference is exempt. Include finite existing bad EEG channels; skip
     already bad nonfinite channels.
     """
@@ -332,8 +335,10 @@ def detect_flatline(
     result = {
         "ch_names": [],
         "segments": [],
-        "raw_segments": [],
-        "highpass_segments": [],
+        "segments_on_subtypes": {
+            "segments_on_raw": [],
+            "segments_on_highpass": [],
+        },
         "eeg_ch_names": eeg_names,
         "raw_ch_names": list(raw.ch_names),
         "sfreq": float(raw.info["sfreq"]),
@@ -364,8 +369,8 @@ def detect_flatline(
         if combined:
             result["ch_names"].append(name)
             result["segments"].append(combined)
-            result["raw_segments"].append(original)
-            result["highpass_segments"].append(filtered)
+            result["segments_on_subtypes"]["segments_on_raw"].append(original)
+            result["segments_on_subtypes"]["segments_on_highpass"].append(filtered)
     return result
 
 

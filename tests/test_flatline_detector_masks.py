@@ -37,8 +37,10 @@ def flatlines_for(raw, intervals):
         result = step2.detect_flatline(raw, reference_channel="Cz")
     result["ch_names"] = list(intervals)
     result["segments"] = list(intervals.values())
-    result["raw_segments"] = list(intervals.values())
-    result["highpass_segments"] = [[] for _ in intervals]
+    result["segments_on_subtypes"] = {
+        "segments_on_raw": list(intervals.values()),
+        "segments_on_highpass": [[] for _ in intervals],
+    }
     return result
 
 
