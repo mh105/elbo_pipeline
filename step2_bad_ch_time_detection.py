@@ -274,7 +274,12 @@ def _merge_segments(segments):
 
 
 def detect_flatline(
-    raw, reference_channel=None, *, min_samples=10, tolerance_v=1e-9, highpass_hz=1.0,
+    raw,
+    reference_channel=None,
+    *,
+    min_samples=10,
+    tolerance_v=1e-9,
+    highpass_hz=1.0,
 ):
     """Return sparse native-reference flat intervals without changing raw.
 
