@@ -2389,7 +2389,7 @@ def _mean_configuration(geometry, invalid):
     return geometry["mean_weights"][invalid]
 
 
-def _flatline_aware_mean(raw, bads, flatlines=None, geometry=None):
+def _robust_mean(raw, bads, flatlines=None, geometry=None):
     """Mean of the full EEG reconstruction without making
     an interpolated Raw copy.
 
@@ -2425,7 +2425,7 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
     """Repair whole bad channels and exact local spans
     without changing metadata.
 
-    Apply the same configurations used by _flatline_aware_mean, before the
+    Apply the same configurations used by _robust_mean, before the
     caller subtracts that mean. Previously repaired channels are never donors
     for another repair in the same interval.
     """
@@ -2451,13 +2451,6 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
             for first in range(start, stop, sample_chunk):
                 last = min(first + sample_chunk, stop)
                 raw._data[invalid, first:last] = weights @ raw._data[donors, first:last]
-
-
-def _robust_mean(raw, bads, flatlines=None, geometry=None):
-    """Mean of genuine channels and spline repairs, using
-    cached configuration weights.
-    """
-    return _flatline_aware_mean(raw, bads, flatlines, geometry)
 
 
 def robust_average_reference_inplace(

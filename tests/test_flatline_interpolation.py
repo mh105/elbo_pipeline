@@ -71,7 +71,7 @@ class TestSphericalSpline(unittest.TestCase):
         original = raw.copy()
         expected = mne_reconstruction(original, raw.info["bads"])
         geometry = step2._spline_geometry(raw)
-        mean = step2._flatline_aware_mean(raw, raw.info["bads"], geometry=geometry)
+        mean = step2._robust_mean(raw, raw.info["bads"], geometry=geometry)
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
@@ -100,7 +100,7 @@ class TestSphericalSpline(unittest.TestCase):
             rows = [raw.ch_names.index(name) for name in ["T7"] + local]
             expected._data[rows, start:stop] = repaired._data[rows, start:stop]
         geometry = step2._spline_geometry(raw)
-        mean = step2._flatline_aware_mean(raw, raw.info["bads"], flatlines, geometry)
+        mean = step2._robust_mean(raw, raw.info["bads"], flatlines, geometry)
         self.assertTrue(np.isfinite(mean).all())
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
@@ -124,10 +124,10 @@ class TestSphericalSpline(unittest.TestCase):
         with patch.object(step2, "_calc_g", wraps=step2._calc_g) as kernel:
             geometry = step2._spline_geometry(raw)
             with patch.object(step2, "solve", wraps=step2.solve) as solve:
-                mean = step2._flatline_aware_mean(raw, ["T7"], flatlines, geometry)
+                mean = step2._robust_mean(raw, ["T7"], flatlines, geometry)
                 first = solve.call_count
                 self.assertGreater(first, 0)
-                again = step2._flatline_aware_mean(raw, ["T7"], flatlines, geometry)
+                again = step2._robust_mean(raw, ["T7"], flatlines, geometry)
                 step2._interpolate_bads_and_flatlines_inplace(raw, ["T7"], flatlines, geometry)
                 self.assertEqual(solve.call_count, first)
             self.assertEqual(kernel.call_count, 1)
@@ -148,7 +148,7 @@ class TestSphericalSpline(unittest.TestCase):
         repaired = mne_reconstruction(raw, names)
         expected._data[rows, 450:550] = repaired._data[rows, 450:550]
         geometry = step2._spline_geometry(raw)
-        mean = step2._flatline_aware_mean(raw, [], flatlines, geometry)
+        mean = step2._robust_mean(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
         step2._interpolate_bads_and_flatlines_inplace(raw, [], flatlines, geometry)
@@ -164,7 +164,7 @@ class TestSphericalSpline(unittest.TestCase):
         repaired = mne_reconstruction(raw, ["F7"])
         expected._data[row, 100:300] = repaired._data[row, 100:300]
         geometry = step2._spline_geometry(raw)
-        mean = step2._flatline_aware_mean(raw, [], flatlines, geometry)
+        mean = step2._robust_mean(raw, [], flatlines, geometry)
         step2._interpolate_bads_and_flatlines_inplace(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
@@ -175,7 +175,7 @@ class TestSphericalSpline(unittest.TestCase):
         raw._data[NAMES.index("T7")] = np.nan
         expected = mne_reconstruction(raw, ["T7"])
         geometry = step2._spline_geometry(raw)
-        mean = step2._flatline_aware_mean(raw, ["T7"], geometry=geometry)
+        mean = step2._robust_mean(raw, ["T7"], geometry=geometry)
         step2._interpolate_bads_and_flatlines_inplace(raw, ["T7"], geometry=geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
