@@ -1457,14 +1457,15 @@ def bad_ch_by_correlation(
     channels violating in strictly more than occurrence_cutoff of retained
     windows, a few windows at the 1% default.
 
-    Score a copy band-limited to 1-45 Hz (_band_limit). Require re-referenced
-    data as in bad_ch_by_smallness, and sfreq > 100 Hz. Exclude existing bads
-    and non-EEG channels. Compute the temporary voltage mask on the input, as
-    in bad_ch_by_std, then widen each masked span on both sides by the
-    filters' reach, since filtering spreads masked artifacts into neighbouring
-    windows. Retain complete windows that overlap no widened mask or BAD
-    annotation. Raise if an evaluated channel is constant in a retained window,
-    in the input or after filtering: its r would be undefined, and
+    Compute correlation scores for detection on a copy of the EEG data
+    band-limited to 1-45 Hz by _band_limited_windows() (via _band_limit).
+    Require re-referenced data as in bad_ch_by_smallness, and sfreq > 100 Hz.
+    Exclude existing bads and non-EEG channels. Compute the temporary voltage
+    mask on the input, as in bad_ch_by_std, then widen each masked span on both
+    sides by the filters' reach, since filtering spreads masked artifacts into
+    neighbouring windows. Retain complete windows that overlap no widened mask
+    or BAD annotation. Raise if an evaluated channel is constant in a retained
+    window, in the input or after filtering: its r would be undefined, and
     re-referenced data should never be constant. Add detections to
     raw.info["bads"], preserving existing labels without duplicates. Input data
     and annotations are unchanged.
@@ -1482,6 +1483,7 @@ def bad_ch_by_correlation(
         raise ValueError("correlation_cutoff must be between -1 and 1.")
     if not np.isfinite(quantile) or not 0 <= quantile <= 1:
         raise ValueError("quantile must be between 0 and 1.")
+    # Filter a copy of the EEG data to 1-45 Hz for correlation scoring.
     masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff
     )
@@ -1635,6 +1637,10 @@ def bad_ch_by_RANSAC(
 ):
     """Return {"RANSAC": names} for channels the other channels persistently fail to predict.
 
+    Compute RANSAC predictions and Pearson correlations for detection on a
+    copy of the EEG data band-limited to 1-45 Hz by _band_limited_windows()
+    (via _band_limit).
+
     PREP findNoisyChannels.m, Method 4, and EEGLAB clean_channels, changed so
     that no channel predicts itself, the subset size is fixed, the median is
     the usual one, r is Pearson's rather than their uncentred cosine, and
@@ -1699,6 +1705,7 @@ def bad_ch_by_RANSAC(
         raise ValueError("n_subsets must be a positive integer.")
     if not np.isfinite(subset_fraction) or not 0 < subset_fraction <= 1:
         raise ValueError("subset_fraction must be greater than 0 and at most 1.")
+    # Filter a copy of the EEG data to 1-45 Hz for prediction and correlation scoring.
     masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff
     )
