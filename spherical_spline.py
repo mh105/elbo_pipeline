@@ -9,10 +9,6 @@ from scipy.linalg import solve
 from flatline import _flatline_configurations, _validate_flatlines
 
 
-# Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-_SAMPLE_CHUNK = 8192
-
-
 def _spline_geometry(raw):
     """Build the full EEG kernel once, keeping indices in original Raw order."""
     picks = mne.pick_types(raw.info, eeg=True, exclude=[])
@@ -77,6 +73,8 @@ def _flatline_aware_mean(raw, bads, flatlines=None, geometry=None):
     join them only in their exact intervals outside global BAD annotations.
     Every configuration reads its genuine donors from the original recording.
     """
+    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
+    sample_chunk = 8192
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     _validate_flatlines(raw, flatlines)
@@ -85,16 +83,16 @@ def _flatline_aware_mean(raw, bads, flatlines=None, geometry=None):
     bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in bads)
     reference = np.empty(raw.n_times, dtype=float)
     donors, coefficients = _mean_configuration(geometry, bads)
-    for start in range(0, raw.n_times, _SAMPLE_CHUNK):
-        stop = min(start + _SAMPLE_CHUNK, raw.n_times)
+    for start in range(0, raw.n_times, sample_chunk):
+        stop = min(start + sample_chunk, raw.n_times)
         reference[start:stop] = coefficients @ raw._data[donors, start:stop]
     for start, stop, flat in _flatline_configurations(raw, flatlines):
         if flat:
             donors, coefficients = _mean_configuration(
                 geometry, np.union1d(np.asarray(bads, dtype=int), flat)
             )
-            for first in range(start, stop, _SAMPLE_CHUNK):
-                last = min(first + _SAMPLE_CHUNK, stop)
+            for first in range(start, stop, sample_chunk):
+                last = min(first + sample_chunk, stop)
                 reference[first:last] = coefficients @ raw._data[donors, first:last]
     return reference
 
@@ -106,6 +104,8 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
     caller subtracts that mean. Previously repaired channels are never donors
     for another repair in the same interval.
     """
+    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
+    sample_chunk = 8192
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     _validate_flatlines(raw, flatlines)
@@ -115,14 +115,14 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
     if bads:
         donors, _ = _mean_configuration(geometry, bads)
         weights = _spline_weights(geometry, donors, bads)
-        for start in range(0, raw.n_times, _SAMPLE_CHUNK):
-            stop = min(start + _SAMPLE_CHUNK, raw.n_times)
+        for start in range(0, raw.n_times, sample_chunk):
+            stop = min(start + sample_chunk, raw.n_times)
             raw._data[list(bads), start:stop] = weights @ raw._data[donors, start:stop]
     for start, stop, flat in _flatline_configurations(raw, flatlines):
         if flat:
             invalid = np.union1d(np.asarray(bads, dtype=int), flat)
             donors, _ = _mean_configuration(geometry, invalid)
             weights = _spline_weights(geometry, donors, invalid)
-            for first in range(start, stop, _SAMPLE_CHUNK):
-                last = min(first + _SAMPLE_CHUNK, stop)
+            for first in range(start, stop, sample_chunk):
+                last = min(first + sample_chunk, stop)
                 raw._data[invalid, first:last] = weights @ raw._data[donors, first:last]
