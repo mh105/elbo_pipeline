@@ -103,7 +103,7 @@ class TestNativeReferenceChannel(unittest.TestCase):
         with patch.object(step2, "_zero_eeg_channels",
                           wraps=step2._zero_eeg_channels) as zeros:
             self.assertEqual(_reference_channel(raw, "native", "Cz"), "Cz")
-        zeros.assert_called_once_with(raw, [3])
+        zeros.assert_called_once_with(raw, [3], None)
         with self.assertRaisesRegex(ValueError, "not entirely zero"):
             _reference_channel(raw, "native", "E1")
         raw.set_channel_types({"E0": "eog"})

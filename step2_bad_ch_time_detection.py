@@ -165,8 +165,13 @@ def bad_ch_by_nan(raw, reference_channel=None):
     return report
 
 
-def _zero_eeg_channels(raw, picks):
-    """Names of the picked channels whose samples are all exactly zero."""
+def _zero_eeg_channels(raw, picks, zeros=None):
+    """Names of the picked channels whose samples are all exactly zero.
+
+    zeros, the set of such EEG names from _mask_inputs, replaces the scan.
+    """
+    if zeros is not None:
+        return [raw.ch_names[i] for i in picks if raw.ch_names[i] in zeros]
     names = []
     for i in picks:
         # Read preloaded rows in place, and test the first sample before the
@@ -180,7 +185,7 @@ def _zero_eeg_channels(raw, picks):
     return names
 
 
-def _reference_channel(raw, reference, reference_channel=None):
+def _reference_channel(raw, reference, reference_channel=None, zeros=None):
     """Check the reference a method needs; return the
     native reference to exclude.
 
@@ -189,7 +194,8 @@ def _reference_channel(raw, reference, reference_channel=None):
     channels; without a name, exactly one non-bad EEG channel must be entirely
     zero. Return its name. "average": no EEG channel, bad or not, may be
     entirely zero; return None. "either": return the one entirely zero non-bad
-    EEG channel, or None if there is none; raise if there are several.
+    EEG channel, or None if there is none; raise if there are several. zeros
+    is passed to _zero_eeg_channels.
     """
     eeg_all = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_good = mne.pick_types(raw.info, eeg=True, exclude="bads")
@@ -197,13 +203,15 @@ def _reference_channel(raw, reference, reference_channel=None):
         if reference_channel is not None:
             if reference_channel not in [raw.ch_names[i] for i in eeg_all]:
                 raise ValueError("reference_channel must name an EEG channel in raw.")
-            if not _zero_eeg_channels(raw, [raw.ch_names.index(reference_channel)]):
+            if not _zero_eeg_channels(
+                raw, [raw.ch_names.index(reference_channel)], zeros
+            ):
                 raise ValueError(
                     f"reference_channel {reference_channel} is not entirely "
                     "zero; this method requires the native reference."
                 )
             return reference_channel
-        zeros = _zero_eeg_channels(raw, eeg_good)
+        zeros = _zero_eeg_channels(raw, eeg_good, zeros)
         if len(zeros) != 1:
             raise ValueError(
                 "Expected exactly one entirely zero non-bad EEG channel (the "
@@ -212,7 +220,7 @@ def _reference_channel(raw, reference, reference_channel=None):
             )
         return zeros[0]
     if reference == "average":
-        zeros = _zero_eeg_channels(raw, eeg_all)
+        zeros = _zero_eeg_channels(raw, eeg_all, zeros)
         if zeros:
             raise ValueError(
                 f"EEG channels {zeros} are entirely zero, as the native "
@@ -220,7 +228,7 @@ def _reference_channel(raw, reference, reference_channel=None):
                 "with robust_average_reference_inplace."
             )
         return None
-    zeros = _zero_eeg_channels(raw, eeg_good)
+    zeros = _zero_eeg_channels(raw, eeg_good, zeros)
     if len(zeros) > 1:
         raise ValueError(f"Several non-bad EEG channels are entirely zero: {zeros}. "
                          "Mark the dead ones bad first: run detect_flatline_inplace "
@@ -231,11 +239,12 @@ def _reference_channel(raw, reference, reference_channel=None):
 
 def _prepare_channel_windows(
     raw, window_length, occurrence_cutoff, reference, reference_channel=None,
+    zeros=None,
 ):
     """Select eligible EEG channels and complete,
     non-overlapping sample windows.
 
-    reference and reference_channel are checked by _reference_channel.
+    reference, reference_channel, and zeros are passed to _reference_channel.
     """
     if not np.isfinite(window_length) or window_length <= 0:
         raise ValueError("window_length must be finite and greater than 0 (seconds).")
@@ -247,7 +256,7 @@ def _prepare_channel_windows(
     n_windows = raw.n_times // window_samples
     if n_windows == 0:
         raise ValueError("Data must contain at least one complete window.")
-    reference_channel = _reference_channel(raw, reference, reference_channel)
+    reference_channel = _reference_channel(raw, reference, reference_channel, zeros)
     exclude = raw.info["bads"] + (
         [] if reference_channel is None else [reference_channel]
     )
@@ -738,7 +747,7 @@ def bad_ch_by_flatline(
     dropouts as BAD_by_flatline. Any overlap with one of its segments marks
     the channel's complete window. Omit windows overlapping BAD annotations,
     including those global dropouts, and the temporary 0.1-second voltage
-    mask, built on a copy of this native data with the resolved reference
+    mask, built from this native data with the resolved reference
     excluded, as in the other detectors; ignore the partial tail. A channel
     flat in fewer windows can still be flagged by bad_ch_by_RANSAC, which
     counts its flat windows as failures to predict.
@@ -755,15 +764,16 @@ def bad_ch_by_flatline(
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
-    masked, _ = _temporary_voltage_mask(raw, reference_channel=reference_channel)
+    spans, _ = _temporary_voltage_mask(raw, reference_channel=reference_channel)
+    rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    retained = _retained_windows(_rejected_samples(masked), window_samples, n_windows)
+    retained = _retained_windows(rejected, window_samples, n_windows)
     counts = flat[:, retained].sum(axis=1)
     n_retained = int(retained.sum())
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
         for start, data in _unmasked_windows(
-            masked, picks, window_samples, n_windows, return_start=True
+            raw, picks, window_samples, n_windows, rejected, return_start=True
         ):
             violates = flat[:, start // window_samples]
             window = _record_window_details(
@@ -854,11 +864,11 @@ def mask_segment_by_voltage(
     exceedances are not simultaneous. Merge adjacent masked windows; include
     the final partial window with its actual duration.
 
-    These annotations are temporary when called by the nine detectors that
-    use them, which pass a copy of their input Raw: bad_ch_by_flatline (with
-    the named native reference), bad_ch_by_voltage, bad_ch_by_HFnoise,
-    bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise,
-    bad_ch_by_correlation, and bad_ch_by_RANSAC.
+    The nine detectors that use this mask compute the same spans without
+    copying or annotating their input (_temporary_voltage_mask):
+    bad_ch_by_flatline (with the named native reference), bad_ch_by_voltage,
+    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std,
+    bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -883,23 +893,10 @@ def mask_segment_by_voltage(
             raw, "average" if require_average else "either"
         )
     picks = _mask_eeg_picks(raw, reference_channel)
-
-    # Read one channel at a time; retain only counts
-    # for the short mask windows.
-    starts = np.arange(0, raw.n_times, window_samples)
-    counts = np.zeros(len(starts), dtype=int)
-    for i in picks:
-        data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
-        if not np.isfinite(data).all():
-            raise ValueError(
-                "Nonfinite data in eligible channels; run bad_ch_by_nan first."
-            )
-        exceeds = np.abs(data) > voltage_threshold_uv / 1e6
-        counts += np.logical_or.reduceat(exceeds, starts)
-    bad = counts / len(picks) > channel_fraction_cutoff
-    edges = np.flatnonzero(np.diff(np.r_[False, bad, False]))
-    spans = edges.reshape(-1, 2) * window_samples
-    spans[:, 1] = np.minimum(spans[:, 1], raw.n_times)
+    spans = _voltage_mask_spans(
+        *_voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples),
+        window_samples, raw.n_times, channel_fraction_cutoff,
+    )
     raw.annotations.append(
         raw.first_time + spans[:, 0] / sfreq,
         (spans[:, 1] - spans[:, 0]) / sfreq,
@@ -907,39 +904,115 @@ def mask_segment_by_voltage(
     )
 
 
-def _temporary_voltage_mask(raw, *, require_average=False, reference_channel=None):
-    """Check the reference, then mask a copy; return it
-    and any native reference.
+def _voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples):
+    """Whether each picked channel is finite, and whether each of its
+    window_samples windows (the last one possibly partial) has a sample
+    strictly outside +/-voltage_threshold_uv.
+    """
+    # Read one channel at a time; retain only the short windows' flags.
+    starts = np.arange(0, raw.n_times, window_samples)
+    finite = np.empty(len(picks), dtype=bool)
+    exceeds = np.empty((len(picks), len(starts)), dtype=bool)
+    for row, i in enumerate(picks):
+        data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
+        finite[row] = np.isfinite(data).all()
+        exceeds[row] = np.logical_or.reduceat(
+            np.abs(data) > voltage_threshold_uv / 1e6, starts
+        )
+    return finite, exceeds
+
+
+def _voltage_mask_spans(
+    finite, exceeds, window_samples, n_times, channel_fraction_cutoff=0.25
+):
+    """Merged half-open sample spans of the windows where strictly more than
+    channel_fraction_cutoff of the pool, the rows of _voltage_exceedances,
+    exceed the threshold; raise if a row is not finite.
+    """
+    if not finite.all():
+        raise ValueError(
+            "Nonfinite data in eligible channels; run bad_ch_by_nan first."
+        )
+    bad = exceeds.sum(axis=0) / len(exceeds) > channel_fraction_cutoff
+    edges = np.flatnonzero(np.diff(np.r_[False, bad, False]))
+    spans = edges.reshape(-1, 2) * window_samples
+    spans[:, 1] = np.minimum(spans[:, 1], n_times)
+    return spans
+
+
+def _mask_inputs(raw):
+    """What the reference checks and the default temporary voltage mask read
+    from the data, for every EEG channel, bad or not.
+
+    Return the EEG picks, the names of the entirely zero ones (zeros), and
+    each one's finiteness and 0.1-s exceedances of +/-500 µV, the defaults of
+    mask_segment_by_voltage. Only bad labels change between the detectors of
+    a robust-reference pass, so the pass computes this once and passes it to
+    all eight; a detector called on its own computes it from its input.
+    """
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    window_samples = int(round(0.1 * raw.info["sfreq"]))
+    finite, exceeds = _voltage_exceedances(raw, eeg, 500.0, window_samples)
+    return {"eeg": eeg, "zeros": set(_zero_eeg_channels(raw, eeg)),
+            "finite": finite, "exceeds": exceeds, "window_samples": window_samples}
+
+
+def _temporary_voltage_mask(
+    raw, *, require_average=False, reference_channel=None, shared=None
+):
+    """Check the reference, then return the spans that mask_segment_by_voltage
+    (default settings) would annotate, as half-open sample intervals, and any
+    native reference, without copying or annotating raw.
 
     With reference_channel, require that named native reference, as
     bad_ch_by_flatline does, so that other all-zero channels do not raise.
+    shared is _mask_inputs(raw), computed here if None.
     """
+    if shared is None:
+        shared = _mask_inputs(raw)
     if reference_channel is None:
         reference_channel = _reference_channel(
-            raw, "average" if require_average else "either"
+            raw, "average" if require_average else "either", zeros=shared["zeros"]
         )
-        named = None
     else:
-        reference_channel = named = _reference_channel(raw, "native", reference_channel)
-    masked = raw.copy()
-    mask_segment_by_voltage(masked, require_average=require_average,
-                            reference_channel=named)
-    return masked, reference_channel
+        reference_channel = _reference_channel(
+            raw, "native", reference_channel, shared["zeros"]
+        )
+    rows = np.searchsorted(shared["eeg"], _mask_eeg_picks(raw, reference_channel))
+    spans = _voltage_mask_spans(shared["finite"][rows], shared["exceeds"][rows],
+                                shared["window_samples"], raw.n_times)
+    return spans, reference_channel
 
 
-def _rejected_samples(raw):
-    """Boolean per sample: inside a BAD annotation.
+def _rejected_samples(raw, mask_spans=(), widen_samples=0):
+    """Boolean per sample: inside a BAD annotation or one of mask_spans, the
+    temporary voltage mask's half-open sample intervals.
 
     Annotations are converted to samples by MNE's own routine, so that the
     result matches get_data(reject_by_annotation="omit"), including its
     rounding and its skipping of empty spans, without parsing the
-    annotations again for every window.
+    annotations again for every window. widen_samples extends the mask spans
+    and the BAD_voltage_mask and BAD_by_flatline annotations on each side,
+    within the data: they are the spans whose content rings after filtering
+    (large voltage artifacts, and the level step at each edge of a global
+    dropout). Other BAD spans, such as manual labels, are omitted as
+    annotated but not widened.
     """
-    rejected = np.zeros(raw.n_times, dtype=bool)
     onsets, ends = _annotations_starts_stops(raw, ["BAD"])
-    for onset, end in zip(np.maximum(onsets, 0), np.minimum(ends, raw.n_times)):
-        if onset < end:
-            rejected[onset:end] = True
+    descriptions = [description for description in raw.annotations.description
+                    if description.upper().startswith("BAD")]
+    widen = np.where(
+        np.isin(descriptions, ("BAD_voltage_mask", "BAD_by_flatline")), widen_samples, 0
+    )
+    bounds = np.concatenate([
+        np.column_stack([onsets - widen, ends + widen]),
+        np.reshape(np.asarray(mask_spans, dtype=int), (-1, 2))
+        + [-widen_samples, widen_samples],
+    ])
+    rejected = np.zeros(raw.n_times, dtype=bool)
+    for start, stop in np.clip(bounds, 0, raw.n_times):
+        if start < stop:
+            rejected[start:stop] = True
     return rejected
 
 
@@ -949,11 +1022,13 @@ def _retained_windows(rejected, window_samples, n_windows):
     return ~windows.any(axis=1)
 
 
-def _unmasked_windows(raw, picks, window_samples, n_windows, *, return_start=False):
-    """Yield complete windows with no BAD-annotated
-    samples, without closing gaps.
+def _unmasked_windows(
+    raw, picks, window_samples, n_windows, rejected, *, return_start=False
+):
+    """Yield complete windows with no rejected sample
+    (_rejected_samples), without closing gaps.
     """
-    retained = _retained_windows(_rejected_samples(raw), window_samples, n_windows)
+    retained = _retained_windows(rejected, window_samples, n_windows)
     for start in (np.flatnonzero(retained) * window_samples).tolist():
         data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
                             reject_by_annotation=None)
@@ -1012,6 +1087,7 @@ def bad_ch_by_voltage(
     flatlines=None,
     plot=True,
     return_details=False,
+    _pass=None,
 ):
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
@@ -1049,16 +1125,15 @@ def bad_ch_by_voltage(
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
     if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
         raise ValueError("occurrence_cutoff must be between 0 and 1.")
-    masked, reference_channel = _temporary_voltage_mask(raw)
+    spans, reference_channel = _temporary_voltage_mask(raw, shared=_pass)
     _validate_flatlines(raw, flatlines)
     local_flat = {} if flatlines is None else dict(
         zip(flatlines["ch_names"], flatlines["segments"])
     )
-    exclude = masked.info["bads"] + (
-        [] if reference_channel is None else [reference_channel]
-    )
-    picks = mne.pick_types(masked.info, eeg=True, exclude=exclude)
-    retained = ~_rejected_samples(masked)
+    bads_before = list(raw.info["bads"])
+    exclude = bads_before + ([] if reference_channel is None else [reference_channel])
+    picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
+    retained = ~_rejected_samples(raw, spans)
     if not retained.any():
         raise ValueError("No unmasked samples remain for channel detection.")
     fractions = np.empty(len(picks))
@@ -1067,7 +1142,7 @@ def bad_ch_by_voltage(
         for start, stop in local_flat.get(raw.ch_names[i], []):
             scorable[start:stop] = False
         n_scorable = np.count_nonzero(scorable)
-        data = masked.get_data(picks=[i], reject_by_annotation=None)[0]
+        data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
         # A channel flat throughout has no scorable samples and no evidence.
         fractions[row] = (
             np.count_nonzero(np.abs(data[scorable]) > voltage_threshold_uv / 1e6)
@@ -1098,7 +1173,7 @@ def bad_ch_by_voltage(
     ymin, ymax = np.inf, -np.inf
     for color, i in zip(colors, eeg):
         name = raw.ch_names[i]
-        if name in masked.info["bads"]:  # Bads before this call.
+        if name in bads_before:
             continue
         data_uv = raw.get_data(picks=[i], reject_by_annotation=None)[0] * 1e6
         envelope = np.column_stack([
@@ -1116,12 +1191,8 @@ def bad_ch_by_voltage(
         else:
             ax.plot(envelope_times, envelope, color=color, linewidth=0.5, alpha=0.7,
                     zorder=1)
-    for annotation in masked.annotations:
-        if annotation["description"] == "BAD_voltage_mask":
-            start = annotation["onset"] - masked.first_time
-            ax.axvspan(
-                start, start + annotation["duration"], color="lightgray", zorder=0
-            )
+    for start, stop in spans / sfreq:
+        ax.axvspan(start, stop, color="lightgray", zorder=0)
     padding = 0.05 * (ymax - ymin) if ymax > ymin else 1.0
     ax.set_ylim(ymin - padding, ymax + padding)
     for cutoff in (-voltage_threshold_uv, voltage_threshold_uv):
@@ -1145,6 +1216,7 @@ def bad_ch_by_smallness(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"smallness": names} for persistently low-variance EEG channels.
 
@@ -1182,10 +1254,12 @@ def bad_ch_by_smallness(
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    shared = _mask_inputs(raw) if _pass is None else _pass
+    spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, window_length, occurrence_cutoff, "average"
+        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
     )
+    rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
@@ -1197,7 +1271,7 @@ def bad_ch_by_smallness(
         for metric in ("upper_cutoff_uv2", "lower_cutoff_uv2"):
             details[metric] = np.full(n_windows, np.nan)
     for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
+        raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         if not np.isfinite(data[valid]).all():
@@ -1252,6 +1326,7 @@ def bad_ch_by_std(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"std": names} for persistently high robust standard deviation.
 
@@ -1261,7 +1336,7 @@ def bad_ch_by_std(
     window; exclude existing bads and non-EEG channels. Require re-referenced
     data as in bad_ch_by_smallness.
 
-    Apply the temporary 0.1-second voltage mask on a copy. Omit every window
+    Apply the temporary 0.1-second voltage mask. Omit every window
     overlapping any BAD annotation and the trailing partial window. Flag
     channels offending in strictly more than occurrence_cutoff of retained
     windows. Add detections to raw.info["bads"], preserving existing labels
@@ -1278,10 +1353,12 @@ def bad_ch_by_std(
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    shared = _mask_inputs(raw) if _pass is None else _pass
+    spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, window_length, occurrence_cutoff, "average"
+        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
     )
+    rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
@@ -1291,7 +1368,7 @@ def bad_ch_by_std(
             raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
         )
     for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
+        raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         deviation, z = np.full((2, len(picks)), np.nan)
@@ -1386,6 +1463,7 @@ def bad_ch_by_HFnoise(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"HFnoise": names} for persistently high PREP HF-noise ratios.
 
@@ -1429,10 +1507,12 @@ def bad_ch_by_HFnoise(
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
     if raw.info["sfreq"] <= 100:
         raise ValueError("bad_ch_by_HFnoise requires a sampling rate above 100 Hz.")
-    masked, _ = _temporary_voltage_mask(raw)
+    shared = _mask_inputs(raw) if _pass is None else _pass
+    spans, _ = _temporary_voltage_mask(raw, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, window_length, occurrence_cutoff, "either"
+        raw, window_length, occurrence_cutoff, "either", zeros=shared["zeros"]
     )
+    rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
@@ -1450,7 +1530,7 @@ def bad_ch_by_HFnoise(
         for metric in ("ratio", "robust_z", "hf_mad_uv", "lf_mad_uv", "violates"):
             details[metric] = np.full((len(picks), n_windows), np.nan)
     for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
+        raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         ratios, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
@@ -1533,6 +1613,7 @@ def bad_ch_by_BBnoise(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"BBnoise": names} for persistently
     broadband high-power EEG channels.
@@ -1569,10 +1650,12 @@ def bad_ch_by_BBnoise(
         raise ValueError("min_bad_bands must be an integer between 1 and 5.")
     if raw.info["sfreq"] / 2 < SPECTRAL_BANDS[-1][1]:
         raise ValueError("Sampling rate must cover all spectral bands through 45 Hz.")
-    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    shared = _mask_inputs(raw) if _pass is None else _pass
+    spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, window_length, occurrence_cutoff, "average"
+        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
     )
+    rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
@@ -1587,7 +1670,7 @@ def bad_ch_by_BBnoise(
                 (len(picks), n_windows, len(SPECTRAL_BANDS)), np.nan
             )
     for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
+        raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         # Welch needs a row to define its frequency grid
@@ -1659,6 +1742,7 @@ def bad_ch_by_pop(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"pop": names} for EEG channels with frequent electrode pops.
 
@@ -1679,7 +1763,7 @@ def bad_ch_by_pop(
     Flag channels with strictly more than rate_cutoff pops per minute of
     retained data. Accept the native reference or re-referenced data as in
     bad_ch_by_voltage. Exclude existing bads, the reference, and non-EEG
-    channels. Apply the temporary voltage mask on a copy, as in bad_ch_by_std;
+    channels. Apply the temporary voltage mask, as in bad_ch_by_std;
     masked and BAD-annotated samples are not retained, and candidates whose
     evaluation spans touch them are skipped. Require sfreq >= 100 Hz. Add
     detections to raw.info["bads"], preserving existing labels without
@@ -1716,7 +1800,7 @@ def bad_ch_by_pop(
     if sfreq < 100:
         raise ValueError("bad_ch_by_pop requires a sampling rate of at least 100 Hz.")
     gap, width, short, merge = (int(round(s * sfreq)) for s in (0.01, 0.05, 0.01, 0.1))
-    masked, reference_channel = _temporary_voltage_mask(raw)
+    spans, reference_channel = _temporary_voltage_mask(raw, shared=_pass)
     exclude = raw.info["bads"] + (
         [] if reference_channel is None else [reference_channel]
     )
@@ -1734,7 +1818,7 @@ def bad_ch_by_pop(
     distances = np.linalg.norm(positions[:, None] - positions[None], axis=-1)
     np.fill_diagonal(distances, np.inf)
     neighbors = np.argsort(distances, axis=1)[:, :6]
-    retained = ~_rejected_samples(masked)
+    retained = ~_rejected_samples(raw, spans)
     retained_min = retained.sum() / sfreq / 60
     if retained_min == 0:
         raise ValueError("No unmasked samples remain for channel detection.")
@@ -1825,48 +1909,28 @@ def _band_limit(data, sfreq):
     )
 
 
-def _widen_voltage_mask(raw, seconds):
-    """Extend voltage/global-flat dropout masks on a
-    detector copy, within the data.
-
-    Only BAD_voltage_mask and BAD_by_flatline spans are widened: they are the
-    spans whose content rings after filtering (large voltage artifacts, and
-    the level step at each edge of a global dropout). Other BAD spans, such
-    as manual labels, are omitted as annotated but not widened.
-    """
-    annotations = raw.annotations
-    mask = np.flatnonzero(
-        np.isin(annotations.description, ("BAD_voltage_mask", "BAD_by_flatline"))
-    )
-    descriptions = annotations.description[mask].copy()
-    starts = np.maximum(annotations.onset[mask] - seconds, raw.first_time)
-    stops = np.minimum(annotations.onset[mask] + annotations.duration[mask] + seconds,
-                       raw.first_time + raw.n_times / raw.info["sfreq"])
-    annotations.delete(mask)
-    annotations.append(starts, stops - starts, descriptions)
-
-
-def _band_limited_windows(raw, window_length, occurrence_cutoff):
+def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     """Shared setup of the cross-channel detectors.
 
-    Require sfreq > 100 Hz and re-referenced data. Mask a copy of the input,
-    select channels and complete windows as in bad_ch_by_std, band-limit the
-    selected channels with _band_limit, and widen the masks by the filters'
-    reach. Return the masked copy, picks, window_samples, n_windows, and the
-    band-limited data of picks.
+    Require sfreq > 100 Hz and re-referenced data. Find the temporary voltage
+    mask, select channels and complete windows as in bad_ch_by_std,
+    band-limit the selected channels with _band_limit, and widen the masks
+    by the filters' reach (_rejected_samples). Return the rejected samples,
+    picks, window_samples, n_windows, and the band-limited data of picks.
     """
     sfreq = raw.info["sfreq"]
     if sfreq <= 100:
         raise ValueError("The 45-50 Hz low-pass requires a sampling rate above 100 Hz.")
-    masked, _ = _temporary_voltage_mask(raw, require_average=True)
+    shared = _mask_inputs(raw) if _pass is None else _pass
+    spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        masked, window_length, occurrence_cutoff, "average"
+        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
     )
     filtered, reach = _band_limit(
-        masked.get_data(picks=picks, reject_by_annotation=None), sfreq
+        raw.get_data(picks=picks, reject_by_annotation=None), sfreq
     )
-    _widen_voltage_mask(masked, reach / sfreq)
-    return masked, picks, window_samples, n_windows, filtered
+    rejected = _rejected_samples(raw, spans, reach)
+    return rejected, picks, window_samples, n_windows, filtered
 
 
 def _require_variance(values, names, what, start, sfreq):
@@ -1899,6 +1963,7 @@ def bad_ch_by_correlation(
     *,
     flatlines=None,
     return_details=False,
+    _pass=None,
 ):
     """Return {"correlation": names} for channels that frequently
     lose their shared signal.
@@ -1947,8 +2012,8 @@ def bad_ch_by_correlation(
     if not np.isfinite(quantile) or not 0 <= quantile <= 1:
         raise ValueError("quantile must be between 0 and 1.")
     # Filter a copy of the EEG data to 1-45 Hz for correlation scoring.
-    masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
-        raw, window_length, occurrence_cutoff
+    rejected, picks, window_samples, n_windows, filtered = _band_limited_windows(
+        raw, window_length, occurrence_cutoff, _pass
     )
     names = np.array([raw.ch_names[i] for i in picks], dtype=object)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
@@ -1960,7 +2025,7 @@ def bad_ch_by_correlation(
             raw, picks, window_samples, n_windows, ("score",)
         )
     for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
+        raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         window = filtered[valid, start:start + window_samples]
@@ -2132,6 +2197,7 @@ def bad_ch_by_RANSAC(
     return_details=False,
     flatlines=None,
     _geometry=None,
+    _pass=None,
 ):
     """Return {"RANSAC": names} for channels the other channels
     persistently fail to predict.
@@ -2217,8 +2283,8 @@ def bad_ch_by_RANSAC(
         raise ValueError("subset_fraction must be greater than 0 and at most 1.")
     # Filter a copy of the EEG data to 1-45 Hz for
     # prediction and correlation scoring.
-    masked, picks, window_samples, n_windows, filtered = _band_limited_windows(
-        raw, window_length, occurrence_cutoff
+    rejected, picks, window_samples, n_windows, filtered = _band_limited_windows(
+        raw, window_length, occurrence_cutoff, _pass
     )
     n_predictors = int(
         round(subset_fraction * len(mne.pick_types(raw.info, eeg=True, exclude=[])))
@@ -2235,7 +2301,7 @@ def bad_ch_by_RANSAC(
     names = [raw.ch_names[i] for i in picks]
     sfreq = raw.info["sfreq"]
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    retained = _retained_windows(_rejected_samples(masked), window_samples, n_windows)
+    retained = _retained_windows(rejected, window_samples, n_windows)
     if not retained.any():
         raise ValueError("No complete unmasked windows remain for channel detection.")
     geometry = _spline_geometry(raw) if _geometry is None else _geometry
@@ -2276,7 +2342,7 @@ def bad_ch_by_RANSAC(
         configuration = configurations[configuration_index[index]]
         rows = configuration["rows"]
         active_names = [names[row] for row in rows]
-        data = masked.get_data(
+        data = raw.get_data(
             picks=picks[rows],
             start=start,
             stop=start + window_samples,
@@ -2324,8 +2390,8 @@ def bad_ch_by_RANSAC(
                  "flagged_predicted_uv": {name: [] for name in names}}
     for index in np.flatnonzero(retained):
         start = index * window_samples
-        data = masked.get_data(picks=picks, start=start, stop=start + window_samples,
-                               reject_by_annotation=None)
+        data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
+                            reject_by_annotation=None)
         _record_window_details(details, start, window_samples, data, violates[:, index])
         configuration = configurations[configuration_index[index]]
         details["noise_gain_by_window"][configuration["rows"], index] = configuration[
@@ -2872,9 +2938,12 @@ def robust_average_reference_inplace(
         referenced = raw.copy()
         for i in eeg:
             referenced._data[i] -= reference
+        # Only bad labels change within a pass, so its detectors share one set
+        # of reference checks and voltage-mask exceedances.
+        shared = _mask_inputs(referenced)
         robust_bad_ch_report, pass_details = {}, {"interpolated": initial + flagged}
         for detector in detectors:
-            result = detector(referenced, return_details=return_details)
+            result = detector(referenced, return_details=return_details, _pass=shared)
             if return_details:
                 result, detector_details = result
                 pass_details[next(iter(result))] = detector_details
