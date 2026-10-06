@@ -1937,7 +1937,10 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     mask, select channels and complete windows as in bad_ch_by_std,
     band-limit the selected channels with _band_limit, and widen the masks
     by the filters' reach (_rejected_samples). Return the rejected samples,
-    picks, window_samples, n_windows, and the band-limited data of picks.
+    picks, window_samples, n_windows, and the band-limited data of picks. In
+    a robust-reference pass, _pass["band_limited"] supplies that data
+    instead, as the band-limited native channels minus the band-limited
+    robust mean (robust_average_reference_inplace).
     """
     sfreq = raw.info["sfreq"]
     if sfreq <= 100:
@@ -1947,9 +1950,13 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
     )
-    filtered, reach = _band_limit(
-        raw.get_data(picks=picks, reject_by_annotation=None), sfreq
-    )
+    if _pass is not None and "band_limited" in _pass:
+        rows, native, mean, reach = _pass["band_limited"]
+        filtered = native[np.searchsorted(rows, picks)] - mean
+    else:
+        filtered, reach = _band_limit(
+            raw.get_data(picks=picks, reject_by_annotation=None), sfreq
+        )
     rejected = _rejected_samples(raw, spans, reach)
     return rejected, picks, window_samples, n_windows, filtered
 
@@ -2883,7 +2890,11 @@ def robust_average_reference_inplace(
     bad_ch_by_correlation, and bad_ch_by_RANSAC (with method=ransac_method) on
     it in that order: the detectors that require average reference after the
     others, and the cross-channel detectors last, so that correlation's flags
-    are not RANSAC predictors. Each pass starts from the existing bads, and
+    are not RANSAC predictors. The cross-channel detectors' 1-45 Hz band-limit
+    is linear and filters each channel on its own, so it is computed once for
+    the native non-bad EEG channels and, in each pass, only for the robust
+    mean; their difference equals the band-limited referenced copy up to
+    rounding. Each pass starts from the existing bads, and
     each detector also excludes the channels flagged before it in the same
     pass. Stop when a pass flags exactly the channels its robust mean
     interpolated. If a pass instead flags the set an earlier robust mean
@@ -2936,6 +2947,10 @@ def robust_average_reference_inplace(
             "Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first."
         )
     geometry = _spline_geometry(raw)
+    band_rows = mne.pick_types(raw.info, eeg=True, exclude="bads")
+    band_native, band_reach = _band_limit(
+        raw.get_data(picks=band_rows, reject_by_annotation=None), raw.info["sfreq"]
+    )
 
     detectors = (
         # the first three can also run on native reference
@@ -2962,6 +2977,10 @@ def robust_average_reference_inplace(
         # Only bad labels change within a pass, so its detectors share one set
         # of reference checks and voltage-mask exceedances.
         shared = _mask_inputs(referenced)
+        shared["band_limited"] = (
+            band_rows, band_native, _band_limit(reference[None], raw.info["sfreq"])[0],
+            band_reach,
+        )
         robust_bad_ch_report, pass_details = {}, {"interpolated": initial + flagged}
         for detector in detectors:
             result = detector(referenced, return_details=return_details, _pass=shared)
