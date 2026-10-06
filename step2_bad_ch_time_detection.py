@@ -1542,6 +1542,11 @@ def _band_limit(data, sfreq):
 def _widen_voltage_mask(raw, seconds):
     """Extend voltage/global-flat dropout masks on a
     detector copy, within the data.
+
+    Only BAD_voltage_mask and BAD_by_flatline spans are widened: they are the
+    spans whose content rings after filtering (large voltage artifacts, and
+    the level step at each edge of a global dropout). Other BAD spans, such
+    as manual labels, are omitted as annotated but not widened.
     """
     annotations = raw.annotations
     mask = np.flatnonzero(
