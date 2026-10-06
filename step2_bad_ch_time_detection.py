@@ -1419,25 +1419,31 @@ def _lowpass_45_hz(data, sfreq):
     to one filter length minus one sample away on either side. data must be
     longer than the filter (about 0.66 s).
     """
+    # Rows are independent; blocks of them bound the FFTs' transient memory.
+    block_rows = 16
     kernel = _lowpass_kernel(sfreq)
     width, n_times = len(kernel), data.shape[1]
     if n_times <= width:
         raise ValueError(
             f"Data must be longer than the {width / sfreq:.2f} s low-pass filter."
         )
-    left = 2 * data[:, :1] - data[:, np.arange(width, 0, -1) % n_times]
-    right = (
-        2 * data[:, -1:]
-        - data[:, np.arange(n_times - 2, n_times - width - 2, -1) % n_times]
-    )
-    padded = np.concatenate([left, data, right], axis=1)
-    # FFT convolution truncated to the causal output, as lfilter,
-    # but faster for long kernels
-    forward = fftconvolve(padded, kernel[None], axes=1)[:, :padded.shape[1]]
-    lowpass = fftconvolve(forward[:, ::-1], kernel[None], axes=1)[:, : padded.shape[1]][
-        :, ::-1
-    ]
-    return lowpass[:, width:width + n_times]
+    lowpass = np.empty(data.shape)
+    for first in range(0, len(data), block_rows):
+        block = data[first:first + block_rows]
+        left = 2 * block[:, :1] - block[:, np.arange(width, 0, -1) % n_times]
+        right = (
+            2 * block[:, -1:]
+            - block[:, np.arange(n_times - 2, n_times - width - 2, -1) % n_times]
+        )
+        padded = np.concatenate([left, block, right], axis=1)
+        # FFT convolution truncated to the causal output, as lfilter,
+        # but faster for long kernels
+        forward = fftconvolve(padded, kernel[None], axes=1)[:, :padded.shape[1]]
+        backward = fftconvolve(forward[:, ::-1], kernel[None], axes=1)[
+            :, : padded.shape[1]
+        ][:, ::-1]
+        lowpass[first:first + block_rows] = backward[:, width:width + n_times]
+    return lowpass
 
 
 def _prep_hf_ratio(data, sfreq, *, return_mads=False):
@@ -1899,14 +1905,20 @@ def _band_limit(data, sfreq):
     _lowpass_45_hz. An output sample depends on input samples up to the
     returned reach away on either side, in samples: about 2.3 s at any rate.
     """
+    # Rows are independent; blocks of them bound the transient memory, and
+    # only a block is copied for the high-pass.
+    block_rows = 16
     highpass = mne.filter.create_filter(
         None, sfreq, l_freq=1.0, h_freq=None, verbose=False
     )
-    data = mne.filter.filter_data(data, sfreq, l_freq=1.0, h_freq=None, verbose=False)
-    return (
-        _lowpass_45_hz(data, sfreq),
-        len(highpass) // 2 + len(_lowpass_kernel(sfreq)) - 1,
-    )
+    filtered = np.empty(data.shape)
+    for first in range(0, len(data), block_rows):
+        block = mne.filter.filter_data(
+            data[first:first + block_rows], sfreq, l_freq=1.0, h_freq=None,
+            verbose=False,
+        )
+        filtered[first:first + block_rows] = _lowpass_45_hz(block, sfreq)
+    return filtered, len(highpass) // 2 + len(_lowpass_kernel(sfreq)) - 1
 
 
 def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
