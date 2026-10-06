@@ -4,9 +4,28 @@ Bad-channel criteria may be local or cross-channel, and time invariant or time
 dependent. Bad-time detection and iteration between the two parts will be
 developed after the initial bad-channel criteria.
 
+Flatlines come first. On the native data, right after bad_ch_by_nan,
+detect_flatline_inplace finds constant flatlines and exact ramps, annotates
+global dropouts (more than 25% of the eligible channels flat at once) as
+BAD_by_flatline, and bridges each channel's local flat spans linearly so that
+later filters see no step. It returns a flatlines dictionary whose local
+intervals are widened by the reach of the later 0.3 Hz high-pass (5.5 s on
+each side). Every later detector and robust_average_reference_inplace takes
+that dictionary.
+
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections.
 Signal data and input annotations are unchanged.
+
+The windowed detectors (bad_ch_by_flatline, bad_ch_by_smallness,
+bad_ch_by_std, bad_ch_by_HFnoise, bad_ch_by_BBnoise, bad_ch_by_correlation)
+flag a channel violating in more than 25% of its scorable 2-s windows: the
+windows clear of BAD annotations (BAD_by_flatline included) and of the
+temporary BAD_voltage_mask, without the channel's local flat intervals. Three
+rules differ by design. bad_ch_by_RANSAC counts local flat windows as
+failures to predict within the shared denominator; bad_ch_by_voltage counts
+scorable samples, not windows, since every sample beyond its threshold
+matters; and bad_ch_by_pop counts pops per scorable minute.
 
 The 2-second window detectors accept return_details=True to return (report,
 details), including window metrics and original flagged waveforms.
@@ -17,17 +36,23 @@ bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
 on a copy band-limited to 1-45 Hz. The first flags channels that frequently
 lose the signal they share with their neighbours (PREP's correlation
 criterion, with 25% occurrence); the second flags channels that random subsets
-of the others,
-through spherical splines, persistently fail to predict (RANSAC).
+of the others, through spherical splines, persistently fail to predict
+(RANSAC).
 
-The native reference is the one EEG channel whose samples are all exactly zero.
-bad_ch_by_nan, bad_ch_by_flatline, and pca_cleaning_inplace require it;
+The native reference is the one non-bad EEG channel whose samples are all
+exactly zero, or a channel named with reference_channel, which must be
+entirely zero (other all-zero channels are then ordinary, dead channels).
+bad_ch_by_nan, detect_flatline_inplace, bad_ch_by_flatline,
+pca_cleaning_inplace, and robust_average_reference_inplace require it;
 bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation,
 and bad_ch_by_RANSAC require re-referenced data, with no entirely zero EEG
-channel; bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either
-and exclude the native reference if present.
+channel, bad or not; bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop
+accept either and exclude the native reference if present.
+mask_segment_by_voltage accepts either by default, requires re-referenced
+data with require_average=True, and takes a named native reference.
 
-pca_cleaning_inplace modifies the data in place: after the initial bad-channel
+pca_cleaning_inplace (currently disabled in __main__) modifies the data in
+place: after the initial bad-channel
 pass, it removes the PC1 of each 1-second window where PC1 explains at least
 90% of the variance, on the input or on 2 Hz high-passed data, and exceeds 100
 µV on some channel, suppressing large artifacts shared across channels. With
@@ -36,8 +61,8 @@ signals from a copy high-passed at a lower cutoff
 (filter first, then subtract).
 
 robust_average_reference_inplace then iterates bad-channel detection under a
-robust average reference (the mean with bad channels interpolated),
-interpolates the bad channels, and subtracts the final robust mean.
+robust average reference (the mean with bad channels and local flat intervals
+interpolated), interpolates them, and subtracts the final robust mean.
 """
 
 from collections import defaultdict
@@ -192,7 +217,9 @@ def _reference_channel(raw, reference, reference_channel=None):
     zeros = _zero_eeg_channels(raw, eeg_good)
     if len(zeros) > 1:
         raise ValueError(f"Several non-bad EEG channels are entirely zero: {zeros}. "
-                         "Run bad_ch_by_flatline first.")
+                         "Mark the dead ones bad first: run detect_flatline_inplace "
+                         "and bad_ch_by_flatline with reference_channel set to the "
+                         "native reference.")
     return zeros[0] if zeros else None
 
 
@@ -808,8 +835,11 @@ def mask_segment_by_voltage(
     exceedances are not simultaneous. Merge adjacent masked windows; include
     the final partial window with its actual duration.
 
-    These annotations are temporary when called by the five noisy-channel
-    detectors below, which pass a copy of their input Raw.
+    These annotations are temporary when called by the nine detectors that
+    use them, which pass a copy of their input Raw: bad_ch_by_flatline (with
+    the named native reference), bad_ch_by_voltage, bad_ch_by_HFnoise,
+    bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise,
+    bad_ch_by_correlation, and bad_ch_by_RANSAC.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -960,7 +990,8 @@ def bad_ch_by_voltage(
     without duplicates. Input data and annotations are unchanged. Accept the
     native reference or re-referenced data: exclude the one entirely zero
     non-bad EEG channel, the native reference, if present, and raise if there
-    are several (run bad_ch_by_flatline first).
+    are several (mark the dead ones bad first with detect_flatline_inplace and
+    bad_ch_by_flatline, naming the reference_channel).
 
     With plot=True, show all EEG channels except existing bads over the full
     time range, including the reference and masked samples; non-EEG channels
