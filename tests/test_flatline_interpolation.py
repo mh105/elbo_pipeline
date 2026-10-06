@@ -30,18 +30,23 @@ def make_raw(n_times=1200):
     return raw
 
 
-def flatlines_for(raw, spans):
+def flatlines_for(raw, spans, channel_fraction_cutoff=0.25):
+    """Prescribed flat spans, with the global dropouts that detect_flatline_inplace
+    would decide from the current bads (without annotating raw)."""
     names = list(spans)
     segments = [np.array(spans[name], dtype=int).reshape(-1, 2) for name in names]
-    return {"ch_names": names, "segments": segments,
-            "segments_on_subtypes": {
-                "segments_on_raw": segments,
-                "segments_on_highpass": [np.empty((0, 2), dtype=int) for _ in names],
-            },
-            "eeg_ch_names": [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])],
-            "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],
-            "first_samp": raw.first_samp, "n_times": raw.n_times, "reference_channel": "Cz",
-            "min_samples": 10, "tolerance_v": 1e-9, "highpass_hz": 1.0}
+    empty = [np.empty((0, 2), dtype=int) for _ in names]
+    result = {"ch_names": names, "segments": segments,
+              "segments_on_subtypes": {
+                  "segments_on_raw": segments, "segments_on_highpass": empty,
+                  "segments_on_ramp": empty, "segments_on_curve": empty,
+              },
+              "eeg_ch_names": [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])],
+              "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],
+              "first_samp": raw.first_samp, "n_times": raw.n_times, "reference_channel": "Cz",
+              "min_samples": 10, "tolerance_v": 1e-9, "highpass_hz": 1.0}
+    step2._mask_segment_by_flatline(raw.copy(), result, channel_fraction_cutoff)
+    return result
 
 
 def mne_reconstruction(raw, bads):
@@ -142,11 +147,14 @@ class TestSphericalSpline(unittest.TestCase):
         rows = [raw.ch_names.index(name) for name in names]
         raw._data[rows, 450:550] = 0
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names})
+        self.assertEqual(flatlines["global_segments"], [[450, 550]])  # 8 of 29 > 25%.
         default = raw.copy()
         step2._interpolate_bads_and_flatlines_inplace(default, [], flatlines)
         np.testing.assert_array_equal(default.get_data(), raw.get_data())
 
-        flatlines["global_channel_fraction_cutoff"] = 0.5
+        flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names},
+                                  channel_fraction_cutoff=0.5)
+        self.assertEqual(flatlines["global_segments"], [])
         expected = raw.copy()
         repaired = mne_reconstruction(raw, names)
         expected._data[rows, 450:550] = repaired._data[rows, 450:550]

@@ -86,11 +86,11 @@ class TestWindowDetails(unittest.TestCase):
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
         raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_excluded"]))
-        flatlines = step2.detect_flatline(raw)
-        step2.mask_segment_by_flatline(raw, flatlines)
+        flatlines = step2.detect_flatline_inplace(raw)  # Annotates the global dropout.
         original = raw.copy()
-        expected = step2.bad_ch_by_flatline(raw.copy())
-        report, details = step2.bad_ch_by_flatline(raw, return_details=True)
+        expected = step2.bad_ch_by_flatline(raw.copy(), flatlines=flatlines)
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
+                                                   return_details=True)
         self.assertEqual(report, expected)
         self.assertEqual(report, {"flatline": ["E0"]})
         self.assert_window_details(original, raw, report, details, 200, [False, False, True, True])

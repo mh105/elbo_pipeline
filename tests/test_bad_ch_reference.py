@@ -50,39 +50,51 @@ class TestReferenceRequirements(unittest.TestCase):
             for reference_channel in (None, "Cz"):
                 with self.subTest(method=method.__name__, reference=reference_channel):
                     raw = make_raw(average=False)
-                    result = method(raw, reference_channel=reference_channel)
+                    kwargs = {"reference_channel": reference_channel}
+                    if method is step2.bad_ch_by_flatline:
+                        kwargs["flatlines"] = step2.detect_flatline_inplace(
+                            raw, reference_channel
+                        )
+                    result = method(raw, **kwargs)
                     self.assertEqual(result, {criterion(method): []})
 
     def test_native_only_methods_reject_re_referenced_data(self):
-        methods = NATIVE_ONLY + (step2.pca_cleaning_inplace,
+        methods = NATIVE_ONLY + (step2.detect_flatline_inplace, step2.pca_cleaning_inplace,
                                  step2.robust_average_reference_inplace)
         for method in methods:
             for reference_channel, message in ((None, "exactly one"), ("Cz", "not entirely zero")):
                 with self.subTest(method=method.__name__, reference=reference_channel):
                     raw = make_raw()
                     original = raw.get_data().copy()
+                    kwargs = {"reference_channel": reference_channel}
+                    if method is step2.bad_ch_by_flatline:
+                        kwargs["flatlines"] = None  # The reference check comes first.
                     with self.assertRaisesRegex(ValueError, message):
-                        method(raw, reference_channel=reference_channel)
+                        method(raw, **kwargs)
                     self.assertEqual(raw.info["bads"], [])
+                    self.assertEqual(len(raw.annotations), 0)
                     np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_named_reference_lets_flatline_flag_another_zero_channel(self):
         raw = make_raw(average=False)
         raw._data[0] = 0
         with self.assertRaisesRegex(ValueError, "exactly one"):
-            step2.bad_ch_by_flatline(raw)
+            step2.detect_flatline_inplace(raw)
         self.assertEqual(step2.bad_ch_by_nan(raw, reference_channel="Cz"), {"nan": []})
-        result = step2.bad_ch_by_flatline(raw, reference_channel="Cz")
+        flatlines = step2.detect_flatline_inplace(raw, reference_channel="Cz")
+        result = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
         self.assertEqual(result, {"flatline": ["E0"]})
         # With E0 now bad, the automatic search finds Cz again.
-        self.assertEqual(step2.bad_ch_by_flatline(raw), {"flatline": []})
+        self.assertEqual(step2.bad_ch_by_flatline(raw, flatlines=flatlines), {"flatline": []})
 
     def test_named_reference_may_be_bad_but_auto_search_skips_bads(self):
         raw = make_raw(average=False)
         raw.info["bads"] = ["Cz"]
         with self.assertRaisesRegex(ValueError, "exactly one"):
-            step2.bad_ch_by_flatline(raw)
-        self.assertEqual(step2.bad_ch_by_flatline(raw, reference_channel="Cz"),
+            step2.detect_flatline_inplace(raw)
+        flatlines = step2.detect_flatline_inplace(raw, reference_channel="Cz")
+        self.assertEqual(step2.bad_ch_by_flatline(raw, reference_channel="Cz",
+                                                  flatlines=flatlines),
                          {"flatline": []})
 
     def test_nan_requires_an_entirely_zero_reference(self):

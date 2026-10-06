@@ -16,9 +16,14 @@ from step2_bad_ch_time_detection import (
     bad_ch_by_flatline,
     bad_ch_by_nan,
     bad_ch_by_smallness,
-    detect_flatline,
-    mask_segment_by_flatline,
+    detect_flatline_inplace,
 )
+
+
+def flatline(raw, **kwargs):
+    """Detect flatlines (masking global dropouts on raw), then score them."""
+    flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"))
+    return bad_ch_by_flatline(raw, flatlines=flatlines, **kwargs)
 
 
 def make_raw(variances, window_samples=200, first_samp=0, average=False):
@@ -170,39 +175,47 @@ class TestBadChByFlatline(unittest.TestCase):
                 variances[:flat_windows, 0] = 0
                 raw = make_raw(variances)
                 original = raw.get_data().copy()
-                self.assertEqual(bad_ch_by_flatline(raw), {"flatline": expected})
+                self.assertEqual(flatline(raw), {"flatline": expected})
                 self.assertEqual(raw.info["bads"], expected)
                 np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_peer_flatness_does_not_suppress_channel_flags(self):
+        # Up to 5 of 24 channels flat at once stay below the 25% global cutoff.
         for flat_channels in (2, 3, 5):
             with self.subTest(flat_channels=flat_channels):
                 expected = [f"E{i}" for i in range(flat_channels)]
-                variances = np.ones((4, 5))
+                variances = np.ones((4, 24))
                 variances[:, :flat_channels] = 0
                 raw = make_raw(variances)
-                self.assertEqual(bad_ch_by_flatline(raw), {"flatline": expected})
+                self.assertEqual(flatline(raw), {"flatline": expected})
                 self.assertEqual(raw.info["bads"], expected)
+                self.assertEqual(len(raw.annotations), 0)
 
     def test_global_dropout_windows_leave_occurrence_denominator(self):
         variances = np.ones((4, 5))
         variances[:3] = 0
         variances[3, 0] = 0
         raw = make_raw(variances)
-        flatlines = detect_flatline(raw)
-        mask_segment_by_flatline(raw, flatlines)
-        self.assertEqual(bad_ch_by_flatline(raw, flatlines=flatlines), {"flatline": ["E0"]})
+        self.assertEqual(flatline(raw), {"flatline": ["E0"]})
         self.assertEqual(raw.info["bads"], ["E0"])
+        np.testing.assert_array_equal(raw.annotations.description, ["BAD_by_flatline"])
 
     def test_bads_and_auxiliary_are_excluded_from_channel_flags(self):
-        raw = make_raw([[0, 0, 0, 1, 1, 1, 1]])
-        raw.info["bads"] = ["E5"]
-        raw.set_channel_types({"E6": "eog"})
-        self.assertEqual(bad_ch_by_flatline(raw), {"flatline": ["E0", "E1", "E2"]})
-        self.assertEqual(raw.info["bads"], ["E5", "E0", "E1", "E2"])
+        raw = make_raw([[0, 0, 0] + [1] * 13])  # 3 of 14 eligible channels are flat.
+        raw.info["bads"] = ["E14"]
+        raw.set_channel_types({"E15": "eog"})
+        self.assertEqual(flatline(raw), {"flatline": ["E0", "E1", "E2"]})
+        self.assertEqual(raw.info["bads"], ["E14", "E0", "E1", "E2"])
+
+    def test_flatlines_are_required(self):
+        raw = make_raw(np.ones((1, 5)))
+        with self.assertRaisesRegex(ValueError, "detect_flatline_inplace"):
+            bad_ch_by_flatline(raw, flatlines=None)
+        with self.assertRaises(TypeError):
+            bad_ch_by_flatline(raw)
 
     def test_custom_parameters_and_tiny_variation_is_flat(self):
-        variances = np.ones((4, 5))
+        variances = np.ones((4, 9))  # Two flat channels of nine are not a dropout.
         variances[:2, 0] = 0
         for cutoff, expected in ((0.25, ["E0", "E1"]), (0.5, ["E1"])):
             with self.subTest(cutoff=cutoff):
@@ -210,10 +223,17 @@ class TestBadChByFlatline(unittest.TestCase):
                 raw._data[1] = 2e-6
                 raw._data[1, ::100] += 1e-15
                 self.assertEqual(
-                    bad_ch_by_flatline(raw, window_length=1.0, occurrence_cutoff=cutoff),
+                    flatline(raw, window_length=1.0, occurrence_cutoff=cutoff),
                     {"flatline": expected},
                 )
                 self.assertEqual(raw.info["bads"], expected)
+
+
+def run_detector(detector, raw, **kwargs):
+    """Call smallness directly; detect flatlines first for bad_ch_by_flatline."""
+    if detector is bad_ch_by_flatline:
+        return flatline(raw, **kwargs)
+    return detector(raw, **kwargs)
 
 
 class TestWindowRules(unittest.TestCase):
@@ -229,12 +249,14 @@ class TestWindowRules(unittest.TestCase):
                 raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
                 # Only one of four full windows violates the rule.
-                self.assertEqual(detector(raw), {criterion: []})
+                self.assertEqual(run_detector(detector, raw), {criterion: []})
                 self.assertEqual(raw.info["bads"], [])
-                self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: []})
+                self.assertEqual(run_detector(detector, raw, occurrence_cutoff=0.2),
+                                 {criterion: []})
                 raw.set_annotations(None)
                 expected = ["E0", "M0"] if average else ["E0"]
-                self.assertEqual(detector(raw, occurrence_cutoff=0.2), {criterion: expected})
+                self.assertEqual(run_detector(detector, raw, occurrence_cutoff=0.2),
+                                 {criterion: expected})
                 self.assertEqual(raw.info["bads"], expected)
 
     def test_invalid_values_need_nan_detection_first(self):
@@ -243,14 +265,14 @@ class TestWindowRules(unittest.TestCase):
                 raw = make_raw(np.ones((1, 9)), average=detector is bad_ch_by_smallness)
                 raw._data[0, 50] = np.nan
                 with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
-                    detector(raw)
+                    run_detector(detector, raw)
                 self.assertEqual(raw.info["bads"], [])
                 if detector is bad_ch_by_smallness:
                     raw.info["bads"] = ["E0"]  # bad_ch_by_nan needs the native reference.
                 else:
                     self.assertEqual(bad_ch_by_nan(raw), {"nan": ["E0"]})
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
-                self.assertEqual(detector(raw), {criterion: []})
+                self.assertEqual(run_detector(detector, raw), {criterion: []})
                 self.assertEqual(raw.info["bads"], ["E0"])
 
     def test_invalid_parameters_and_insufficient_data(self):
@@ -264,7 +286,7 @@ class TestWindowRules(unittest.TestCase):
                 with self.subTest(detector=detector.__name__, kwargs=kwargs):
                     raw = make_raw(np.ones((1, 2)))
                     with self.assertRaises(ValueError):
-                        detector(raw, **kwargs)
+                        run_detector(detector, raw, **kwargs)
                     self.assertEqual(raw.info["bads"], [])
             with self.subTest(detector=detector.__name__), self.assertRaisesRegex(
                 ValueError, "At least two"
@@ -272,7 +294,7 @@ class TestWindowRules(unittest.TestCase):
                 raw = make_raw([[1]], average=detector is bad_ch_by_smallness)
                 if detector is bad_ch_by_smallness:
                     raw.info["bads"] = ["M0"]
-                detector(raw)
+                run_detector(detector, raw)
         for cutoff in (0, -1, np.nan, np.inf):
             with self.subTest(cutoff=cutoff), self.assertRaisesRegex(
                 ValueError, "robust_z_cutoff"

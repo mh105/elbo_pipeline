@@ -38,7 +38,7 @@ def native_with_flatlines(global_dropout=False):
             raw._data[NAMES.index(name), 450:550] = 0
     flatlines = flatlines_for(raw, spans)
     if global_dropout:
-        step2.mask_segment_by_flatline(raw, flatlines, reference_channel="Cz")
+        step2._mask_segment_by_flatline(raw, flatlines)  # Annotate raw, as detection does.
     return raw, flatlines
 
 

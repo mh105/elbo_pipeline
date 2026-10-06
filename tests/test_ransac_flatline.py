@@ -17,6 +17,7 @@ def flatline_result(raw, by_name):
         "reference_channel": "Cz",
         "ch_names": list(by_name),
         "segments": list(by_name.values()),
+        "global_segments": [],
     }
 
 
