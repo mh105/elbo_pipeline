@@ -71,6 +71,7 @@ import warnings
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
+from mne.annotations import _annotations_starts_stops
 from mne.bem import _check_origin
 from mne.channels.interpolation import _calc_g
 from scipy.linalg import solve
@@ -756,17 +757,15 @@ def bad_ch_by_flatline(
         )
     masked, _ = _temporary_voltage_mask(raw, reference_channel=reference_channel)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    counts = np.zeros(len(picks), dtype=int)
-    n_retained = 0
+    retained = _retained_windows(_rejected_samples(masked), window_samples, n_windows)
+    counts = flat[:, retained].sum(axis=1)
+    n_retained = int(retained.sum())
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
-    for start, data in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
-    ):
-        violates = flat[:, start // window_samples]
-        counts += violates
-        n_retained += 1
-        if return_details:
+        for start, data in _unmasked_windows(
+            masked, picks, window_samples, n_windows, return_start=True
+        ):
+            violates = flat[:, start // window_samples]
             window = _record_window_details(
                 details, start, window_samples, data, violates
             )
@@ -928,17 +927,36 @@ def _temporary_voltage_mask(raw, *, require_average=False, reference_channel=Non
     return masked, reference_channel
 
 
+def _rejected_samples(raw):
+    """Boolean per sample: inside a BAD annotation.
+
+    Annotations are converted to samples by MNE's own routine, so that the
+    result matches get_data(reject_by_annotation="omit"), including its
+    rounding and its skipping of empty spans, without parsing the
+    annotations again for every window.
+    """
+    rejected = np.zeros(raw.n_times, dtype=bool)
+    onsets, ends = _annotations_starts_stops(raw, ["BAD"])
+    for onset, end in zip(np.maximum(onsets, 0), np.minimum(ends, raw.n_times)):
+        if onset < end:
+            rejected[onset:end] = True
+    return rejected
+
+
+def _retained_windows(rejected, window_samples, n_windows):
+    """Complete windows containing no rejected sample."""
+    windows = rejected[:n_windows * window_samples].reshape(n_windows, window_samples)
+    return ~windows.any(axis=1)
+
+
 def _unmasked_windows(raw, picks, window_samples, n_windows, *, return_start=False):
     """Yield complete windows with no BAD-annotated
     samples, without closing gaps.
     """
-    for start in range(0, n_windows * window_samples, window_samples):
-        data = raw.get_data(
-            picks=picks, start=start, stop=start + window_samples,
-            reject_by_annotation="omit", verbose=False,
-        )
-        if data.shape[1] != window_samples:
-            continue
+    retained = _retained_windows(_rejected_samples(raw), window_samples, n_windows)
+    for start in (np.flatnonzero(retained) * window_samples).tolist():
+        data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
+                            reject_by_annotation=None)
         yield (start, data) if return_start else data
 
 
@@ -1040,18 +1058,21 @@ def bad_ch_by_voltage(
         [] if reference_channel is None else [reference_channel]
     )
     picks = mne.pick_types(masked.info, eeg=True, exclude=exclude)
+    retained = ~_rejected_samples(masked)
+    if not retained.any():
+        raise ValueError("No unmasked samples remain for channel detection.")
     fractions = np.empty(len(picks))
     for row, i in enumerate(picks):
-        # The voltage mask verified finite data, so NaN marks annotated samples.
-        data = masked.get_data(picks=[i], reject_by_annotation="NaN", verbose=False)[0]
-        if np.isnan(data).all():
-            raise ValueError("No unmasked samples remain for channel detection.")
+        scorable = retained.copy()
         for start, stop in local_flat.get(raw.ch_names[i], []):
-            data[start:stop] = np.nan
-        scorable = data[np.isfinite(data)]
+            scorable[start:stop] = False
+        n_scorable = np.count_nonzero(scorable)
+        data = masked.get_data(picks=[i], reject_by_annotation=None)[0]
         # A channel flat throughout has no scorable samples and no evidence.
-        fractions[row] = (np.mean(np.abs(scorable) > voltage_threshold_uv / 1e6)
-                          if scorable.size else np.nan)
+        fractions[row] = (
+            np.count_nonzero(np.abs(data[scorable]) > voltage_threshold_uv / 1e6)
+            / n_scorable if n_scorable else np.nan
+        )
     bad_names = [raw.ch_names[i] for i in picks[fractions > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"voltage": bad_names}
@@ -1084,9 +1105,7 @@ def bad_ch_by_voltage(
             np.minimum.reduceat(data_uv, bin_starts),
             np.maximum.reduceat(data_uv, bin_starts),
         ]).ravel()
-        retained_uv = masked.get_data(
-            picks=[i], reject_by_annotation="omit", verbose=False
-        )[0] * 1e6
+        retained_uv = data_uv[retained]
         retained_uv = retained_uv[np.isfinite(retained_uv)]
         if retained_uv.size:
             ymin = min(ymin, retained_uv.min())
@@ -1715,11 +1734,7 @@ def bad_ch_by_pop(
     distances = np.linalg.norm(positions[:, None] - positions[None], axis=-1)
     np.fill_diagonal(distances, np.inf)
     neighbors = np.argsort(distances, axis=1)[:, :6]
-    # The voltage mask already verified finite data, so
-    # NaN marks annotated samples.
-    retained = ~np.isnan(
-        masked.get_data(picks=picks[:1], reject_by_annotation="NaN", verbose=False)[0]
-    )
+    retained = ~_rejected_samples(masked)
     retained_min = retained.sum() / sfreq / 60
     if retained_min == 0:
         raise ValueError("No unmasked samples remain for channel detection.")
@@ -2220,11 +2235,7 @@ def bad_ch_by_RANSAC(
     names = [raw.ch_names[i] for i in picks]
     sfreq = raw.info["sfreq"]
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    retained = np.zeros(n_windows, dtype=bool)
-    for start, _ in _unmasked_windows(
-        masked, picks, window_samples, n_windows, return_start=True
-    ):
-        retained[start // window_samples] = True
+    retained = _retained_windows(_rejected_samples(masked), window_samples, n_windows)
     if not retained.any():
         raise ValueError("No complete unmasked windows remain for channel detection.")
     geometry = _spline_geometry(raw) if _geometry is None else _geometry
