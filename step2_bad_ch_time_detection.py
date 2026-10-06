@@ -1132,7 +1132,8 @@ def bad_ch_by_HFnoise(
     L_N)). Numerical ties, within 1e-12 in log ratio, do not confirm the
     flag. Floor MADs at machine
     epsilon before taking log ratios. Keep candidates that violate in every
-    retained window, since no non-violating baseline is available. Each
+    scorable (retained, non-flat) window, since no non-violating baseline is
+    available. Each
     retained window is filtered separately to keep masked bursts out of
     neighboring windows. Accept the native reference or re-referenced data as
     in bad_ch_by_voltage. Temporary masking and the occurrence denominator
