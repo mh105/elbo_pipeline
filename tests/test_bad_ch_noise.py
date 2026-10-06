@@ -248,6 +248,8 @@ class TestRobustMetrics(unittest.TestCase):
             (1.100001, 1 / 1.1, ["E8"]),
             (2.0, 0.5, []),  # Equal multiplicative changes are a tie.
             (2.000001, 0.5, ["E8"]),
+            (1 + 1e-14, 1.0, []),  # A rounding-level HF rise with no LF change is a tie.
+            (1.000001, 1.0, ["E8"]),
             (1.1, 0.0, []),
         ):
             with self.subTest(hf_factor=hf_factor, lf_factor=lf_factor):

@@ -1129,7 +1129,8 @@ def bad_ch_by_HFnoise(
     including the candidate. Only candidates below that median need HF/LF
     confirmation: compare their median HF and LF MADs in violating (F) versus
     non-violating (N) windows and require log(H_F / H_N) > max(0, -log(L_F /
-    L_N)). Numerical ties do not confirm the flag. Floor MADs at machine
+    L_N)). Numerical ties, within 1e-12 in log ratio, do not confirm the
+    flag. Floor MADs at machine
     epsilon before taking log ratios. Keep candidates that violate in every
     retained window, since no non-violating baseline is available. Each
     retained window is filtered separately to keep masked bursts out of
@@ -1236,8 +1237,10 @@ def bad_ch_by_HFnoise(
         hf_log_change = np.log(max(hf_flagged, eps) / max(hf_baseline, eps))
         lf_log_change = np.log(max(lf_flagged, eps) / max(lf_baseline, eps))
         required_increase = max(0.0, -lf_log_change)
+        # The absolute tolerance keeps ties from confirming when no LF decrease is
+        # required (required_increase = 0).
         if hf_log_change > required_increase and not np.isclose(
-            hf_log_change, required_increase, rtol=1e-12, atol=0.0
+            hf_log_change, required_increase, rtol=1e-12, atol=1e-12
         ):
             bad_names.append(name)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
