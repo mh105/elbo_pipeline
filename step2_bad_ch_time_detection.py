@@ -748,10 +748,12 @@ def _robust_channel_z(values, use_iqr=False):
     return (values - center) / np.maximum(scale, np.finfo(float).eps)
 
 
-def _robust_z_value(values, z):
+def _robust_z_value(values, z, scale_floor=np.finfo(float).eps):
     """Value at robust z across channels, with _robust_channel_z's MAD scale.
+
+    A zero scale is floored at scale_floor (machine epsilon by default).
     """
-    return np.median(values) + z * max(1.4826 * _mad(values), np.finfo(float).eps)
+    return np.median(values) + z * max(1.4826 * _mad(values), scale_floor)
 
 
 def _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff):
@@ -885,23 +887,29 @@ def bad_ch_by_smallness(
     or a temporary voltage mask. Known local flat channels are excluded from
     each window's calculation and baseline, and their occurrence denominator.
 
-    In each window, compute each channel's variance (ddof=0) and its robust z
-    across channels, (variance - median) / (1.4826 * MAD), flooring a zero
-    scale at machine epsilon. Remove values with robust z strictly above
-    robust_z_cutoff, then recompute the median and MAD on the retained
+    In each window, compute each channel's variance (ddof=0) and work with its
+    natural log: variance is strongly right-skewed across channels, so a
+    median - z * MAD cutoff on the variance itself is often below zero and
+    cannot flag any channel. Compute each log variance's robust z across
+    channels, (log variance - median) / (1.4826 * MAD), flooring a zero scale
+    at 1e-6, far below any real spread, so that rounding cannot split
+    identical variances. Remove values with robust z strictly above
+    robust_z_cutoff, then recompute the median and MAD on the retained log
     variances. Flag retained values with new robust z strictly below
     -robust_z_cutoff. Upper-tail removal is a single pass, keeps
     strong-artifact channels from inflating the MAD, and does not itself flag a
     channel. Return channels flagged in strictly more than occurrence_cutoff of
-    complete windows, and add them to raw.info["bads"]. Preserve existing
-    labels without duplicates; data/annotations are unchanged.
+    their scorable retained windows, and add them to raw.info["bads"].
+    Preserve existing labels without duplicates; data/annotations are
+    unchanged.
 
     With return_details=True, return (report, details). Common fields follow
     bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
     violates, and flagged_data_uv. Excluded observations contain NaN.
     variance_uv2 and baseline_retained (0/1) have shape (channels, windows);
-    upper_cutoff_uv2 and lower_cutoff_uv2 have one value per window. Variances
-    and cutoffs are in squared microvolts.
+    upper_cutoff_uv2 and lower_cutoff_uv2 have one value per window: the
+    log-variance cutoffs converted back to variances. Variances and cutoffs
+    are in squared microvolts.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -929,14 +937,19 @@ def bad_ch_by_smallness(
             )
         variances = np.full(len(picks), np.nan)
         variances[valid] = data[valid].var(axis=1)
+        log_variances = np.log(np.maximum(variances, np.finfo(float).tiny))
+        # Cutoffs come from log variances; comparing variances with their
+        # exponentials keeps the details' cutoffs exact.
         high_cutoff = (
-            _robust_z_value(variances[valid], robust_z_cutoff)
+            np.exp(_robust_z_value(log_variances[valid], robust_z_cutoff, 1e-6))
             if valid.any()
             else np.nan
         )
         keep = valid & (variances <= high_cutoff)
         low_cutoff = (
-            _robust_z_value(variances[keep], -robust_z_cutoff) if keep.any() else np.nan
+            np.exp(_robust_z_value(log_variances[keep], -robust_z_cutoff, 1e-6))
+            if keep.any()
+            else np.nan
         )
         violates = keep & (variances < low_cutoff)
         counts += violates

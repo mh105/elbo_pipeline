@@ -114,9 +114,9 @@ class TestBadChBySmallness(unittest.TestCase):
                 np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_custom_parameters(self):
-        # E0 has robust z of about -2.5 in the first two windows.
+        # E0 has a log-variance robust z of about -2.7 in the first two windows.
         variances = np.tile([1.0, 0.9, 1.1, 0.95, 1.05, 1.0, 0.85, 1.15, 100], (4, 1))
-        variances[:2, 0] = 0.6
+        variances[:2, 0] = 0.65
         for kwargs, expected in (
             ({"window_length": 1.0}, ["E0", "M0"]),
             ({"window_length": 1.0, "occurrence_cutoff": 0.5}, []),
@@ -126,6 +126,19 @@ class TestBadChBySmallness(unittest.TestCase):
                 raw = make_raw(variances, window_samples=100, average=True)
                 self.assertEqual(bad_ch_by_smallness(raw, **kwargs), {"smallness": expected})
                 self.assertEqual(raw.info["bads"], expected)
+
+    def test_low_gain_channel_is_found_among_right_skewed_variances(self):
+        # Variances spread over a factor of 20 across channels, as in real recordings.
+        # On the variance scale, median - 2 * 1.4826 * MAD is below zero, so no channel
+        # could ever be small; on the log scale a low-gain channel stands out.
+        variances = np.exp(np.tile(np.linspace(-1.5, 1.5, 30), (4, 1)))
+        mad = np.median(np.abs(variances[0] - np.median(variances[0])))
+        self.assertLess(np.median(variances[0]) - 2 * 1.4826 * mad, 0)
+        self.assertEqual(bad_ch_by_smallness(make_raw(variances, average=True)),
+                         {"smallness": []})
+        variances[:, 0] = np.exp(-2.6)  # About a quarter of the typical amplitude.
+        self.assertEqual(bad_ch_by_smallness(make_raw(variances, average=True)),
+                         {"smallness": ["E0", "M0"]})
 
     def test_strong_artifact_channels_do_not_inflate_baseline(self):
         # A mean/std baseline keeps the three 100s and its lower cutoff goes negative.
