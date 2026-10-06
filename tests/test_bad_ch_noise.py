@@ -161,20 +161,27 @@ class TestVoltageDetection(unittest.TestCase):
         self.assertEqual(raw.annotations, annotations)
         np.testing.assert_array_equal(raw.get_data(), original)
 
-    def test_plot_omits_existing_bads(self):
-        raw = make_raw(np.ones((3, 100)) * 1e-6, sfreq=100)
+    def test_plot_omits_existing_bads_and_non_eeg_and_keeps_peaks(self):
+        raw = make_raw(np.ones((4, 1000)) * 1e-6, sfreq=1000)
         raw._data[0] = 300e-6  # Detected by this call: plotted and labeled.
         raw._data[1] = 5000e-6  # Existing bad: neither plotted nor used for the y-axis.
+        raw._data[2, 501] = 150e-6  # A one-sample peak survives the 20-ms envelope.
+        raw._data[3] = 2000e-6 * np.sin(2 * np.pi * raw.times)  # ECG: not plotted.
+        raw.set_channel_types({"E3": "ecg"})
         raw.info["bads"] = ["E1"]
         with patch.object(step2.plt, "show"):
             self.assertEqual(step2.bad_ch_by_voltage(raw), {"voltage": ["E0"]})
         fig = plt.gcf()
         try:
             ax = fig.axes[0]
-            traces = [line for line in ax.lines if len(line.get_ydata()) == raw.n_times]
+            # 50 bins of 20 ms, each drawn as its minimum and maximum.
+            traces = [line for line in ax.lines if len(line.get_ydata()) == 2 * 50]
             self.assertEqual(len(traces), 3)  # E0, E2, and Cz.
+            # Sample 501 lies in bin 25, whose maximum is point 51: Cz, E2, E0.
+            self.assertEqual(sorted(line.get_ydata()[51] for line in traces), [0, 150, 300])
             self.assertTrue(all(line.get_ydata().max() < 1000 for line in traces))
             self.assertLess(ax.get_ylim()[1], 1000)
+            self.assertIn("min/max envelope in 20-ms bins", ax.get_title())
             self.assertEqual([text.get_text() for text in ax.get_legend().get_texts()], ["E0"])
         finally:
             plt.close(fig)

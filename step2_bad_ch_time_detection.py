@@ -789,9 +789,12 @@ def bad_ch_by_voltage(
     non-bad EEG channel, the native reference, if present, and raise if there
     are several (run bad_ch_by_flatline first).
 
-    With plot=True, show all channels except existing bads over the full time
-    range, including the reference and masked samples. Plot in microvolts with
-    dotted cutoff lines and a different color per channel. Highlight and label
+    With plot=True, show all EEG channels except existing bads over the full
+    time range, including the reference and masked samples; non-EEG channels
+    are not drawn. To keep the figure small, draw each trace as its min/max
+    envelope in 20-ms bins (50 bins per second), which keeps every peak; the
+    title says so. Plot in microvolts with dotted cutoff lines and a different
+    color per channel. Highlight and label
     only this call's detections in the legend. Shade temporary voltage masks in
     light gray and scale the y-axis from the plotted channels' finite samples
     outside all BAD annotations.
@@ -829,13 +832,24 @@ def bad_ch_by_voltage(
         return report
 
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
-    times = raw.times
-    colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(raw.ch_names)))
+    sfreq = raw.info["sfreq"]
+    # Draw each trace as its min/max in 20-ms bins (50 bins per second): every
+    # peak survives with far fewer points than samples.
+    bin_samples = max(int(round(0.02 * sfreq)), 1)
+    bin_starts = np.arange(0, raw.n_times, bin_samples)
+    envelope_times = np.repeat(bin_starts / sfreq, 2)
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(eeg)))
     ymin, ymax = np.inf, -np.inf
-    for i, name in enumerate(raw.ch_names):
+    for color, i in zip(colors, eeg):
+        name = raw.ch_names[i]
         if name in masked.info["bads"]:  # Bads before this call.
             continue
         data_uv = raw.get_data(picks=[i], reject_by_annotation=None)[0] * 1e6
+        envelope = np.column_stack([
+            np.minimum.reduceat(data_uv, bin_starts),
+            np.maximum.reduceat(data_uv, bin_starts),
+        ]).ravel()
         retained_uv = masked.get_data(
             picks=[i], reject_by_annotation="omit", verbose=False
         )[0] * 1e6
@@ -844,11 +858,11 @@ def bad_ch_by_voltage(
             ymin = min(ymin, retained_uv.min())
             ymax = max(ymax, retained_uv.max())
         if name in bad_names:
-            ax.plot(
-                times, data_uv, color=colors[i], linewidth=0.8, label=name, zorder=2
-            )
+            ax.plot(envelope_times, envelope, color=color, linewidth=0.8, label=name,
+                    zorder=2)
         else:
-            ax.plot(times, data_uv, color=colors[i], linewidth=0.5, alpha=0.7, zorder=1)
+            ax.plot(envelope_times, envelope, color=color, linewidth=0.5, alpha=0.7,
+                    zorder=1)
     for annotation in masked.annotations:
         if annotation["description"] == "BAD_voltage_mask":
             start = annotation["onset"] - masked.first_time
@@ -859,7 +873,9 @@ def bad_ch_by_voltage(
     ax.set_ylim(ymin - padding, ymax + padding)
     for cutoff in (-voltage_threshold_uv, voltage_threshold_uv):
         ax.axhline(cutoff, color="black", linestyle=":", linewidth=1, zorder=3)
-    ax.set(xlabel="Time (s)", ylabel="Voltage (µV)", title="Bad channels by voltage")
+    ax.set(xlabel="Time (s)", ylabel="Voltage (µV)",
+           title="Bad channels by voltage; each EEG trace drawn as its min/max "
+                 f"envelope in {1000 * bin_samples / sfreq:.3g}-ms bins")
     if bad_names:
         ax.legend(title="Flagged channels", loc="upper left", bbox_to_anchor=(1.01, 1))
     plt.show()
