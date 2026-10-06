@@ -2370,6 +2370,7 @@ def bad_ch_by_RANSAC(
             "noise_gain": np.median(np.linalg.norm(weights, axis=2), axis=1),
         })
     r = np.full((len(picks), n_windows), np.nan)
+    kept = {}
     for index in np.flatnonzero(retained):
         start = index * window_samples
         configuration = configurations[configuration_index[index]]
@@ -2389,6 +2390,9 @@ def bad_ch_by_RANSAC(
         median = _ransac_median(configuration["columns"], window, n_subsets)
         _require_variance(median, active_names, "The median prediction", start, sfreq)
         r[rows, index] = _row_pearson(window[rows], median)
+        if return_details and method == "threshold":
+            # Keep the violating targets' medians for the details.
+            kept[index] = median[r[rows, index] < correlation_cutoff]
     pooled = r[np.isfinite(r)]
     z = (np.median(pooled) - r) / max(
         1.4826 * _mad(pooled, axis=None), np.finfo(float).eps
@@ -2435,7 +2439,11 @@ def bad_ch_by_RANSAC(
             window = filtered[:, start:start + window_samples]
             scored = rows[~flat[rows, index]]
             median = np.full((len(rows), window_samples), np.nan)
-            if len(scored):
+            if len(scored) and method == "threshold":
+                median[~flat[rows, index]] = kept[index]
+            elif len(scored):
+                # robust_z violations are known only after pooling, so
+                # recompute the violating targets' medians.
                 active = np.searchsorted(configuration["rows"], scored)
                 columns = configuration["columns"].reshape(len(picks), -1, n_subsets)
                 median[~flat[rows, index]] = _ransac_median(
