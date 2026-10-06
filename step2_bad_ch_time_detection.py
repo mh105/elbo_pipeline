@@ -691,7 +691,9 @@ def bad_ch_by_flatline(
     the channel's complete window. Omit windows overlapping BAD annotations,
     including those global dropouts, and the temporary 0.1-second voltage
     mask, built on a copy of this native data with the resolved reference
-    excluded, as in the other detectors; ignore the partial tail.
+    excluded, as in the other detectors; ignore the partial tail. A channel
+    flat in fewer windows can still be flagged by bad_ch_by_RANSAC, which
+    counts its flat windows as failures to predict.
 
     Add detections to info['bads']; leave data/annotations unchanged. Details
     follow the other window detectors, with flat and violates equal to the
@@ -2096,7 +2098,12 @@ def bad_ch_by_RANSAC(
     (1.4826 * MAD), flooring a zero scale at machine epsilon, so that a low r
     gives a high z, and flags a window when z is strictly above
     robust_z_cutoff. Known flat target windows are automatic violations, with
-    missing r, and remain in that target's occurrence denominator. Pool only
+    missing r, and remain in that target's occurrence denominator: a flat
+    channel cannot be predicted from the others, so its flat time counts as
+    failure to predict. This is deliberate and differs from the other
+    flat-aware detectors, which leave local-flat windows out of both counts;
+    partly flat channels below bad_ch_by_flatline's cutoff can therefore still
+    be flagged here. Pool only
     finite measured correlations for robust_z. Either way, flag channels
     violating in strictly more than occurrence_cutoff of retained windows.
 
