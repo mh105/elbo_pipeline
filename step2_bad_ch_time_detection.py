@@ -2814,9 +2814,9 @@ def robust_average_reference_inplace(
     eeg_names = [raw.ch_names[i] for i in eeg]
     orig_bads = list(raw.info["bads"])
     initial = [name for name in eeg_names if name in orig_bads]
-    if not np.isfinite(
-        raw._data[mne.pick_types(raw.info, eeg=True, exclude="bads")]
-    ).all():
+    # Row by row, here and below, so that no full EEG temporary is made.
+    if not all(np.isfinite(raw._data[i]).all()
+               for i in mne.pick_types(raw.info, eeg=True, exclude="bads")):
         raise ValueError(
             "Nonfinite data in non-bad EEG channels; run bad_ch_by_nan first."
         )
@@ -2842,7 +2842,8 @@ def robust_average_reference_inplace(
         used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
         reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
         referenced = raw.copy()
-        referenced._data[eeg] -= reference
+        for i in eeg:
+            referenced._data[i] -= reference
         robust_bad_ch_report, pass_details = {}, {"interpolated": initial + flagged}
         for detector in detectors:
             result = detector(referenced, return_details=return_details)
@@ -2897,7 +2898,8 @@ def robust_average_reference_inplace(
 
     bads = [name for name in eeg_names if name in initial or name in flagged]
     _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines, geometry)
-    raw._data[eeg] -= reference
+    for i in eeg:
+        raw._data[i] -= reference
     raw.info["bads"] = [name for name in orig_bads if name not in eeg_names]
     if reference_channel not in bads and not np.array_equal(
         raw._data[raw.ch_names.index(reference_channel)], -reference
