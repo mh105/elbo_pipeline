@@ -363,7 +363,8 @@ def _bridge_flat_spans_inplace(data, spans):
     for start, stop in spans:
         if start > 0 and stop < n_times:
             fraction = np.arange(1, stop - start + 1) / (stop - start + 1)
-            data[start:stop] = data[start - 1] + (data[stop] - data[start - 1]) * fraction
+            left, right = data[start - 1], data[stop]
+            data[start:stop] = left + (right - left) * fraction
         elif stop < n_times:
             data[start:stop] = data[stop]
         elif start > 0:
@@ -525,7 +526,9 @@ def detect_flatline_inplace(
         None if downstream_highpass_hz is None else float(downstream_highpass_hz)
     )
     result["widen_samples"] = reach
-    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff, window_length, reach)
+    _mask_segment_by_flatline(
+        raw, result, channel_fraction_cutoff, window_length, reach
+    )
     for row, name in enumerate(result["ch_names"]):
         local = _subtract_segments(result["segments"][row], result["global_segments"])
         _bridge_flat_spans_inplace(raw._data[raw.ch_names.index(name)], local)
@@ -1729,7 +1732,9 @@ def bad_ch_by_pop(
         jumps = np.flatnonzero(
             (np.abs(diffs) > jump_sd_cutoff * jump_sd[row]) & (np.abs(diffs) > 20e-6)
         )
-        jumps = jumps[(jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)]
+        jumps = jumps[
+            (jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)
+        ]
         step = _level_change(data, jumps, gap, width)
         sharp_step = _level_change(data[0], jumps, gap, short)
         with np.errstate(divide="ignore", invalid="ignore"), warnings.catch_warnings():
