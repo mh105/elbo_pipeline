@@ -2628,8 +2628,9 @@ def pca_cleaning_inplace(
             details[name]["pc1_variance_fraction"][window] = singular[0] ** 2 / np.sum(
                 singular**2
             )
+            # The largest |u_i (u^T x)_t| without the outer product.
             details[name]["pc1_peak_uv"][window] = (
-                np.abs(np.outer(pc1, pc1 @ data)).max() * 1e6
+                np.abs(pc1).max() * np.abs(pc1 @ data).max() * 1e6
             )
             details[name]["pc1_loadings"][window] = pc1
     for name in ("input", "highpass"):
@@ -2670,10 +2671,16 @@ def pca_cleaning_inplace(
             rise = (starts[window] - fade, fade if window == first else 2 * fade)
             fall = (stops[window] if window == last else stops[window] - fade,
                     fade if window == last else 2 * fade)
-            weight = ramp(samples, *rise) * (1 - ramp(samples, *fall))
+            # The weight is zero outside the window and its fades.
+            support = slice(max(starts[window] - fade, span_start) - span_start,
+                            min(stops[window] + fade, span_stop) - span_start)
+            weight = (ramp(samples[support], *rise)
+                      * (1 - ramp(samples[support], *fall)))
             name = details["removed_pass"][window]
             pc1 = details[name]["pc1_loadings"][window]
-            removal += weight * np.outer(pc1, pc1 @ sources[name])
+            removal[:, support] += weight * np.outer(
+                pc1, pc1 @ sources[name][:, support]
+            )
         raw._data[picks, span_start:span_stop] = data - removal
         if return_removed:
             details["removed_spans"].append((span_start, span_stop, removal))
