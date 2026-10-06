@@ -3137,30 +3137,6 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
-    # %% Local PCA cleaning of shared artifacts, excluding the bad channels above.
-    # Rerun the detectors on the cleaned data; if they flag new channels, add
-    # them to the bads and redo the cleaning on the pre-cleaning data.
-    # while True:
-    #     raw_pca = raw_bads.copy()
-    #     pca_details = pca_cleaning_inplace(raw_pca)
-    #     new_bads = {}
-    #     new_bads.update(bad_ch_by_voltage(raw_pca, plot=False))
-    #     new_bads.update(bad_ch_by_HFnoise(raw_pca))
-    #     new_bads.update(bad_ch_by_pop(raw_pca))
-    #     print(f"New bad channels after PCA cleaning: {new_bads}")
-    #     if not any(new_bads.values()):
-    #         break
-    #     for criterion, names in new_bads.items():
-    #         bad_ch_report[criterion] = bad_ch_report[criterion] + names
-    #     raw_bads.info["bads"] = list(raw_pca.info["bads"])
-    # plot_bad_ch_report(raw_bads, bad_ch_report)  # After PCA cleaning
-
-    # # Whole-recording traces before and after PCA cleaning
-    # pca_overview_figure, pca_channel_figure = plot_pca_cleaning(
-    #     raw_bads, raw_pca, pca_details
-    # )
-    # raw_bads = raw_pca  # Keep the cleaned data for the next steps
-
     # %% Robust average reference: interpolate all bad channels, which info["bads"]
     # no longer lists; bad_ch_report keeps them by criterion.
     robust_bad_ch_report = robust_average_reference_inplace(
