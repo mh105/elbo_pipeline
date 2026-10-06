@@ -21,9 +21,6 @@ CRITERIA = {"bad_ch_by_voltage": "voltage", "bad_ch_by_HFnoise": "HFnoise",
             "bad_ch_by_pop": "pop", "bad_ch_by_smallness": "smallness",
             "bad_ch_by_std": "std", "bad_ch_by_BBnoise": "BBnoise",
             "bad_ch_by_correlation": "correlation", "bad_ch_by_RANSAC": "RANSAC"}
-LOCAL_DETECTORS = {"bad_ch_by_HFnoise", "bad_ch_by_pop", "bad_ch_by_smallness",
-                   "bad_ch_by_std", "bad_ch_by_BBnoise", "bad_ch_by_correlation",
-                   "bad_ch_by_RANSAC"}
 
 
 def native_with_flatlines(global_dropout=False):
@@ -44,7 +41,7 @@ def native_with_flatlines(global_dropout=False):
 
 
 class TestRobustReferenceFlatlines(unittest.TestCase):
-    def test_forwards_local_masks_only_to_applicable_detectors(self):
+    def test_forwards_local_masks_to_every_detector(self):
         raw, flatlines = native_with_flatlines()
         with ExitStack() as stack:
             detectors = {name: stack.enter_context(patch.object(step2, name,
@@ -57,10 +54,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
         for name, detector in detectors.items():
             self.assertEqual(detector.call_count, 1)
             kwargs = detector.call_args.kwargs
-            if name in LOCAL_DETECTORS:
-                self.assertIs(kwargs["flatlines"], flatlines)
-            else:
-                self.assertNotIn("flatlines", kwargs)
+            self.assertIs(kwargs["flatlines"], flatlines)
             if name == "bad_ch_by_RANSAC":
                 self.assertIn("_geometry", kwargs)
                 self.assertEqual(kwargs["_geometry"]["kernel"].dtype, np.dtype(np.float64))

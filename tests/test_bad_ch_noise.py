@@ -147,6 +147,28 @@ class TestVoltageDetection(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(), original)
         self.assertEqual(len(raw.annotations), 0)
 
+    def test_local_flat_samples_leave_the_count_and_denominator(self):
+        rng = np.random.default_rng(3)
+        raw = make_raw(rng.normal(scale=5e-6, size=(8, 100)), sfreq=100)
+        raw._data[0, :20] += 300e-6  # 20 exceeding samples...
+        raw._data[0, 40:80] = 1e-6  # ...and a 0.4-s flat span on E0.
+        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
+        self.assertEqual(flatlines["segments"], [[[40, 80]]])
+        # Counting the flat span as valid, in-range samples dilutes 20/60 to 20/100.
+        report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, return_details=True)
+        self.assertEqual(report, {"voltage": []})
+        self.assertAlmostEqual(details["exceed_fraction"][0], 0.2)
+        report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, flatlines=flatlines,
+                                                  return_details=True)
+        self.assertEqual(report, {"voltage": ["E0"]})
+        self.assertAlmostEqual(details["exceed_fraction"][0], 20 / 60)
+        # A channel flat throughout has no scorable samples: no fraction, no flag.
+        flatlines["segments"] = [[[0, 100]]]
+        report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, flatlines=flatlines,
+                                                  return_details=True)
+        self.assertEqual(report, {"voltage": []})
+        self.assertTrue(np.isnan(details["exceed_fraction"][0]))
+
     def test_temporary_and_existing_annotations_change_sample_denominator(self):
         raw = make_raw(np.ones((4, 100)) * 1e-6, sfreq=100, first_samp=300)
         raw._data[:4, :20] = 600e-6  # Temporary mask.

@@ -917,13 +917,18 @@ def bad_ch_by_voltage(
     voltage_threshold_uv=200.0,
     occurrence_cutoff=0.25,
     *,
+    flatlines=None,
     plot=True,
     return_details=False,
 ):
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
-    Flag if strictly more than occurrence_cutoff of retained samples exceed
-    +/-voltage_threshold_uv. Exclude existing bads, the reference, non-EEG
+    Flag if strictly more than occurrence_cutoff of a channel's scorable
+    samples exceed +/-voltage_threshold_uv. Scorable samples are retained
+    samples outside the channel's local flat intervals: with flatlines, flat
+    samples leave both the count and the denominator, since they would
+    otherwise pass as valid samples within range and dilute the fraction.
+    Exclude existing bads, the reference, non-EEG
     channels, existing BAD annotations, and the temporary 0.1-second voltage
     mask. Add detections to raw.info["bads"], preserving existing labels
     without duplicates. Input data and annotations are unchanged. Accept the
@@ -942,24 +947,34 @@ def bad_ch_by_voltage(
     outside all BAD annotations.
 
     With return_details=True, return (report, details): ch_names of the
-    evaluated channels and exceed_fraction, each one's fraction of retained
-    samples beyond +/-voltage_threshold_uv.
+    evaluated channels and exceed_fraction, each one's fraction of scorable
+    samples beyond +/-voltage_threshold_uv (NaN without scorable samples).
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
     if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
         raise ValueError("occurrence_cutoff must be between 0 and 1.")
     masked, reference_channel = _temporary_voltage_mask(raw)
+    _validate_flatlines(raw, flatlines)
+    local_flat = {} if flatlines is None else dict(
+        zip(flatlines["ch_names"], flatlines["segments"])
+    )
     exclude = masked.info["bads"] + (
         [] if reference_channel is None else [reference_channel]
     )
     picks = mne.pick_types(masked.info, eeg=True, exclude=exclude)
     fractions = np.empty(len(picks))
     for row, i in enumerate(picks):
-        data = masked.get_data(picks=[i], reject_by_annotation="omit", verbose=False)[0]
-        if data.size == 0:
+        # The voltage mask verified finite data, so NaN marks annotated samples.
+        data = masked.get_data(picks=[i], reject_by_annotation="NaN", verbose=False)[0]
+        if np.isnan(data).all():
             raise ValueError("No unmasked samples remain for channel detection.")
-        fractions[row] = np.mean(np.abs(data) > voltage_threshold_uv / 1e6)
+        for start, stop in local_flat.get(raw.ch_names[i], []):
+            data[start:stop] = np.nan
+        scorable = data[np.isfinite(data)]
+        # A channel flat throughout has no scorable samples and no evidence.
+        fractions[row] = (np.mean(np.abs(scorable) > voltage_threshold_uv / 1e6)
+                          if scorable.size else np.nan)
     bad_names = [raw.ch_names[i] for i in picks[fractions > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"voltage": bad_names}
@@ -2742,7 +2757,7 @@ def robust_average_reference_inplace(
 
     detectors = (
         # the first three can also run on native reference
-        partial(bad_ch_by_voltage, plot=False),
+        partial(bad_ch_by_voltage, plot=False, flatlines=flatlines),
         partial(bad_ch_by_HFnoise, flatlines=flatlines),
         partial(bad_ch_by_pop, flatlines=flatlines),
         # the next five require average reference
@@ -2865,7 +2880,7 @@ if __name__ == "__main__":
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
     # %% Bad channels by voltage, high-frequency noise, and electrode pops
-    bad_ch_report.update(bad_ch_by_voltage(raw_bads))
+    bad_ch_report.update(bad_ch_by_voltage(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
