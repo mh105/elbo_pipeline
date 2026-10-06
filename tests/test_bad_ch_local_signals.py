@@ -21,8 +21,13 @@ from step2_bad_ch_time_detection import (
 
 
 def flatline(raw, **kwargs):
-    """Detect flatlines (masking global dropouts on raw), then score them."""
-    flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"))
+    """Detect flatlines (masking global dropouts on raw), then score them.
+
+    The window rules here concern exact spans, so local intervals are not
+    widened for a later high-pass (5.5 s would cover these short recordings).
+    """
+    flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"),
+                                        downstream_highpass_hz=None)
     return bad_ch_by_flatline(raw, flatlines=flatlines, **kwargs)
 
 
@@ -174,10 +179,12 @@ class TestBadChByFlatline(unittest.TestCase):
                 variances = np.ones((4, 5))
                 variances[:flat_windows, 0] = 0
                 raw = make_raw(variances)
-                original = raw.get_data().copy()
-                self.assertEqual(flatline(raw), {"flatline": expected})
+                flatlines = detect_flatline_inplace(raw, downstream_highpass_hz=None)
+                bridged = raw.get_data().copy()  # Detection bridged E0's flat span.
+                self.assertEqual(bad_ch_by_flatline(raw, flatlines=flatlines),
+                                 {"flatline": expected})
                 self.assertEqual(raw.info["bads"], expected)
-                np.testing.assert_array_equal(raw.get_data(), original)
+                np.testing.assert_array_equal(raw.get_data(), bridged)
 
     def test_peer_flatness_does_not_suppress_channel_flags(self):
         # Up to 5 of 24 channels flat at once stay below the 25% global cutoff.
@@ -246,16 +253,21 @@ class TestWindowRules(unittest.TestCase):
                 average = detector is bad_ch_by_smallness
                 raw = make_raw(variances, first_samp=500, average=average)
                 raw.crop(tmax=8.99)  # Four complete windows and one 1-second tail.
+                kwargs = {}
+                if not average:  # Detect once, as the pipeline does, then score.
+                    kwargs["flatlines"] = detect_flatline_inplace(
+                        raw, downstream_highpass_hz=None
+                    )
                 raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
                 criterion = detector.__name__.removeprefix("bad_ch_by_")
                 # Only one of four full windows violates the rule.
-                self.assertEqual(run_detector(detector, raw), {criterion: []})
+                self.assertEqual(detector(raw, **kwargs), {criterion: []})
                 self.assertEqual(raw.info["bads"], [])
-                self.assertEqual(run_detector(detector, raw, occurrence_cutoff=0.2),
+                self.assertEqual(detector(raw, occurrence_cutoff=0.2, **kwargs),
                                  {criterion: []})
                 raw.set_annotations(None)
                 expected = ["E0", "M0"] if average else ["E0"]
-                self.assertEqual(run_detector(detector, raw, occurrence_cutoff=0.2),
+                self.assertEqual(detector(raw, occurrence_cutoff=0.2, **kwargs),
                                  {criterion: expected})
                 self.assertEqual(raw.info["bads"], expected)
 

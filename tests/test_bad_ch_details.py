@@ -86,7 +86,8 @@ class TestWindowDetails(unittest.TestCase):
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
         raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_excluded"]))
-        flatlines = step2.detect_flatline_inplace(raw)  # Annotates the global dropout.
+        # Annotates the global dropout; exact spans suit this short recording.
+        flatlines = step2.detect_flatline_inplace(raw, downstream_highpass_hz=None)
         original = raw.copy()
         expected = step2.bad_ch_by_flatline(raw.copy(), flatlines=flatlines)
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,

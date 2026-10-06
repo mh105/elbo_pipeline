@@ -312,6 +312,46 @@ def _merge_segments(segments):
     return merged
 
 
+def _widen_segments(segments, samples, n_times):
+    """Widen half-open intervals by samples on each side within the data, then
+    merge them.
+    """
+    return _merge_segments([[max(start - samples, 0), min(stop + samples, n_times)]
+                            for start, stop in segments])
+
+
+def _subtract_segments(segments, removed):
+    """Parts of sorted, disjoint half-open intervals outside the removed ones."""
+    kept = []
+    for start, stop in segments:
+        for cut_start, cut_stop in removed:
+            if cut_stop <= start or cut_start >= stop:
+                continue
+            if cut_start > start:
+                kept.append([start, cut_start])
+            start = max(start, cut_stop)
+            if start >= stop:
+                break
+        if start < stop:
+            kept.append([start, stop])
+    return kept
+
+
+def _bridge_flat_spans_inplace(data, spans):
+    """Replace each span of a channel's data by the straight line joining the
+    samples on either side, or by the one neighbour at a recording edge.
+    """
+    n_times = len(data)
+    for start, stop in spans:
+        if start > 0 and stop < n_times:
+            fraction = np.arange(1, stop - start + 1) / (stop - start + 1)
+            data[start:stop] = data[start - 1] + (data[stop] - data[start - 1]) * fraction
+        elif stop < n_times:
+            data[start:stop] = data[stop]
+        elif start > 0:
+            data[start:stop] = data[start - 1]
+
+
 def detect_flatline_inplace(
     raw,
     reference_channel=None,
@@ -321,19 +361,39 @@ def detect_flatline_inplace(
     highpass_hz=1.0,
     channel_fraction_cutoff=0.25,
     window_length=2.0,
+    downstream_highpass_hz=0.3,
 ):
-    """Detect sparse native-reference flat intervals and mask global dropouts
-    in place; return the flatline dictionary.
+    """Detect sparse native-reference flat intervals, mask global dropouts,
+    and bridge local flat spans, all in place; return the flatline dictionary.
 
-    Run this on the native data right after bad_ch_by_nan, before any other
-    step 2 function: it ends by annotating global dropouts on raw as
-    BAD_by_flatline (_mask_segment_by_flatline, with channel_fraction_cutoff),
-    and every later detector and the robust reference rely on that mask. It
-    raises, before changing raw, if the dropouts cover the entire recording
-    or leave no complete window_length window (in seconds; the detectors'
-    2-s default).
+    Run this on the preloaded native data right after bad_ch_by_nan, before
+    any other step 2 function: every later detector and the robust reference
+    rely on its mask and dictionary.
 
-    Union four kinds of block, each judged against tolerance_v volts:
+    Global dropouts are intervals where strictly more than
+    channel_fraction_cutoff of the EEG channels not in raw.info["bads"] (the
+    native reference excluded) are flat at once, judged on the exact
+    detections (_mask_segment_by_flatline). Annotate them as BAD_by_flatline,
+    widened on each side by the reach of the later high-pass (below), whose
+    filter rings at their edges. Raise, before changing raw, if the dropouts
+    cover the entire recording or leave no complete window_length window (in
+    seconds; the detectors' 2-s default).
+
+    Local flat spans are each channel's exact detections outside the global
+    dropouts. Bridge each span in raw by the straight line joining the
+    samples on either side (or the one neighbour at a recording edge), so
+    later filters never see a level step; global dropouts are left as they
+    are. Then widen each span on both sides by the reach of MNE's default FIR
+    high-pass at downstream_highpass_hz, the high-pass applied before
+    detection (0.3 Hz: an 11-s filter, so 5.5 s on each side at any sampling
+    rate), to protect the span's edges too. These widened local intervals are
+    the dictionary's segments, used everywhere downstream: bad_ch_by_flatline's
+    count, each detector's exclusions, RANSAC's flat-as-failure rule, and the
+    robust reference's repair. downstream_highpass_hz=None skips the widening
+    of both the local intervals and the annotation.
+
+    Detect with the union of four kinds of block, each judged against
+    tolerance_v volts:
     - raw: min_samples consecutive samples whose range is at most tolerance_v;
     - highpass: the same on a full-record copy filtered with a high-pass
       cutoff of highpass_hz;
@@ -352,11 +412,13 @@ def detect_flatline_inplace(
     finite, positive, and below Nyquist (default 1 Hz). Bounds are
     crop-relative half-open sample indices. The dictionary records these
     detection settings, channel identities, and sampling/crop metadata for
-    validation by later consumers. segments contains the merged intervals;
-    segments_on_subtypes stores the separate segments_on_raw,
-    segments_on_highpass, segments_on_ramp, and segments_on_curve lists. All
-    are aligned with ch_names. The global dropout decision is saved as
-    global_segments, global_ch_names, and global_channel_fraction_cutoff.
+    validation by later consumers. segments contains the widened local
+    intervals; segments_on_subtypes stores the exact detections per rule as
+    segments_on_raw, segments_on_highpass, segments_on_ramp, and
+    segments_on_curve. All are aligned with ch_names. The exact global
+    dropouts are saved as global_segments, with global_ch_names and
+    global_channel_fraction_cutoff; downstream_highpass_hz and widen_samples
+    (the reach, in samples) record the widening.
     Run bad_ch_by_nan first; the native zero
     reference is exempt. Include finite existing bad EEG channels; skip
     already bad nonfinite channels.
@@ -378,6 +440,16 @@ def detect_flatline_inplace(
         raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
     if not np.isfinite(window_length) or window_length * raw.info["sfreq"] < 1:
         raise ValueError("window_length must be finite and cover at least one sample.")
+    if downstream_highpass_hz is not None and (
+        not np.isfinite(downstream_highpass_hz)
+        or not 0 < downstream_highpass_hz < raw.info["sfreq"] / 2
+    ):
+        raise ValueError(
+            "downstream_highpass_hz must be None, or finite, positive, and below "
+            "the Nyquist frequency."
+        )
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
     min_samples = int(min_samples)
     tolerance_v = float(tolerance_v)
     highpass_hz = float(highpass_hz)
@@ -430,7 +502,21 @@ def detect_flatline_inplace(
             subtypes["segments_on_highpass"].append(filtered)
             subtypes["segments_on_ramp"].append(ramp)
             subtypes["segments_on_curve"].append(curve)
-    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff, window_length)
+    reach = 0
+    if downstream_highpass_hz is not None:
+        reach = len(mne.filter.create_filter(
+            None, raw.info["sfreq"], l_freq=downstream_highpass_hz, h_freq=None,
+            verbose=False,
+        )) // 2
+    result["downstream_highpass_hz"] = (
+        None if downstream_highpass_hz is None else float(downstream_highpass_hz)
+    )
+    result["widen_samples"] = reach
+    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff, window_length, reach)
+    for row, name in enumerate(result["ch_names"]):
+        local = _subtract_segments(result["segments"][row], result["global_segments"])
+        _bridge_flat_spans_inplace(raw._data[raw.ch_names.index(name)], local)
+        result["segments"][row] = _widen_segments(local, reach, raw.n_times)
     return result
 
 
@@ -655,18 +741,21 @@ def bad_ch_by_flatline(
 
 
 def _mask_segment_by_flatline(
-    raw, flatlines, channel_fraction_cutoff=0.25, window_length=2.0,
+    raw, flatlines, channel_fraction_cutoff=0.25, window_length=2.0, widen_samples=0,
 ):
-    """Append exact BAD_by_flatline dropout annotations; return None.
+    """Append BAD_by_flatline dropout annotations; return None.
 
-    Called at the end of detect_flatline_inplace, on the native data whose
-    reference it resolved (flatlines["reference_channel"]). Use only EEG
-    channels not in raw.info["bads"], excluding the native reference from both
-    the flat count and the denominator. A dropout has strictly more than
-    channel_fraction_cutoff of that pool simultaneously flat. Annotate before
-    whole-channel flatline rejection, and carry these annotations through
-    preprocessing. Save the eligible names, cutoff, and global intervals in
-    flatlines so later local repair uses the same dropout decision.
+    Called by detect_flatline_inplace, on the native data whose reference it
+    resolved (flatlines["reference_channel"]), with the exact detections in
+    flatlines["segments"]. Use only EEG channels not in raw.info["bads"],
+    excluding the native reference from both the flat count and the
+    denominator. A dropout has strictly more than channel_fraction_cutoff of
+    that pool simultaneously flat. Annotate the dropouts widened by
+    widen_samples on each side (the later high-pass's reach) within the data,
+    before whole-channel flatline rejection, and carry these annotations
+    through preprocessing. Save the eligible names, cutoff, and exact global
+    intervals in flatlines so later local repair uses the same dropout
+    decision.
 
     Before changing raw or flatlines, raise if the dropouts cover the entire
     recording, or leave no complete window_length window (the detectors'
@@ -679,10 +768,11 @@ def _mask_segment_by_flatline(
         raise ValueError(
             "Global flatline dropout covers the entire recording; inspect the data."
         )
+    masked = _widen_segments(segments, widen_samples, raw.n_times)
     window_samples = int(round(window_length * raw.info["sfreq"]))
     n_windows = raw.n_times // window_samples
-    if segments and n_windows and _segments_to_windows(
-        segments, window_samples, n_windows
+    if masked and n_windows and _segments_to_windows(
+        masked, window_samples, n_windows
     ).all():
         raise ValueError(
             f"Global flatline dropouts leave no complete {window_length:g}-s window; "
@@ -691,8 +781,8 @@ def _mask_segment_by_flatline(
     flatlines["global_channel_fraction_cutoff"] = float(channel_fraction_cutoff)
     flatlines["global_ch_names"] = names
     flatlines["global_segments"] = segments
-    if segments:
-        bounds = np.asarray(segments) / raw.info["sfreq"]
+    if masked:
+        bounds = np.asarray(masked) / raw.info["sfreq"]
         raw.annotations.append(
             raw.first_time + bounds[:, 0], bounds[:, 1] - bounds[:, 0],
             ["BAD_by_flatline"] * len(bounds),
@@ -1734,6 +1824,9 @@ def bad_ch_by_correlation(
     With flatlines, omit flat targets and partners in overlapping windows.
     Their missing scores do not count as failures or enter their denominator;
     unexpected constants among otherwise eligible targets still raise.
+    detect_flatline_inplace has already widened the local intervals by the
+    0.3 Hz high-pass reach (5.5 s), beyond this band-limit's 2.31-s reach, so
+    they are not widened again here.
     """
     if not np.isfinite(correlation_cutoff) or not -1 <= correlation_cutoff <= 1:
         raise ValueError("correlation_cutoff must be between -1 and 1.")
@@ -1948,8 +2041,9 @@ def bad_ch_by_RANSAC(
     the channel with MNE's spherical spline, take the per-sample median of the
     n_subsets predicted traces, and correlate it with the channel in each
     retained window (Pearson r). flatlines is the original
-    detect_flatline_inplace result. In each window, omit its flat channels
-    from all predictor subsets,
+    detect_flatline_inplace result, whose local intervals are already widened
+    beyond this band-limit's reach, so they are not widened again here. In
+    each window, omit its flat channels from all predictor subsets,
     replacing them by the next eligible channels in the fixed orderings.
     Prepare each observed eligibility configuration once, using shared cached
     geometry and weights; prediction does not refit splines inside windows.
@@ -2534,7 +2628,7 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
 
 
 def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=None):
-    """Repair whole bad channels and exact local spans
+    """Repair whole bad channels and local flat intervals
     without changing metadata.
 
     Apply the same configurations used by _robust_mean, before the
@@ -2576,7 +2670,8 @@ def robust_average_reference_inplace(
     bad and are never re-evaluated. Non-bad EEG data must be finite.
 
     Each pass takes the robust mean after spherical repair of existing EEG bads
-    and the previous pass's flags, plus exact local flat spans. For each
+    and the previous pass's flags, plus the local flat intervals
+    (detect_flatline_inplace's widened intervals). For each
     configuration, repair their union using genuine, nonflat donors. Cached
     weights combine repair and averaging into one projection without making
     reconstructed channel traces. Subtract this mean from every EEG channel of
@@ -2595,7 +2690,7 @@ def robust_average_reference_inplace(
     mean with them interpolated. Raise if neither has happened
     within max_iterations passes.
 
-    Then reconstruct whole-channel bads and exact local flat spans in raw,
+    Then reconstruct whole-channel bads and local flat intervals in raw,
     using the same cached geometry/configurations, and subtract the last robust
     mean from every EEG channel, and remove the EEG channels from
     raw.info["bads"], so all EEG channels average to zero. Non-EEG channels are

@@ -64,20 +64,26 @@ DETECTORS = (
 
 
 class TestPublicFlatlineStages(unittest.TestCase):
-    def test_detect_public_reference_exemption_and_report_only_output(self):
+    def test_detect_reference_exemption_bridging_and_widening(self):
         raw = native_raw(n_nonreference=7)
         raw._data[0, 34:44] = 3e-6
-        raw._data[1, 600:609] = 3e-6
-        raw.info["bads"] = ["E0"]
+        raw._data[1, 600:609] = 3e-6  # 9 samples: too short to be flat.
+        raw.info["bads"] = ["E0"]  # Finite bads are still detected and bridged.
         raw.set_annotations(mne.Annotations([1], [0], ["event"]))
         before = raw.copy()
         with patch.object(step2.mne.filter, "filter_data", side_effect=lambda data, *a, **k: data.copy()):
             result = step2.detect_flatline_inplace(raw)
+        reach = 1375  # 5.5 s at 250 Hz.
         self.assertEqual(result["ch_names"], ["E0"])
-        self.assertEqual(result["segments"], [[[34, 44]]])
+        self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"], [[[34, 44]]])
+        self.assertEqual(result["segments"], [[[0, 44 + reach]]])
         self.assertEqual(result["reference_channel"], "Cz")
         self.assertEqual(len(result["eeg_ch_names"]), 8)
-        np.testing.assert_array_equal(raw.get_data(), before.get_data())
+        x, original = raw.get_data(), before.get_data()
+        line = original[0, 33] + (original[0, 44] - original[0, 33]) * np.arange(1, 11) / 11
+        np.testing.assert_allclose(x[0, 34:44], line, rtol=0, atol=1e-18)
+        x[0, 34:44] = original[0, 34:44]
+        np.testing.assert_array_equal(x, original)
         self.assertEqual(raw.info["bads"], before.info["bads"])
         self.assertEqual(raw.annotations, before.annotations)
 
