@@ -1546,6 +1546,7 @@ def bad_ch_by_pop(
     sharpness_cutoff=0.7,
     rate_cutoff=1.0,
     *,
+    flatlines=None,
     return_details=False,
 ):
     """Return {"pop": names} for EEG channels with frequent electrode pops.
@@ -1573,12 +1574,19 @@ def bad_ch_by_pop(
     detections to raw.info["bads"], preserving existing labels without
     duplicates. Input data and annotations are unchanged.
 
+    With flatlines, treat each channel's local flat intervals like masked
+    samples for that channel: its edges are never jumps, candidates whose
+    evaluation spans touch them are skipped, and the flat time leaves the
+    channel's rate denominator. A neighbour that is flat around a candidate is
+    left out of the neighbour median.
+
     With return_details=True, return (report, details): ch_names, neighbors
     (name -> 6 nearest eligible names), retained_min, per-channel arrays
-    jump_sd_uv, n_pops, and pops_per_min, and dicts pop_times_s and
-    pop_steps_uv keyed by channel name. Each pop is described by its first
-    confirmed jump: crop-relative time of the sample before it, and its signed
-    10-60 ms level change in microvolts.
+    scorable_min (retained minutes outside the channel's local flat
+    intervals, the rate denominator), jump_sd_uv, n_pops, and pops_per_min,
+    and dicts pop_times_s and pop_steps_uv keyed by channel name. Each pop is
+    described by its first confirmed jump: crop-relative time of the sample
+    before it, and its signed 10-60 ms level change in microvolts.
     """
     for name, value in (
         ("jump_sd_cutoff", jump_sd_cutoff),
@@ -1623,17 +1631,25 @@ def bad_ch_by_pop(
     retained_min = retained.sum() / sfreq / 60
     if retained_min == 0:
         raise ValueError("No unmasked samples remain for channel detection.")
+    _validate_flatlines(raw, flatlines)
+    local_flat = {} if flatlines is None else dict(
+        zip(flatlines["ch_names"], flatlines["segments"])
+    )
 
     names = [raw.ch_names[i] for i in picks]
+    scorable_min = np.empty(len(picks))
     jump_sd = np.empty(len(picks))
     n_pops = np.zeros(len(picks), dtype=int)
     pop_times, pop_steps = {}, {}
     for row, pick in enumerate(picks):
         # Row 0 is the channel, rows 1-6 its neighbors.
-        data = raw.get_data(
-            picks=[pick, *picks[neighbors[row]]], reject_by_annotation=None
-        )
+        rows = [pick, *picks[neighbors[row]]]
+        data = raw.get_data(picks=rows, reject_by_annotation=None)
         data[:, ~retained] = np.nan
+        for data_row, channel in zip(data, rows):
+            for start, stop in local_flat.get(raw.ch_names[channel], []):
+                data_row[start:stop] = np.nan
+        scorable_min[row] = np.isfinite(data[0]).sum() / sfreq / 60
         diffs = np.diff(data[0])
         jump_sd[row] = max(
             1.4826 * _mad(diffs[np.isfinite(diffs)]), np.finfo(float).eps
@@ -1644,20 +1660,22 @@ def bad_ch_by_pop(
         jumps = jumps[(jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)]
         step = _level_change(data, jumps, gap, width)
         sharp_step = _level_change(data[0], jumps, gap, short)
-        with np.errstate(divide="ignore", invalid="ignore"):
+        with np.errstate(divide="ignore", invalid="ignore"), warnings.catch_warnings():
+            # A candidate whose neighbours are all flat or masked has no median.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            neighbor_step = np.nanmedian(np.abs(step[1:]), axis=0)
             confirmed = (
                 (np.abs(step[0]) > step_floor_uv / 1e6)
-                & (
-                    np.abs(step[0])
-                    > neighbor_ratio * np.median(np.abs(step[1:]), axis=0)
-                )
+                & (np.abs(step[0]) > neighbor_ratio * neighbor_step)
                 & (sharp_step / step[0] >= sharpness_cutoff)
             )
         first = np.diff(jumps[confirmed], prepend=-np.inf) > merge
         n_pops[row] = first.sum()
         pop_times[names[row]] = jumps[confirmed][first] / sfreq
         pop_steps[names[row]] = step[0, confirmed][first] * 1e6
-    pops_per_min = n_pops / retained_min
+    # A channel flat throughout has no retained minutes and no evidence.
+    pops_per_min = np.divide(n_pops, scorable_min, out=np.zeros(len(picks)),
+                             where=scorable_min > 0)
     bad_names = [name for name, rate in zip(names, pops_per_min) if rate > rate_cutoff]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"pop": bad_names}
@@ -1667,6 +1685,7 @@ def bad_ch_by_pop(
             "neighbors": {name: [names[j] for j in neighbors[row]]
                           for row, name in enumerate(names)},
             "retained_min": retained_min,
+            "scorable_min": scorable_min,
             "jump_sd_uv": jump_sd * 1e6,
             "n_pops": n_pops,
             "pops_per_min": pops_per_min,
@@ -2725,7 +2744,7 @@ def robust_average_reference_inplace(
         # the first three can also run on native reference
         partial(bad_ch_by_voltage, plot=False),
         partial(bad_ch_by_HFnoise, flatlines=flatlines),
-        bad_ch_by_pop,
+        partial(bad_ch_by_pop, flatlines=flatlines),
         # the next five require average reference
         partial(bad_ch_by_smallness, flatlines=flatlines),
         partial(bad_ch_by_std, flatlines=flatlines),
@@ -2848,7 +2867,7 @@ if __name__ == "__main__":
     # %% Bad channels by voltage, high-frequency noise, and electrode pops
     bad_ch_report.update(bad_ch_by_voltage(raw_bads))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_pop(raw_bads))
+    bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
     # %% Local PCA cleaning of shared artifacts, excluding the bad channels above.

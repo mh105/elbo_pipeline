@@ -122,6 +122,49 @@ class TestPopDetection(unittest.TestCase):
         self.assertFalse(any("E6" in names for names in details["neighbors"].values()))
         np.testing.assert_allclose(details["pop_times_s"]["E5"], [9.999, 29.999, 49.999])
 
+    def test_local_flat_spans_are_neither_pops_nor_rate_denominator(self):
+        data = background()
+        for start in (10, 25, 40):  # Three 3-s drops of E5 to a 100-uV level.
+            data[5, start * SFREQ:(start + 3) * SFREQ] = 100e-6
+        raw = pop_raw(data)
+        # Unbridged spans, as if the data had not been through detect_flatline_inplace.
+        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
+        self.assertEqual(flatlines["ch_names"], ["E5"])
+        report, details = step2.bad_ch_by_pop(raw, return_details=True)
+        row = details["ch_names"].index("E5")
+        self.assertEqual(report, {"pop": ["E5"]})  # Each span edge is a step.
+        self.assertEqual(details["n_pops"][row], 6)
+        self.assertEqual(details["scorable_min"][row], 1.0)
+        raw.info["bads"] = []
+        report, details = step2.bad_ch_by_pop(raw, flatlines=flatlines, return_details=True)
+        self.assertEqual(report, {"pop": []})
+        self.assertEqual(details["n_pops"].sum(), 0)
+        self.assertAlmostEqual(details["scorable_min"][row], 51 / 60)
+        np.testing.assert_allclose(np.delete(details["scorable_min"], row), 1.0)
+        self.assertAlmostEqual(details["retained_min"], 1.0)
+
+    def test_flat_neighbours_leave_the_neighbour_median(self):
+        data = background()
+        add_steps(data[5], [10, 30, 50])  # E5 steps by 100 uV...
+        for row in (1, 4):  # ...with its nearest neighbours E1 and E4 (60 uV): shared.
+            add_steps(data[row], [10, 30, 50], size=60e-6)
+        raw = pop_raw(data)
+        _, details = step2.bad_ch_by_pop(raw.copy(), return_details=True)
+        others = [name for name in details["neighbors"]["E5"] if name not in ("E1", "E4")]
+        self.assertEqual(len(others), 4)  # 4 of 16 flat at once is not a dropout.
+        for name in others:  # E5's other neighbours are flat around each step.
+            for time_s in (10, 30, 50):
+                raw._data[raw.ch_names.index(name), (time_s - 1) * SFREQ:(time_s + 1) * SFREQ] = 0
+        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
+        self.assertEqual(sorted(flatlines["ch_names"]), sorted(others))
+        self.assertEqual(flatlines["global_segments"], [])
+
+        def e5_pops(**kwargs):
+            _, details = step2.bad_ch_by_pop(raw.copy(), return_details=True, **kwargs)
+            return details["n_pops"][details["ch_names"].index("E5")]
+        self.assertEqual(e5_pops(), 3)  # Flat zeros pull the neighbour median to 0.
+        self.assertEqual(e5_pops(flatlines=flatlines), 0)  # E1 and E4 share the step.
+
     def test_level_change_windows_are_symmetric_about_the_jump(self):
         # The jump at t lies between samples t and t + 1; both windows skip 10
         # samples, so a unit ramp changes by the 70-sample distance between centres.

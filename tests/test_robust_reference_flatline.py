@@ -21,8 +21,9 @@ CRITERIA = {"bad_ch_by_voltage": "voltage", "bad_ch_by_HFnoise": "HFnoise",
             "bad_ch_by_pop": "pop", "bad_ch_by_smallness": "smallness",
             "bad_ch_by_std": "std", "bad_ch_by_BBnoise": "BBnoise",
             "bad_ch_by_correlation": "correlation", "bad_ch_by_RANSAC": "RANSAC"}
-LOCAL_DETECTORS = {"bad_ch_by_HFnoise", "bad_ch_by_smallness", "bad_ch_by_std",
-                   "bad_ch_by_BBnoise", "bad_ch_by_correlation", "bad_ch_by_RANSAC"}
+LOCAL_DETECTORS = {"bad_ch_by_HFnoise", "bad_ch_by_pop", "bad_ch_by_smallness",
+                   "bad_ch_by_std", "bad_ch_by_BBnoise", "bad_ch_by_correlation",
+                   "bad_ch_by_RANSAC"}
 
 
 def native_with_flatlines(global_dropout=False):
