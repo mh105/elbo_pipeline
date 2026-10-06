@@ -255,9 +255,7 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
                 flatlines = flatlines_for(native, {"E0": [[WINDOW, native.n_times]]})
                 referenced = average(native)
                 kwargs = {"occurrence_cutoff": 0.5}
-                if criterion == "std":
-                    kwargs["median_z_cutoff"] = 1e12
-                elif criterion == "correlation":
+                if criterion == "correlation":
                     kwargs["correlation_cutoff"] = 0.9
                 report, details = detector(referenced, flatlines=flatlines,
                                            return_details=True, **kwargs)

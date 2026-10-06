@@ -966,7 +966,6 @@ def bad_ch_by_std(
     window_length=2.0,
     robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
-    median_z_cutoff=2.0,
     *,
     flatlines=None,
     return_details=False,
@@ -982,25 +981,20 @@ def bad_ch_by_std(
     Apply the temporary 0.1-second voltage mask on a copy. Omit every window
     overlapping any BAD annotation and the trailing partial window. Flag
     channels offending in strictly more than occurrence_cutoff of retained
-    windows, or whose median z over retained windows is strictly above
-    median_z_cutoff, which catches channels moderately high in most windows.
-    Add detections to raw.info["bads"], preserving existing labels without
-    duplicates. Input data and annotations are unchanged.
+    windows. Add detections to raw.info["bads"], preserving existing labels
+    without duplicates. Input data and annotations are unchanged.
 
     With flatlines, omit each channel's overlapping local-flat windows from its
     metrics and occurrence denominator and from cross-channel baselines.
 
     With return_details=True, return (report, details), with the common fields
     described in bad_ch_by_HFnoise. robust_std_uv, robust_z, and violates have
-    shape (channels, complete windows); masked windows contain NaN.
-    median_robust_z has one value per channel. The robust standard deviation is
-    reported in microvolts. flagged_data_uv stores the original violating
-    window waveforms in chronological order.
+    shape (channels, complete windows); masked windows contain NaN. The robust
+    standard deviation is reported in microvolts. flagged_data_uv stores the
+    original violating window waveforms in chronological order.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    if not np.isfinite(median_z_cutoff) or median_z_cutoff <= 0:
-        raise ValueError("median_z_cutoff must be finite and greater than 0.")
     masked, _ = _temporary_voltage_mask(raw, require_average=True)
     picks, window_samples, n_windows = _prepare_channel_windows(
         masked, window_length, occurrence_cutoff, "average"
@@ -1009,7 +1003,6 @@ def bad_ch_by_std(
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
-    window_z = []
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
@@ -1026,7 +1019,6 @@ def bad_ch_by_std(
         counts += violates
         scorable += valid
         n_retained += 1
-        window_z.append(z)
         if return_details:
             window = _record_window_details(
                 details, start, window_samples, data, violates
@@ -1035,16 +1027,10 @@ def bad_ch_by_std(
             details["robust_std_uv"][:, window] = deviation * 1e6
             details["robust_z"][:, window] = z
     _require_retained_windows(n_retained)
-    frequent = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
-    window_z = np.asarray(window_z).T
-    median_z = np.array([np.median(row[np.isfinite(row)]) if np.isfinite(row).any()
-                         else np.nan for row in window_z])
-    bad_names = [raw.ch_names[i] for i, median in zip(picks, median_z)
-                 if raw.ch_names[i] in frequent or median > median_z_cutoff]
+    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"std": bad_names}
     if return_details:
-        details["median_robust_z"] = median_z
         return report, _finish_window_details(details, window_samples)
     return report
 
