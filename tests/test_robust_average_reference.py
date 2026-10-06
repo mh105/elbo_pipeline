@@ -58,15 +58,15 @@ def interpolated_average(raw, bads):
     return expected, mean
 
 
-def scheduled_detector(schedule):
-    """Stand-in for bad_ch_by_HFnoise that flags schedule[pass] (last entry repeats)."""
+def scheduled_detector(schedule, criterion="HFnoise"):
+    """Stand-in for a detector that flags schedule[pass] (last entry repeats)."""
     calls = []
 
     def detector(raw, **kwargs):
         names = schedule[min(len(calls), len(schedule) - 1)]
         calls.append(names)
         raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + names))
-        result = {"HFnoise": list(names)}
+        result = {criterion: list(names)}
         return (result, {}) if kwargs.get("return_details", False) else result
     return detector, calls
 
@@ -174,6 +174,20 @@ class TestRobustAverageReference(unittest.TestCase):
                 np.testing.assert_allclose(raw.get_data(), expected.get_data(),
                                            rtol=0, atol=1e-15)
                 np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
+
+    def test_cycle_report_merges_only_the_cycling_passes(self):
+        # Pass 1 (mean of []) flags F3 by std. Pass 2 (mean of [F3]) flags F3 and F4
+        # by HFnoise. Pass 3 (mean of [F3, F4]) flags F3 by HFnoise, the set pass 2's
+        # mean used, so passes 2 and 3 cycle. Pass 1's std label is outside the cycle.
+        std, _ = scheduled_detector([["F3"], [], []], criterion="std")
+        hf, calls = scheduled_detector([[], ["F3", "F4"], ["F3"]])
+        with patch.object(step2, "bad_ch_by_std", std), patch.object(
+            step2, "bad_ch_by_HFnoise", hf
+        ), self.assertWarnsRegex(UserWarning, r"pass 4 would repeat pass 2, with \['F4'\]"):
+            report = step2.robust_average_reference_inplace(make_native_raw())
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(report["HFnoise"], ["F3", "F4"])
+        self.assertEqual(report["std"], [])
 
     def test_raises_without_changes_if_passes_neither_converge_nor_cycle(self):
         raw = make_native_raw()

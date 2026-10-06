@@ -2582,7 +2582,9 @@ def robust_average_reference_inplace(
             flipping = [
                 name for name in flagged if not all(name in names for names in cycle)
             ]
-            cycle_reports = reports[max(start, 1) - 1:]
+            # reports[p] comes from the mean of used[p], so the cycling
+            # passes are reports[start:].
+            cycle_reports = reports[start:]
             robust_bad_ch_report = {
                 criterion: [name for name in eeg_names
                             if any(name in r[criterion] for r in cycle_reports)]
