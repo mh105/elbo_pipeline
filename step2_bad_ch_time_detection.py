@@ -74,7 +74,7 @@ import numpy as np
 from mne.annotations import _annotations_starts_stops
 from mne.bem import _check_origin
 from mne.channels.interpolation import _calc_g
-from scipy.linalg import solve
+from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin
 from step0_data_quality_check import load_raw_data
@@ -2621,13 +2621,14 @@ def pca_cleaning_inplace(
     for window, (start, stop) in enumerate(zip(starts, stops)):
         for name, data in (("input", raw._data[picks, start:stop]),
                            ("highpass", highpassed[:, start:stop])):
-            loadings, singular, _ = np.linalg.svd(
-                data - data.mean(axis=1, keepdims=True), full_matrices=False
-            )
-            pc1 = loadings[:, 0]
-            details[name]["pc1_variance_fraction"][window] = singular[0] ** 2 / np.sum(
-                singular**2
-            )
+            # PC1 is the top eigenvector of the centred data's scatter matrix,
+            # and its variance fraction the top eigenvalue over the trace: no
+            # full SVD is needed.
+            centered = data - data.mean(axis=1, keepdims=True)
+            scatter = centered @ centered.T
+            top, pc1 = eigh(scatter, subset_by_index=[len(scatter) - 1] * 2)
+            pc1 = pc1[:, 0]
+            details[name]["pc1_variance_fraction"][window] = top[0] / np.trace(scatter)
             # The largest |u_i (u^T x)_t| without the outer product.
             details[name]["pc1_peak_uv"][window] = (
                 np.abs(pc1).max() * np.abs(pc1 @ data).max() * 1e6
