@@ -1370,11 +1370,13 @@ def _level_change(data, jumps, gap, width):
     """Mean over width samples after each jump minus before, skipping
     gap samples on each side.
 
-    A jump at t lies between samples t and t + 1. data has time on the last
-    axis; the result has shape data.shape[:-1] + (len(jumps),).
+    A jump at t lies between samples t and t + 1, so the windows are
+    t + 1 + gap ... t + gap + width and t + 1 - gap - width ... t - gap,
+    symmetric about the jump. data has time on the last axis; the result
+    has shape data.shape[:-1] + (len(jumps),).
     """
     after = jumps[:, None] + 1 + gap + np.arange(width)
-    before = jumps[:, None] - gap - width + np.arange(width)
+    before = jumps[:, None] + 1 - gap - width + np.arange(width)
     return data[..., after].mean(axis=-1) - data[..., before].mean(axis=-1)
 
 
@@ -1481,7 +1483,7 @@ def bad_ch_by_pop(
         jumps = np.flatnonzero(
             (np.abs(diffs) > jump_sd_cutoff * jump_sd[row]) & (np.abs(diffs) > 20e-6)
         )
-        jumps = jumps[(jumps >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)]
+        jumps = jumps[(jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)]
         step = _level_change(data, jumps, gap, width)
         sharp_step = _level_change(data[0], jumps, gap, short)
         with np.errstate(divide="ignore", invalid="ignore"):

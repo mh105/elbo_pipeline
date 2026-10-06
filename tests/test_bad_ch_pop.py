@@ -122,6 +122,13 @@ class TestPopDetection(unittest.TestCase):
         self.assertFalse(any("E6" in names for names in details["neighbors"].values()))
         np.testing.assert_allclose(details["pop_times_s"]["E5"], [9.999, 29.999, 49.999])
 
+    def test_level_change_windows_are_symmetric_about_the_jump(self):
+        # The jump at t lies between samples t and t + 1; both windows skip 10
+        # samples, so a unit ramp changes by the 70-sample distance between centres.
+        ramp = np.arange(2000.0)
+        np.testing.assert_array_equal(step2._level_change(ramp, np.array([1000]), 10, 50), [70])
+        np.testing.assert_array_equal(step2._level_change(ramp, np.array([59]), 10, 50), [70])
+
     def test_invalid_inputs(self):
         data = background()
         for kwargs in (
