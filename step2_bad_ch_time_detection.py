@@ -1843,20 +1843,28 @@ def bad_ch_by_pop(
     )
 
     names = [raw.ch_names[i] for i in picks]
+    # Samples each channel does not score: unretained, or in its local flat
+    # intervals.
+    unretained = ~retained
+    excluded = {}
+    for name in names:
+        excluded[name] = unretained
+        if len(local_flat.get(name, [])):
+            excluded[name] = unretained.copy()
+            for start, stop in local_flat[name]:
+                excluded[name][start:stop] = True
+    # Neighbours are read only around the candidate jumps.
+    source = raw._data if raw.preload else raw.get_data(reject_by_annotation=None)
+    span = 2 * (gap + width)
     scorable_min = np.empty(len(picks))
     jump_sd = np.empty(len(picks))
     n_pops = np.zeros(len(picks), dtype=int)
     pop_times, pop_steps = {}, {}
     for row, pick in enumerate(picks):
-        # Row 0 is the channel, rows 1-6 its neighbors.
-        rows = [pick, *picks[neighbors[row]]]
-        data = raw.get_data(picks=rows, reject_by_annotation=None)
-        data[:, ~retained] = np.nan
-        for data_row, channel in zip(data, rows):
-            for start, stop in local_flat.get(raw.ch_names[channel], []):
-                data_row[start:stop] = np.nan
-        scorable_min[row] = np.isfinite(data[0]).sum() / sfreq / 60
-        diffs = np.diff(data[0])
+        target = raw.get_data(picks=[pick], reject_by_annotation=None)[0]
+        target[excluded[names[row]]] = np.nan
+        scorable_min[row] = np.isfinite(target).sum() / sfreq / 60
+        diffs = np.diff(target)
         jump_sd[row] = max(
             1.4826 * _mad(diffs[np.isfinite(diffs)]), np.finfo(float).eps
         )
@@ -1866,8 +1874,18 @@ def bad_ch_by_pop(
         jumps = jumps[
             (jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)
         ]
-        step = _level_change(data, jumps, gap, width)
-        sharp_step = _level_change(data[0], jumps, gap, short)
+        # Row 0 is the channel, rows 1-6 its neighbours, each holding one
+        # span-long segment per jump, with the jump at the same offset.
+        samples = (jumps[:, None] + 1 - gap - width + np.arange(span)).ravel()
+        around = np.empty((7, len(samples)))
+        around[0] = target[samples]
+        for k, channel in enumerate(picks[neighbors[row]], start=1):
+            around[k] = np.where(excluded[raw.ch_names[channel]][samples], np.nan,
+                                 source[channel, samples])
+        step = _level_change(
+            around, np.arange(len(jumps)) * span + gap + width - 1, gap, width
+        )
+        sharp_step = _level_change(target, jumps, gap, short)
         with np.errstate(divide="ignore", invalid="ignore"), warnings.catch_warnings():
             # A candidate whose neighbours are all flat or masked has no median.
             warnings.simplefilter("ignore", RuntimeWarning)
