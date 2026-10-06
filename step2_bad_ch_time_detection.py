@@ -282,6 +282,25 @@ def _near_constant_segments(data, min_samples, tolerance_v):
     return np.flatnonzero(np.diff(np.r_[False, flat, False])).reshape(-1, 2).tolist()
 
 
+def _ramp_segments(data, block_samples, tolerance_v):
+    """Union blocks of block_samples consecutive samples whose first
+    differences span at most tolerance_v volts: exact ramps.
+    """
+    if len(data) < block_samples:
+        return []
+    segments = _near_constant_segments(np.diff(data), block_samples - 1, tolerance_v)
+    return [[start, stop + 1] for start, stop in segments]
+
+
+def _curve_segments(data, block_samples, tolerance_v):
+    """Union blocks of block_samples consecutive samples whose second
+    differences all lie within +/-tolerance_v volts: smooth slow changes.
+    """
+    small = np.abs(np.diff(data, 2)) <= tolerance_v
+    runs = np.flatnonzero(np.diff(np.r_[False, small, False])).reshape(-1, 2).tolist()
+    return [[start, stop + 2] for start, stop in runs if stop - start >= block_samples - 2]
+
+
 def _merge_segments(segments):
     """Merge touching or overlapping half-open sample intervals."""
     merged = []
@@ -303,18 +322,29 @@ def detect_flatline(
 ):
     """Return sparse native-reference flat intervals without changing raw.
 
-    Union blocks of min_samples consecutive samples with range at most
-    tolerance_v volts, detected on the input and on a full-record copy filtered
-    with a high-pass cutoff of highpass_hz. min_samples must be an integer of
-    at least 2 (default 10), independent of sampling rate: one sample always
+    Union four kinds of block, each judged against tolerance_v volts:
+    - raw: min_samples consecutive samples whose range is at most tolerance_v;
+    - highpass: the same on a full-record copy filtered with a high-pass
+      cutoff of highpass_hz;
+    - ramp: 2 * min_samples consecutive samples whose first differences have
+      a range of at most tolerance_v, i.e. exact ramps;
+    - curve: 2 * min_samples consecutive samples whose second differences all
+      lie within +/-tolerance_v, i.e. smooth slow changes such as a dead
+      electrode's drift.
+    The ramp and curve rules read the unfiltered input; their blocks are
+    twice as long because live EEG comes closer to their tolerance (on
+    sub-02, -03, -10 and -17 at 1 kHz, the closest live 20-sample blocks stay
+    at least 16 and 6 times above it). min_samples must be an integer of at
+    least 2 (default 10), independent of sampling rate: one sample always
     has zero range. tolerance_v must be
     finite and nonnegative (default 1e-9 V, or 1e-3 µV). highpass_hz must be
     finite, positive, and below Nyquist (default 1 Hz). Bounds are
     crop-relative half-open sample indices. The dictionary records these
     detection settings, channel identities, and sampling/crop metadata for
     validation by later consumers. segments contains the merged intervals;
-    segments_on_subtypes stores the separate segments_on_raw and
-    segments_on_highpass lists. All are aligned with ch_names.
+    segments_on_subtypes stores the separate segments_on_raw,
+    segments_on_highpass, segments_on_ramp, and segments_on_curve lists. All
+    are aligned with ch_names.
     Run bad_ch_by_nan first; the native zero
     reference is exempt. Include finite existing bad EEG channels; skip
     already bad nonfinite channels.
@@ -341,6 +371,8 @@ def detect_flatline(
         "segments_on_subtypes": {
             "segments_on_raw": [],
             "segments_on_highpass": [],
+            "segments_on_ramp": [],
+            "segments_on_curve": [],
         },
         "eeg_ch_names": eeg_names,
         "raw_ch_names": list(raw.ch_names),
@@ -368,12 +400,17 @@ def detect_flatline(
                 data, raw.info["sfreq"], l_freq=highpass_hz, h_freq=None, verbose=False,
             )
             filtered = _near_constant_segments(highpass, min_samples, tolerance_v)
-        combined = _merge_segments(original + filtered)
+        ramp = _ramp_segments(data, 2 * min_samples, tolerance_v)
+        curve = _curve_segments(data, 2 * min_samples, tolerance_v)
+        combined = _merge_segments(original + filtered + ramp + curve)
         if combined:
             result["ch_names"].append(name)
             result["segments"].append(combined)
-            result["segments_on_subtypes"]["segments_on_raw"].append(original)
-            result["segments_on_subtypes"]["segments_on_highpass"].append(filtered)
+            subtypes = result["segments_on_subtypes"]
+            subtypes["segments_on_raw"].append(original)
+            subtypes["segments_on_highpass"].append(filtered)
+            subtypes["segments_on_ramp"].append(ramp)
+            subtypes["segments_on_curve"].append(curve)
     return result
 
 

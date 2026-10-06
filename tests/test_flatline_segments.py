@@ -170,8 +170,31 @@ class TestFlatlineDetection(unittest.TestCase):
         raw._data[2, 5:25] = np.arange(20) * 0.4e-9
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
             result = step2.detect_flatline(raw, "Cz")
-        self.assertEqual(result["ch_names"], ["E0"])
-        self.assertEqual(result["segments"], [[[5, 15]]])
+        subtypes = result["segments_on_subtypes"]
+        self.assertEqual(result["ch_names"], ["E0", "E2"])
+        # The raw rule does not chain E2's small adjacent differences into one
+        # block; E2's 20-sample exact ramp is caught by the ramp and curve rules.
+        self.assertEqual(subtypes["segments_on_raw"], [[[5, 15]], []])
+        self.assertEqual(subtypes["segments_on_ramp"], [[], [[5, 25]]])
+        self.assertEqual(subtypes["segments_on_curve"], [[], [[5, 25]]])
+        self.assertEqual(result["segments"], [[[5, 15]], [[5, 25]]])
+
+    def test_ramp_and_curve_rules_use_blocks_of_twice_min_samples(self):
+        raw = make_raw(n_times=600, n_eeg=4, sfreq=1000)
+        raw._data[0, 50:70] = 5e-6 + np.arange(20) * 0.1e-6  # 20-sample exact ramp.
+        raw._data[1, 50:69] = 5e-6 + np.arange(19) * 0.1e-6  # One sample too short.
+        # A 1-mV decay with a 1.5-s time constant: its second differences stay
+        # below 1 nV, while its first differences change by about 8 nV per block.
+        t = np.arange(300) / 1000
+        raw._data[2, 100:400] = 1e-3 * np.exp(-t / 1.5)
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2.detect_flatline(raw, "Cz")
+        subtypes = result["segments_on_subtypes"]
+        self.assertEqual(result["ch_names"], ["E0", "E2"])
+        self.assertEqual(subtypes["segments_on_raw"], [[], []])
+        self.assertEqual(subtypes["segments_on_ramp"], [[[50, 70]], []])
+        self.assertEqual(subtypes["segments_on_curve"], [[[50, 70]], [[100, 400]]])
+        self.assertEqual(result["segments"], [[[50, 70]], [[100, 400]]])
 
     def test_raw_and_highpass_segments_union_with_matching_audit_rows(self):
         raw = make_raw(n_times=60)
@@ -185,6 +208,8 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertEqual(result["segments_on_subtypes"], {
             "segments_on_raw": [[[5, 15]]],
             "segments_on_highpass": [[[5, 24]]],
+            "segments_on_ramp": [[]],
+            "segments_on_curve": [[]],
         })
         for key in ("raw_segments", "highpass_segments"):
             self.assertNotIn(key, result)
@@ -238,6 +263,8 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertEqual(result["segments_on_subtypes"], {
             "segments_on_raw": [],
             "segments_on_highpass": [],
+            "segments_on_ramp": [],
+            "segments_on_curve": [],
         })
         hp.assert_not_called()
 
