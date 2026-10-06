@@ -47,9 +47,11 @@ def std_raw(n_bad=2, sfreq=250, window_length=2):
 def hf_raw(n_bad=2, sfreq=250, window_length=2):
     samples = int(sfreq * window_length)
     t = np.arange(4 * samples) / sfreq
+    # HF/LF ratios differ slightly across channels, so their robust z has a
+    # real spread rather than the machine-epsilon floor.
     data = np.array([
         (10 + i / 10) * np.sin(2 * np.pi * 10 * t)
-        + (1 + i / 100) * np.sin(2 * np.pi * 80 * t)
+        + (1 + i / 50) * np.sin(2 * np.pi * 80 * t)
         for i in range(9)
     ]) * 1e-6
     data[0] += 100e-6 * np.sin(2 * np.pi * 10 * t)  # Strong LF alone is not HF noise.
@@ -65,6 +67,11 @@ def bb_raw(n_bad=2, sfreq=250, window_length=2):
     data[0] += 80e-6 * np.sin(2 * np.pi * 10 * t)  # Narrowband outlier.
     data[-2:, :n_bad * samples] *= 30
     return make_raw(data, sfreq, average=True)
+
+
+def hf_ratio(data, sfreq):
+    """PREP's HF ratio of data low-passed on its own."""
+    return step2._prep_hf_ratio(data, step2._lowpass_45_hz(data, sfreq))
 
 
 WINDOW_DETECTORS = (
@@ -417,23 +424,35 @@ class TestRobustMetrics(unittest.TestCase):
         t = np.arange(2 * sfreq) / sfreq
         low = 10e-6 * np.sin(2 * np.pi * 10 * t)
         high = 2e-6 * np.sin(2 * np.pi * 100 * t)
-        ratios = step2._prep_hf_ratio(np.array([low + high, low + 5 * high, 5 * low + high]), sfreq)
+        ratios = hf_ratio(np.array([low + high, low + 5 * high, 5 * low + high]), sfreq)
         self.assertGreater(ratios[1], 4 * ratios[0])
         self.assertLess(ratios[2], ratios[0] / 4)
-        shifted = step2._prep_hf_ratio(np.array([low + high + 100e-6]), sfreq)
+        shifted = hf_ratio(np.array([low + high + 100e-6]), sfreq)
         np.testing.assert_allclose(shifted, ratios[:1], rtol=1e-8)
-        np.testing.assert_array_equal(step2._prep_hf_ratio(np.zeros((2, len(t))), sfreq), [0, 0])
+        np.testing.assert_array_equal(hf_ratio(np.zeros((2, len(t))), sfreq), [0, 0])
 
     def test_hf_ratio_band_edges_stay_at_45_and_50_hz_for_any_sampling_rate(self):
         for sfreq in (250, 1000, 2000):
             with self.subTest(sfreq=sfreq):
                 t = np.arange(2 * sfreq) / sfreq
                 passband, stopband = np.sin(2 * np.pi * 44 * t), np.sin(2 * np.pi * 51 * t)
-                ratios = step2._prep_hf_ratio(np.array([passband, stopband]), sfreq)
+                ratios = hf_ratio(np.array([passband, stopband]), sfreq)
                 self.assertLess(ratios[0], 0.01)
                 self.assertGreater(ratios[1], 100)
         with self.assertRaisesRegex(ValueError, "longer than"):
-            step2._prep_hf_ratio(np.zeros((2, 600)), 1000)  # Filter has 661 taps at 1000 Hz.
+            hf_ratio(np.zeros((2, 600)), 1000)  # Filter has 661 taps at 1000 Hz.
+
+    def test_hf_lowpass_spans_the_record_and_widens_the_mask_by_its_reach(self):
+        raw = hf_raw(n_bad=0)
+        raw._data[:4, 500:505] = 600e-6  # Masks samples 500-524 of the second window.
+        _, details = step2.bad_ch_by_HFnoise(raw, return_details=True)
+        # The 164-sample (0.66-s) reach also removes the first window.
+        np.testing.assert_array_equal(details["retained"], [False, False, True, True])
+        data = raw.get_data(picks=range(9))
+        residual = data - step2._lowpass_45_hz(data, raw.info["sfreq"])
+        np.testing.assert_allclose(
+            details["hf_mad_uv"][:, 2], step2._mad(residual[:, 1000:1500], axis=1) * 1e6
+        )
 
 
 class TestWindowedNoiseDetection(unittest.TestCase):
@@ -468,11 +487,14 @@ class TestWindowedNoiseDetection(unittest.TestCase):
         for detector, factory, expected in WINDOW_DETECTORS:
             with self.subTest(detector=detector.__name__):
                 raw = factory(n_bad=1)
-                # A burst starting exactly at the second window masks only that window.
-                raw._data[:4, 500:505] = 600e-6
+                # A burst starting exactly at the second window masks only that
+                # window; HFnoise widens the mask by its 0.66-s low-pass reach, so
+                # its burst starts mid-window.
+                start = 700 if detector is step2.bad_ch_by_HFnoise else 500
+                raw._data[:4, start:start + 5] = 600e-6
                 if detector is not step2.bad_ch_by_HFnoise:
                     mirrors = [raw.ch_names.index(f"M{i}") for i in range(4)]
-                    raw._data[mirrors, 500:505] = -600e-6
+                    raw._data[mirrors, start:start + 5] = -600e-6
                 raw.set_annotations(mne.Annotations([7], [0], ["event"]))
                 original = raw.get_data().copy()
                 annotations = raw.annotations.copy()

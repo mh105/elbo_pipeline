@@ -1446,15 +1446,14 @@ def _lowpass_45_hz(data, sfreq):
     return lowpass
 
 
-def _prep_hf_ratio(data, sfreq, *, return_mads=False):
-    """PREP's MAD(residual)/MAD(lowpass), filtering this window in isolation.
+def _prep_hf_ratio(data, lowpass, *, return_mads=False):
+    """PREP's MAD(residual)/MAD(lowpass) of data (channels, samples), given
+    its low-pass from _lowpass_45_hz; like PREP's, the filter is low-pass only.
 
-    Low-pass with _lowpass_45_hz; like PREP's, the filter is low-pass only.
     Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
     With return_mads=True, also return the HF and LF
     MAD arrays, in input units.
     """
-    lowpass = _lowpass_45_hz(data, sfreq)
     hf_mad = _mad(data - lowpass, axis=1)
     lf_mad = _mad(lowpass, axis=1)
     ratios = hf_mad / np.maximum(lf_mad, np.finfo(float).eps)
@@ -1486,12 +1485,15 @@ def bad_ch_by_HFnoise(
     flag. Floor MADs at machine
     epsilon before taking log ratios. Keep candidates that violate in every
     scorable (retained, non-flat) window, since no non-violating baseline is
-    available. Each
-    retained window is filtered separately to keep masked bursts out of
-    neighboring windows. Accept the native reference or re-referenced data as
-    in bad_ch_by_voltage. Temporary masking and the occurrence denominator
-    follow bad_ch_by_std. Require sfreq > 100 Hz to evaluate noise above 50 Hz,
-    and windows longer than the 0.66 s low-pass filter. Add detections to
+    available. As in
+    PREP, the low-pass filters the whole record once; each voltage-mask and
+    BAD_by_flatline span is widened on both sides by the filter's reach (0.66
+    s), as in bad_ch_by_correlation, so that masked bursts and dropout edges
+    stay out of the windows scored. Accept the native reference or
+    re-referenced data as in bad_ch_by_voltage. Temporary masking and the
+    occurrence denominator follow bad_ch_by_std. Require sfreq > 100 Hz to
+    evaluate noise above 50 Hz, and a recording longer than the 0.66 s
+    low-pass filter. Add detections to
     raw.info["bads"], preserving existing labels without duplicates. Input
     data/annotations are unchanged.
 
@@ -1507,18 +1509,24 @@ def bad_ch_by_HFnoise(
 
     With flatlines, local-flat observations are missing, including from
     cross-channel baselines, HF/LF confirmation, and
-    each channel's denominator.
+    each channel's denominator. detect_flatline_inplace has already widened
+    the local intervals by the 0.3 Hz high-pass reach (5.5 s), beyond the
+    low-pass's, so they are not widened again here.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    if raw.info["sfreq"] <= 100:
+    sfreq = raw.info["sfreq"]
+    if sfreq <= 100:
         raise ValueError("bad_ch_by_HFnoise requires a sampling rate above 100 Hz.")
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "either", zeros=shared["zeros"]
     )
-    rejected = _rejected_samples(raw, spans)
+    lowpass = _lowpass_45_hz(
+        raw.get_data(picks=picks, reject_by_annotation=None), sfreq
+    )
+    rejected = _rejected_samples(raw, spans, len(_lowpass_kernel(sfreq)) - 1)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     scorable = np.zeros(len(picks), dtype=int)
@@ -1542,7 +1550,8 @@ def bad_ch_by_HFnoise(
         ratios, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
         if valid.any():
             ratios[valid], hf_mad[valid], lf_mad[valid] = _prep_hf_ratio(
-                data[valid], raw.info["sfreq"], return_mads=True
+                data[valid], lowpass[valid, start:start + window_samples],
+                return_mads=True,
             )
             z[valid] = _robust_channel_z(ratios[valid])
         violates = z > robust_z_cutoff
