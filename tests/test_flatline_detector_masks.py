@@ -117,6 +117,26 @@ class TestPublicFlatlineStages(unittest.TestCase):
         np.testing.assert_array_equal(details["flat"][row], [0, 0, 1, 0])
         self.assertNotIn("E2", raw.info["bads"])
 
+    def test_flatline_denominator_excludes_the_temporary_voltage_mask(self):
+        raw = native_raw()  # 12 channels besides Cz, four 2-s windows.
+        raw._data[0, WINDOW:2 * WINDOW] = 3e-6  # E0 flat in window 1.
+        raw._data[1:5, 100:105] += 600e-6  # 4 of 12 channels exceed 500 uV in window 0.
+        flatlines = step2.detect_flatline_inplace(raw, downstream_highpass_hz=None)
+        annotations = raw.annotations.copy()
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
+                                                   return_details=True)
+        np.testing.assert_array_equal(details["retained"], [False, True, True, True])
+        self.assertEqual(report, {"flatline": ["E0"]})  # 1 of 3 windows, not 1 of 4.
+        self.assertEqual(raw.annotations, annotations)
+
+    def test_flatline_mask_accepts_another_all_zero_channel_with_a_named_reference(self):
+        raw = native_raw()
+        raw._data[3] = 0  # A dead electrode besides the Cz reference.
+        flatlines = step2.detect_flatline_inplace(raw, "Cz", downstream_highpass_hz=None)
+        self.assertEqual(step2.bad_ch_by_flatline(raw, reference_channel="Cz",
+                                                  flatlines=flatlines),
+                         {"flatline": ["E3"]})
+
     def test_dropouts_leaving_nothing_to_score_raise_before_any_change(self):
         everything = {name: [[0, 4 * WINDOW]] for name in ("E0", "E1", "E2")}
         # Every 2-s window overlaps a dropout, but 1600 of 2000 samples are not flat.

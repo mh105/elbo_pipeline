@@ -689,12 +689,15 @@ def bad_ch_by_flatline(
     detect_flatline_inplace, which has already annotated this Raw's global
     dropouts as BAD_by_flatline. Any overlap with one of its segments marks
     the channel's complete window. Omit windows overlapping BAD annotations,
-    including those global dropouts; ignore the partial tail.
+    including those global dropouts, and the temporary 0.1-second voltage
+    mask, built on a copy of this native data with the resolved reference
+    excluded, as in the other detectors; ignore the partial tail.
 
     Add detections to info['bads']; leave data/annotations unchanged. Details
     follow the other window detectors, with flat and violates equal to the
     mapped segment mask in retained windows and NaN in excluded windows.
     """
+    reference_channel = _reference_channel(raw, "native", reference_channel)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "native", reference_channel
     )
@@ -702,13 +705,14 @@ def bad_ch_by_flatline(
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
+    masked, _ = _temporary_voltage_mask(raw, reference_channel=reference_channel)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
     for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, return_start=True
+        masked, picks, window_samples, n_windows, return_start=True
     ):
         violates = flat[:, start // window_samples]
         counts += violates
@@ -782,12 +786,16 @@ def mask_segment_by_voltage(
     window_length=0.1,
     *,
     require_average=False,
+    reference_channel=None,
 ):
     """Append BAD_voltage_mask annotations to raw in place; return None.
 
     Use only EEG channels not listed in raw.info["bads"]. On native-referenced
     data, also exclude the all-zero reference channel (e.g., Cz). After
     re-referencing, include the former reference channel if it is not bad.
+    reference_channel names the native reference explicitly, as
+    bad_ch_by_flatline does: it must be entirely zero, and any other all-zero
+    channel is then an ordinary (dead) member of the pool.
     These selected channels form both the exceedance count and the denominator
     for channel_fraction_cutoff; bads, non-EEG channels, and the native zero
     reference contribute to neither. With require_average=True, require
@@ -814,9 +822,15 @@ def mask_segment_by_voltage(
     window_samples = int(round(window_length * sfreq))
     if window_samples < 1:
         raise ValueError("window_length must cover at least one sample.")
-    reference_channel = _reference_channel(
-        raw, "average" if require_average else "either"
-    )
+    if reference_channel is not None:
+        if require_average:
+            raise ValueError("A named native reference cannot be combined with "
+                             "require_average.")
+        reference_channel = _reference_channel(raw, "native", reference_channel)
+    else:
+        reference_channel = _reference_channel(
+            raw, "average" if require_average else "either"
+        )
     picks = _mask_eeg_picks(raw, reference_channel)
 
     # Read one channel at a time; retain only counts
@@ -842,15 +856,23 @@ def mask_segment_by_voltage(
     )
 
 
-def _temporary_voltage_mask(raw, *, require_average=False):
+def _temporary_voltage_mask(raw, *, require_average=False, reference_channel=None):
     """Check the reference, then mask a copy; return it
     and any native reference.
+
+    With reference_channel, require that named native reference, as
+    bad_ch_by_flatline does, so that other all-zero channels do not raise.
     """
-    reference_channel = _reference_channel(
-        raw, "average" if require_average else "either"
-    )
+    if reference_channel is None:
+        reference_channel = _reference_channel(
+            raw, "average" if require_average else "either"
+        )
+        named = None
+    else:
+        reference_channel = named = _reference_channel(raw, "native", reference_channel)
     masked = raw.copy()
-    mask_segment_by_voltage(masked, require_average=require_average)
+    mask_segment_by_voltage(masked, require_average=require_average,
+                            reference_channel=named)
     return masked, reference_channel
 
 
