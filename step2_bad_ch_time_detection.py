@@ -948,7 +948,9 @@ def bad_ch_by_voltage(
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
     Flag if strictly more than occurrence_cutoff of a channel's scorable
-    samples exceed +/-voltage_threshold_uv. Scorable samples are retained
+    samples exceed +/-voltage_threshold_uv. Unlike the windowed detectors,
+    this rule counts samples, not windows, by design: every sample beyond the
+    threshold matters. Scorable samples are retained
     samples outside the channel's local flat intervals: with flatlines, flat
     samples leave both the count and the denominator, since they would
     otherwise pass as valid samples within range and dilute the fraction.
