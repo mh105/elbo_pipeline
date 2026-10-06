@@ -168,8 +168,13 @@ def _zero_eeg_channels(raw, picks):
     """Names of the picked channels whose samples are all exactly zero."""
     names = []
     for i in picks:
-        data = raw.get_data(picks=[i], reject_by_annotation=None)
-        if data.size and np.all(data == 0):
+        # Read preloaded rows in place, and test the first sample before the
+        # rest: live channels fail there.
+        if raw.preload:
+            data = raw._data[i]
+        else:
+            data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
+        if data.size and data[0] == 0 and np.all(data == 0):
             names.append(raw.ch_names[i])
     return names
 

@@ -11,6 +11,7 @@ pipeline_dir = Path(__file__).resolve().parents[1]
 if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
+import step2_bad_ch_time_detection as step2
 from step2_bad_ch_time_detection import (
     _reference_channel,
     bad_ch_by_flatline,
@@ -99,9 +100,10 @@ class TestNativeReferenceChannel(unittest.TestCase):
         raw = make_raw(np.ones((1, 3)))
         raw._data[0] = 0
         raw.info["bads"] = ["Cz"]
-        with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
+        with patch.object(step2, "_zero_eeg_channels",
+                          wraps=step2._zero_eeg_channels) as zeros:
             self.assertEqual(_reference_channel(raw, "native", "Cz"), "Cz")
-        get_data.assert_called_once_with(picks=[3], reject_by_annotation=None)
+        zeros.assert_called_once_with(raw, [3])
         with self.assertRaisesRegex(ValueError, "not entirely zero"):
             _reference_channel(raw, "native", "E1")
         raw.set_channel_types({"E0": "eog"})
