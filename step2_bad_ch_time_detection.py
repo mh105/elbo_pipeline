@@ -2944,6 +2944,7 @@ if __name__ == "__main__":
     # Remove the estimated noise from the original data
     # without high-pass filtering it
     remove_line_noise_inplace(raw, raw_prep, clean)
+    del raw_prep, clean  # Free two full-recording copies.
 
     # %% High-pass filter at 0.3 Hz
     raw_bads = raw.copy()
