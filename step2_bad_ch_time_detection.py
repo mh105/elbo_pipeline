@@ -659,11 +659,12 @@ def _global_flatline_segments(
     return spans
 
 
-def _flatline_configurations(raw, flatlines):
+def _flatline_configurations(raw, flatlines, bads=()):
     """Yield sample spans and locally flat full-Raw channel IDs.
 
     Cover the whole recording, merge identical neighbours, and omit local
-    channels inside global dropout intervals. Reuse the intervals that
+    channels inside global dropout intervals, as well as bads (full-Raw IDs),
+    which callers repair throughout anyway. Reuse the intervals that
     detect_flatline_inplace saved when it annotated the native data, despite
     later changes to bad labels. Callers combine each local pattern with their
     whole-channel bads.
@@ -692,7 +693,7 @@ def _flatline_configurations(raw, flatlines):
                 active.add(pick)
             else:
                 active.discard(pick)
-        pattern = () if dropout else tuple(sorted(active))
+        pattern = () if dropout else tuple(sorted(active.difference(bads)))
         if pending is not None and pending[2] == pattern:
             pending = pending[0], stop, pattern
         else:
@@ -2703,7 +2704,7 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     for start in range(0, raw.n_times, sample_chunk):
         stop = min(start + sample_chunk, raw.n_times)
         reference[start:stop] = coefficients @ raw._data[donors, start:stop]
-    for start, stop, flat in _flatline_configurations(raw, flatlines):
+    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
         if flat:
             donors, coefficients = _mean_configuration(
                 geometry, np.union1d(np.asarray(bads, dtype=int), flat)
@@ -2736,7 +2737,7 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
         for start in range(0, raw.n_times, sample_chunk):
             stop = min(start + sample_chunk, raw.n_times)
             raw._data[list(bads), start:stop] = weights @ raw._data[donors, start:stop]
-    for start, stop, flat in _flatline_configurations(raw, flatlines):
+    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
         if flat:
             invalid = np.union1d(np.asarray(bads, dtype=int), flat)
             donors, _ = _mean_configuration(geometry, invalid)
