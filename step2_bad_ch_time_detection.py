@@ -1216,7 +1216,7 @@ def bad_ch_by_voltage(
 def bad_ch_by_smallness(
     raw,
     window_length=2.0,
-    robust_z_cutoff=2.0,
+    robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
     *,
     flatlines=None,
