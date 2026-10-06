@@ -137,7 +137,7 @@ class TestFlatlineDetection(unittest.TestCase):
                 self.assertIs(type(result["min_samples"]), int)
 
     def test_custom_min_samples_handles_short_recordings(self):
-        for min_samples in (1, 3, 4):
+        for min_samples in (2, 3, 4):
             with self.subTest(min_samples=min_samples):
                 raw = make_raw(n_times=3, n_eeg=2)
                 raw._data[0] = 2e-6
@@ -155,9 +155,11 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertEqual(result["ch_names"], ["E0"])
         self.assertEqual(result["segments"], [[[0, raw.n_times]]])
 
-    def test_min_samples_requires_a_positive_integer(self):
+    def test_min_samples_requires_an_integer_of_at_least_two(self):
         raw = make_raw()
-        for min_samples in (0, -1, 2.5, 10.0, np.nan, np.inf, "10", None, True, np.bool_(True)):
+        # One sample always has zero range, so min_samples=1 would mark everything flat.
+        for min_samples in (1, 0, -1, 2.5, 10.0, np.nan, np.inf, "10", None, True,
+                            np.bool_(True)):
             with self.subTest(min_samples=min_samples), self.assertRaisesRegex(ValueError, "min_samples"):
                 step2.detect_flatline(raw, "Cz", min_samples=min_samples)
 

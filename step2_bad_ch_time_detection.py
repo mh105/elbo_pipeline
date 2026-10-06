@@ -305,8 +305,9 @@ def detect_flatline(
 
     Union blocks of min_samples consecutive samples with range at most
     tolerance_v volts, detected on the input and on a full-record copy filtered
-    with a high-pass cutoff of highpass_hz. min_samples must be a positive
-    integer (default 10), independent of sampling rate. tolerance_v must be
+    with a high-pass cutoff of highpass_hz. min_samples must be an integer of
+    at least 2 (default 10), independent of sampling rate: one sample always
+    has zero range. tolerance_v must be
     finite and nonnegative (default 1e-9 V, or 1e-3 µV). highpass_hz must be
     finite, positive, and below Nyquist (default 1 Hz). Bounds are
     crop-relative half-open sample indices. The dictionary records these
@@ -318,9 +319,10 @@ def detect_flatline(
     reference is exempt. Include finite existing bad EEG channels; skip
     already bad nonfinite channels.
     """
+    # One sample always has zero range, so a block needs at least two.
     if (isinstance(min_samples, (bool, np.bool_))
-            or not isinstance(min_samples, (int, np.integer)) or min_samples < 1):
-        raise ValueError("min_samples must be a positive integer.")
+            or not isinstance(min_samples, (int, np.integer)) or min_samples < 2):
+        raise ValueError("min_samples must be an integer of at least 2.")
     if not np.isfinite(tolerance_v) or tolerance_v < 0:
         raise ValueError("tolerance_v must be finite and nonnegative (volts).")
     if not np.isfinite(highpass_hz) or not 0 < highpass_hz < raw.info["sfreq"] / 2:
