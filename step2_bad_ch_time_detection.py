@@ -3111,7 +3111,7 @@ if __name__ == "__main__":
     bad_ch_report = {}
     # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
     bad_ch_report.update(bad_ch_by_nan(raw))
-    flatlines = detect_flatline_inplace(raw)  # Also annotates global dropouts.
+    flatlines = detect_flatline_inplace(raw)  # also annotates global dropouts.
     bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
 
     # %% Line noise removal
