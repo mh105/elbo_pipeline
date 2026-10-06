@@ -14,9 +14,10 @@ bad_ch_by_pop counts individual electrode pops instead; its details include
 each channel's pop times and step sizes.
 
 bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
-on a copy band-limited to 1-45 Hz. The first flags channels that intermittently
+on a copy band-limited to 1-45 Hz. The first flags channels that frequently
 lose the signal they share with their neighbours (PREP's correlation
-criterion); the second flags channels that random subsets of the others,
+criterion, with 25% occurrence); the second flags channels that random subsets
+of the others,
 through spherical splines, persistently fail to predict (RANSAC).
 
 The native reference is the one EEG channel whose samples are all exactly zero.
@@ -1593,17 +1594,19 @@ def _row_pearson(x, y):
 def bad_ch_by_correlation(
     raw,
     window_length=2.0,
-    correlation_cutoff=0.4,
+    correlation_cutoff=0.5,
     quantile=0.98,
-    occurrence_cutoff=0.01,
+    occurrence_cutoff=0.25,
     *,
     flatlines=None,
     return_details=False,
 ):
-    """Return {"correlation": names} for channels that intermittently
+    """Return {"correlation": names} for channels that frequently
     lose their shared signal.
 
-    PREP findNoisyChannels.m, Method 3, with signed r and 2-s windows. In each
+    PREP findNoisyChannels.m, Method 3, with signed r, 2-s windows, and
+    PREP's 0.4 / 1% cutoffs raised to 0.5 / 25%, the occurrence cutoff of the
+    other windowed detectors. In each
     retained window, correlate (Pearson r) every evaluated channel with every
     other one and score it by the quantile of its r with the others (numpy's
     default linear method; the self-correlation is excluded). At 0.98 with
@@ -1612,8 +1615,8 @@ def bad_ch_by_correlation(
     with its closest neighbours, e.g., from a broken contact. Unlike PREP's
     |r|, r is signed, so anticorrelated channels do not count as partners. A
     window violates when the score is strictly below correlation_cutoff; flag
-    channels violating in strictly more than occurrence_cutoff of retained
-    windows, a few windows at the 1% default.
+    channels violating in strictly more than occurrence_cutoff of their
+    scorable retained windows.
 
     Compute correlation scores for detection on a copy of the EEG data
     band-limited to 1-45 Hz by _band_limited_windows() (via _band_limit).

@@ -84,16 +84,21 @@ class TestBandLimiting(unittest.TestCase):
 
 
 class TestCorrelation(unittest.TestCase):
-    def test_flags_intermittent_signal_loss_but_not_misplaced_channels(self):
+    def test_flags_frequent_signal_loss_but_not_misplaced_channels(self):
         self.assertEqual(step2.bad_ch_by_correlation(field_raw()), {"correlation": []})
         raw = faulty_raw()
         original = raw.copy()
-        # E75 lost its signal in 2 of 30 windows, above the 1% cutoff. The swapped
-        # channels still correlate with their true neighbours, wherever those are.
-        self.assertEqual(step2.bad_ch_by_correlation(raw), {"correlation": ["E10", "E75"]})
-        self.assertEqual(raw.info["bads"], ["E10", "E75"])
+        # E10 lost its signal in 12 of 30 windows, above the 25% cutoff; E75's 2
+        # windows are below it. The swapped channels still correlate with their
+        # true neighbours, wherever those are.
+        self.assertEqual(step2.bad_ch_by_correlation(raw), {"correlation": ["E10"]})
+        self.assertEqual(raw.info["bads"], ["E10"])
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         self.assertEqual(raw.annotations, original.annotations)
+        # PREP's 0.4 / 1% cutoffs also catch E75's two windows.
+        self.assertEqual(step2.bad_ch_by_correlation(faulty_raw(), correlation_cutoff=0.4,
+                                                     occurrence_cutoff=0.01),
+                         {"correlation": ["E10", "E75"]})
 
     def test_score_is_a_quantile_of_signed_r_with_the_other_channels(self):
         raw = field_raw()
