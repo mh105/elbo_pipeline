@@ -165,13 +165,14 @@ def bad_ch_by_nan(raw, reference_channel=None):
     return report
 
 
-def _zero_eeg_channels(raw, picks, zeros=None):
+def _zero_eeg_channels(raw, picks, known_zeros=None):
     """Names of the picked channels whose samples are all exactly zero.
 
-    zeros, the set of such EEG names from _mask_inputs, replaces the scan.
+    known_zeros, the set of such EEG names from _mask_inputs, replaces the
+    scan.
     """
-    if zeros is not None:
-        return [raw.ch_names[i] for i in picks if raw.ch_names[i] in zeros]
+    if known_zeros is not None:
+        return [raw.ch_names[i] for i in picks if raw.ch_names[i] in known_zeros]
     names = []
     for i in picks:
         # Read preloaded rows in place, and test the first sample before the
@@ -185,7 +186,7 @@ def _zero_eeg_channels(raw, picks, zeros=None):
     return names
 
 
-def _reference_channel(raw, reference, reference_channel=None, zeros=None):
+def _reference_channel(raw, reference, reference_channel=None, known_zeros=None):
     """Check the reference a method needs; return the
     native reference to exclude.
 
@@ -194,8 +195,8 @@ def _reference_channel(raw, reference, reference_channel=None, zeros=None):
     channels; without a name, exactly one non-bad EEG channel must be entirely
     zero. Return its name. "average": no EEG channel, bad or not, may be
     entirely zero; return None. "either": return the one entirely zero non-bad
-    EEG channel, or None if there is none; raise if there are several. zeros
-    is passed to _zero_eeg_channels.
+    EEG channel, or None if there is none; raise if there are several.
+    known_zeros is passed to _zero_eeg_channels.
     """
     eeg_all = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_good = mne.pick_types(raw.info, eeg=True, exclude="bads")
@@ -204,14 +205,14 @@ def _reference_channel(raw, reference, reference_channel=None, zeros=None):
             if reference_channel not in [raw.ch_names[i] for i in eeg_all]:
                 raise ValueError("reference_channel must name an EEG channel in raw.")
             if not _zero_eeg_channels(
-                raw, [raw.ch_names.index(reference_channel)], zeros
+                raw, [raw.ch_names.index(reference_channel)], known_zeros
             ):
                 raise ValueError(
                     f"reference_channel {reference_channel} is not entirely "
                     "zero; this method requires the native reference."
                 )
             return reference_channel
-        zeros = _zero_eeg_channels(raw, eeg_good, zeros)
+        zeros = _zero_eeg_channels(raw, eeg_good, known_zeros)
         if len(zeros) != 1:
             raise ValueError(
                 "Expected exactly one entirely zero non-bad EEG channel (the "
@@ -220,7 +221,7 @@ def _reference_channel(raw, reference, reference_channel=None, zeros=None):
             )
         return zeros[0]
     if reference == "average":
-        zeros = _zero_eeg_channels(raw, eeg_all, zeros)
+        zeros = _zero_eeg_channels(raw, eeg_all, known_zeros)
         if zeros:
             raise ValueError(
                 f"EEG channels {zeros} are entirely zero, as the native "
@@ -228,7 +229,7 @@ def _reference_channel(raw, reference, reference_channel=None, zeros=None):
                 "with robust_average_reference_inplace."
             )
         return None
-    zeros = _zero_eeg_channels(raw, eeg_good, zeros)
+    zeros = _zero_eeg_channels(raw, eeg_good, known_zeros)
     if len(zeros) > 1:
         raise ValueError(f"Several non-bad EEG channels are entirely zero: {zeros}. "
                          "Mark the dead ones bad first: run detect_flatline_inplace "
@@ -239,12 +240,13 @@ def _reference_channel(raw, reference, reference_channel=None, zeros=None):
 
 def _prepare_channel_windows(
     raw, window_length, occurrence_cutoff, reference, reference_channel=None,
-    zeros=None,
+    known_zeros=None,
 ):
     """Select eligible EEG channels and complete,
     non-overlapping sample windows.
 
-    reference, reference_channel, and zeros are passed to _reference_channel.
+    reference, reference_channel, and known_zeros are passed to
+    _reference_channel.
     """
     if not np.isfinite(window_length) or window_length <= 0:
         raise ValueError("window_length must be finite and greater than 0 (seconds).")
@@ -256,7 +258,9 @@ def _prepare_channel_windows(
     n_windows = raw.n_times // window_samples
     if n_windows == 0:
         raise ValueError("Data must contain at least one complete window.")
-    reference_channel = _reference_channel(raw, reference, reference_channel, zeros)
+    reference_channel = _reference_channel(
+        raw, reference, reference_channel, known_zeros
+    )
     exclude = raw.info["bads"] + (
         [] if reference_channel is None else [reference_channel]
     )
@@ -972,11 +976,12 @@ def _temporary_voltage_mask(
         shared = _mask_inputs(raw)
     if reference_channel is None:
         reference_channel = _reference_channel(
-            raw, "average" if require_average else "either", zeros=shared["zeros"]
+            raw, "average" if require_average else "either",
+            known_zeros=shared["zeros"],
         )
     else:
         reference_channel = _reference_channel(
-            raw, "native", reference_channel, shared["zeros"]
+            raw, "native", reference_channel, known_zeros=shared["zeros"]
         )
     rows = np.searchsorted(shared["eeg"], _mask_eeg_picks(raw, reference_channel))
     spans = _voltage_mask_spans(shared["finite"][rows], shared["exceeds"][rows],
@@ -1257,7 +1262,7 @@ def bad_ch_by_smallness(
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
+        raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
@@ -1356,7 +1361,7 @@ def bad_ch_by_std(
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
+        raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
@@ -1485,17 +1490,17 @@ def bad_ch_by_HFnoise(
     flag. Floor MADs at machine
     epsilon before taking log ratios. Keep candidates that violate in every
     scorable (retained, non-flat) window, since no non-violating baseline is
-    available. As in
-    PREP, the low-pass filters the whole record once; each voltage-mask and
-    BAD_by_flatline span is widened on both sides by the filter's reach (0.66
-    s), as in bad_ch_by_correlation, so that masked bursts and dropout edges
-    stay out of the windows scored. Accept the native reference or
+    available.
+
+    As in PREP, the low-pass filters the whole record once; each voltage-mask
+    and BAD_by_flatline span is widened on both sides by the filter's reach
+    (0.66 s), as in bad_ch_by_correlation, so that masked bursts and dropout
+    edges stay out of the windows scored. Accept the native reference or
     re-referenced data as in bad_ch_by_voltage. Temporary masking and the
     occurrence denominator follow bad_ch_by_std. Require sfreq > 100 Hz to
     evaluate noise above 50 Hz, and a recording longer than the 0.66 s
-    low-pass filter. Add detections to
-    raw.info["bads"], preserving existing labels without duplicates. Input
-    data/annotations are unchanged.
+    low-pass filter. Add detections to raw.info["bads"], preserving existing
+    labels without duplicates. Input data/annotations are unchanged.
 
     With return_details=True, return (report, details). Details contain channel
     names, crop-relative start/stop seconds, a retained-window mask, and arrays
@@ -1521,7 +1526,7 @@ def bad_ch_by_HFnoise(
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "either", zeros=shared["zeros"]
+        raw, window_length, occurrence_cutoff, "either", known_zeros=shared["zeros"]
     )
     lowpass = _lowpass_45_hz(
         raw.get_data(picks=picks, reject_by_annotation=None), sfreq
@@ -1668,7 +1673,7 @@ def bad_ch_by_BBnoise(
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
+        raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
@@ -1966,7 +1971,7 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     shared = _mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average", zeros=shared["zeros"]
+        raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     if _pass is not None and "band_limited" in _pass:
         rows, native, mean, reach = _pass["band_limited"]
