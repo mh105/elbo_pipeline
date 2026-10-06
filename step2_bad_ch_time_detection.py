@@ -1778,8 +1778,10 @@ def _ransac_predictors(
     random_state, so the orderings do not depend on which channels are bad.
     Each subset of an evaluated channel (one of picks) is the first
     n_predictors evaluated channels of one of its orderings. The weights map a
-    subset to its target as interpolate_bads does: positions centred on the
-    origin interpolate_bads fits, then MNE's _make_interpolation_matrix. Return
+    subset to its target as interpolate_bads does, with positions centred on
+    the origin interpolate_bads fits: _spline_weights solves MNE's spherical
+    spline system with scipy.linalg.solve, numerically equivalent to MNE's
+    _make_interpolation_matrix, and caches the result in the geometry. Return
     subsets as rows of picks, shape (len(picks), n_subsets, n_predictors), and
     the weights, of the same shape.
     """
@@ -1813,7 +1815,9 @@ def _ransac_predictors(
 def _ransac_median(weight_stack, window):
     """Per-sample median of every channel's subset predictions in one window.
 
-    weight_stack has shape (n_subsets, channels, channels). Predict in float32,
+    weight_stack has shape (n_subsets, scored targets, len(picks)), and window
+    has shape (len(picks), samples), so the result has one row per scored
+    target. Predict in float32,
     whose sort is several times faster than any float64 median here, and
     average the middle order statistics: the usual median of those values.
     """
@@ -1878,8 +1882,9 @@ def bad_ch_by_RANSAC(
     Selection, band-limiting, masking, the re-reference requirement, and the
     error for constant channels follow bad_ch_by_correlation; also raise if a
     median prediction is constant in a retained window, checking only the
-    non-flat targets actually scored. Require 3D positions of the evaluated
-    channels and a full subset besides each of them. Add detections to
+    non-flat targets actually scored. Require valid 3D positions for every EEG
+    channel in raw, bads included (the spline geometry covers them all), and a
+    full subset besides each evaluated channel. Add detections to
     raw.info["bads"], preserving existing labels without duplicates. Input data
     and annotations are unchanged.
 
@@ -1897,7 +1902,10 @@ def bad_ch_by_RANSAC(
     for unretained windows); configurations holds their active ch_names,
     subsets, and noise_gain. noise_gain_by_window records the actual gains,
     with NaN for flat or unretained targets. Legacy subsets and noise_gain
-    describe the baseline configuration with no local exclusions.
+    describe the baseline configuration with no local exclusions. flat is the
+    boolean local-flat mask, shape (channels, complete windows), over all
+    complete windows: unlike the per-window metrics, it is not NaN in
+    unretained windows.
     """
     if method not in ("threshold", "robust_z"):
         raise ValueError('method must be "threshold" or "robust_z".')
