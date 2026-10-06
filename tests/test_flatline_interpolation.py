@@ -39,7 +39,7 @@ def flatlines_for(raw, spans, channel_fraction_cutoff=0.25):
     result = {"ch_names": names, "segments": segments,
               "segments_on_subtypes": {
                   "segments_on_raw": segments, "segments_on_highpass": empty,
-                  "segments_on_ramp": empty, "segments_on_curve": empty,
+                  "segments_on_ramp": empty,
               },
               "eeg_ch_names": [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])],
               "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],

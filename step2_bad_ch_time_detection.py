@@ -292,15 +292,6 @@ def _ramp_segments(data, block_samples, tolerance_v):
     return [[start, stop + 1] for start, stop in segments]
 
 
-def _curve_segments(data, block_samples, tolerance_v):
-    """Union blocks of block_samples consecutive samples whose second
-    differences all lie within +/-tolerance_v volts: smooth slow changes.
-    """
-    small = np.abs(np.diff(data, 2)) <= tolerance_v
-    runs = np.flatnonzero(np.diff(np.r_[False, small, False])).reshape(-1, 2).tolist()
-    return [[start, stop + 2] for start, stop in runs if stop - start >= block_samples - 2]
-
-
 def _merge_segments(segments):
     """Merge touching or overlapping half-open sample intervals."""
     merged = []
@@ -392,20 +383,18 @@ def detect_flatline_inplace(
     robust reference's repair. downstream_highpass_hz=None skips the widening
     of both the local intervals and the annotation.
 
-    Detect with the union of four kinds of block, each judged against
+    Detect with the union of three kinds of block, each judged against
     tolerance_v volts:
-    - raw: min_samples consecutive samples whose range is at most tolerance_v;
+    - raw: min_samples consecutive samples whose range is at most tolerance_v,
+      i.e. constant flatlines;
     - highpass: the same on a full-record copy filtered with a high-pass
       cutoff of highpass_hz;
     - ramp: 2 * min_samples consecutive samples whose first differences have
-      a range of at most tolerance_v, i.e. exact ramps;
-    - curve: 2 * min_samples consecutive samples whose second differences all
-      lie within +/-tolerance_v, i.e. smooth slow changes such as a dead
-      electrode's drift.
-    The ramp and curve rules read the unfiltered input; their blocks are
-    twice as long because live EEG comes closer to their tolerance (on
-    sub-02, -03, -10 and -17 at 1 kHz, the closest live 20-sample blocks stay
-    at least 16 and 6 times above it). min_samples must be an integer of at
+      a range of at most tolerance_v, i.e. exact ramps.
+    The ramp rule reads the unfiltered input; its blocks are twice as long
+    because live EEG comes closer to its tolerance (on sub-02, -03, -10 and
+    -17 at 1 kHz, the closest live 20-sample blocks stay at least 16 times
+    above it). min_samples must be an integer of at
     least 2 (default 10), independent of sampling rate: one sample always
     has zero range. tolerance_v must be
     finite and nonnegative (default 1e-9 V, or 1e-3 µV). highpass_hz must be
@@ -414,8 +403,8 @@ def detect_flatline_inplace(
     detection settings, channel identities, and sampling/crop metadata for
     validation by later consumers. segments contains the widened local
     intervals; segments_on_subtypes stores the exact detections per rule as
-    segments_on_raw, segments_on_highpass, segments_on_ramp, and
-    segments_on_curve. All are aligned with ch_names. The exact global
+    segments_on_raw, segments_on_highpass, and segments_on_ramp. All are
+    aligned with ch_names. The exact global
     dropouts are saved as global_segments, with global_ch_names and
     global_channel_fraction_cutoff; downstream_highpass_hz and widen_samples
     (the reach, in samples) record the widening.
@@ -463,7 +452,6 @@ def detect_flatline_inplace(
             "segments_on_raw": [],
             "segments_on_highpass": [],
             "segments_on_ramp": [],
-            "segments_on_curve": [],
         },
         "eeg_ch_names": eeg_names,
         "raw_ch_names": list(raw.ch_names),
@@ -492,8 +480,7 @@ def detect_flatline_inplace(
             )
             filtered = _near_constant_segments(highpass, min_samples, tolerance_v)
         ramp = _ramp_segments(data, 2 * min_samples, tolerance_v)
-        curve = _curve_segments(data, 2 * min_samples, tolerance_v)
-        combined = _merge_segments(original + filtered + ramp + curve)
+        combined = _merge_segments(original + filtered + ramp)
         if combined:
             result["ch_names"].append(name)
             result["segments"].append(combined)
@@ -501,7 +488,6 @@ def detect_flatline_inplace(
             subtypes["segments_on_raw"].append(original)
             subtypes["segments_on_highpass"].append(filtered)
             subtypes["segments_on_ramp"].append(ramp)
-            subtypes["segments_on_curve"].append(curve)
     reach = 0
     if downstream_highpass_hz is not None:
         reach = len(mne.filter.create_filter(

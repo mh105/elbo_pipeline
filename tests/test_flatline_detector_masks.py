@@ -43,7 +43,6 @@ def flatlines_for(raw, intervals):
         "segments_on_raw": list(intervals.values()),
         "segments_on_highpass": [[] for _ in intervals],
         "segments_on_ramp": [[] for _ in intervals],
-        "segments_on_curve": [[] for _ in intervals],
     }
     result["global_segments"] = []
     return result
