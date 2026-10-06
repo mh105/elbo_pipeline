@@ -320,6 +320,7 @@ def detect_flatline_inplace(
     tolerance_v=1e-9,
     highpass_hz=1.0,
     channel_fraction_cutoff=0.25,
+    window_length=2.0,
 ):
     """Detect sparse native-reference flat intervals and mask global dropouts
     in place; return the flatline dictionary.
@@ -327,7 +328,10 @@ def detect_flatline_inplace(
     Run this on the native data right after bad_ch_by_nan, before any other
     step 2 function: it ends by annotating global dropouts on raw as
     BAD_by_flatline (_mask_segment_by_flatline, with channel_fraction_cutoff),
-    and every later detector and the robust reference rely on that mask.
+    and every later detector and the robust reference rely on that mask. It
+    raises, before changing raw, if the dropouts cover the entire recording
+    or leave no complete window_length window (in seconds; the detectors'
+    2-s default).
 
     Union four kinds of block, each judged against tolerance_v volts:
     - raw: min_samples consecutive samples whose range is at most tolerance_v;
@@ -372,6 +376,8 @@ def detect_flatline_inplace(
         or not 0 <= channel_fraction_cutoff <= 1
     ):
         raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
+    if not np.isfinite(window_length) or window_length * raw.info["sfreq"] < 1:
+        raise ValueError("window_length must be finite and cover at least one sample.")
     min_samples = int(min_samples)
     tolerance_v = float(tolerance_v)
     highpass_hz = float(highpass_hz)
@@ -424,7 +430,7 @@ def detect_flatline_inplace(
             subtypes["segments_on_highpass"].append(filtered)
             subtypes["segments_on_ramp"].append(ramp)
             subtypes["segments_on_curve"].append(curve)
-    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
+    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff, window_length)
     return result
 
 
@@ -648,7 +654,9 @@ def bad_ch_by_flatline(
     return report
 
 
-def _mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
+def _mask_segment_by_flatline(
+    raw, flatlines, channel_fraction_cutoff=0.25, window_length=2.0,
+):
     """Append exact BAD_by_flatline dropout annotations; return None.
 
     Called at the end of detect_flatline_inplace, on the native data whose
@@ -658,12 +666,28 @@ def _mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
     channel_fraction_cutoff of that pool simultaneously flat. Annotate before
     whole-channel flatline rejection, and carry these annotations through
     preprocessing. Save the eligible names, cutoff, and global intervals in
-    flatlines so later local repair uses the same dropout decision. Raise if
-    flatness makes the entire recording globally bad.
+    flatlines so later local repair uses the same dropout decision.
+
+    Before changing raw or flatlines, raise if the dropouts cover the entire
+    recording, or leave no complete window_length window (the detectors'
+    2-s default) to score.
     """
     picks = _mask_eeg_picks(raw, flatlines["reference_channel"])
     names = [raw.ch_names[i] for i in picks]
     segments = _global_flatline_segments(flatlines, names, channel_fraction_cutoff)
+    if segments == [[0, raw.n_times]]:
+        raise ValueError(
+            "Global flatline dropout covers the entire recording; inspect the data."
+        )
+    window_samples = int(round(window_length * raw.info["sfreq"]))
+    n_windows = raw.n_times // window_samples
+    if segments and n_windows and _segments_to_windows(
+        segments, window_samples, n_windows
+    ).all():
+        raise ValueError(
+            f"Global flatline dropouts leave no complete {window_length:g}-s window; "
+            "inspect the data."
+        )
     flatlines["global_channel_fraction_cutoff"] = float(channel_fraction_cutoff)
     flatlines["global_ch_names"] = names
     flatlines["global_segments"] = segments
@@ -672,10 +696,6 @@ def _mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
         raw.annotations.append(
             raw.first_time + bounds[:, 0], bounds[:, 1] - bounds[:, 0],
             ["BAD_by_flatline"] * len(bounds),
-        )
-    if segments == [[0, raw.n_times]]:
-        raise ValueError(
-            "Global flatline dropout covers the entire recording; inspect the data."
         )
 
 

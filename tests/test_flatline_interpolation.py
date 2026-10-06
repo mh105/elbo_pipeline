@@ -20,7 +20,7 @@ NAMES = ["Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8", "FC5", "FC1", "FC2", "FC6",
          "P8", "PO3", "PO4", "O1", "Oz", "O2"]
 
 
-def make_raw(n_times=1200):
+def make_raw(n_times=3000):  # 12 s, so a 2-s window survives the test dropouts.
     rng = np.random.default_rng(76)
     data = rng.normal(scale=10e-6, size=(len(NAMES) + 1, n_times))
     data[:len(NAMES)] -= data[NAMES.index("Cz")]

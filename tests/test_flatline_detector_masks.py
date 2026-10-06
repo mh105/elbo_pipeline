@@ -112,12 +112,39 @@ class TestPublicFlatlineStages(unittest.TestCase):
         np.testing.assert_array_equal(details["flat"][row], [0, 0, 1, 0])
         self.assertNotIn("E2", raw.info["bads"])
 
-    def test_entire_global_dropout_raises_after_annotating(self):
+    def test_dropouts_leaving_nothing_to_score_raise_before_any_change(self):
+        everything = {name: [[0, 4 * WINDOW]] for name in ("E0", "E1", "E2")}
+        # Every 2-s window overlaps a dropout, but 1600 of 2000 samples are not flat.
+        every_window = {name: [[w * WINDOW + 200, w * WINDOW + 300] for w in range(4)]
+                        for name in ("E0", "E1", "E2")}
+        for spans, message in ((everything, "entire recording"),
+                               (every_window, "no complete 2-s window")):
+            with self.subTest(message=message):
+                raw = native_raw(n_nonreference=7)
+                flatlines = flatlines_for(raw, spans)
+                keys = dict(flatlines)
+                with self.assertRaisesRegex(ValueError, message):
+                    step2._mask_segment_by_flatline(raw, flatlines)
+                self.assertEqual(len(raw.annotations), 0)
+                self.assertEqual(flatlines, keys)
+        # A 0.5-s window still fits between the 0.4-s dropouts.
         raw = native_raw(n_nonreference=7)
-        flatlines = flatlines_for(raw, {name: [[0, raw.n_times]] for name in ("E0", "E1", "E2")})
-        with self.assertRaisesRegex(ValueError, "entire recording"):
-            step2._mask_segment_by_flatline(raw, flatlines)
-        self.assertIn("BAD_by_flatline", raw.annotations.description)
+        step2._mask_segment_by_flatline(raw, flatlines_for(raw, every_window),
+                                        window_length=0.5)
+        self.assertEqual(len(raw.annotations), 4)
+
+    def test_detection_raises_before_annotating_or_changing_data(self):
+        raw = native_raw(n_nonreference=7)
+        for row in range(3):
+            for w in range(4):
+                raw._data[row, w * WINDOW + 200:w * WINDOW + 300] = 3e-6
+        original = raw.copy()
+        with self.assertRaisesRegex(ValueError, "no complete 2-s window"):
+            step2.detect_flatline_inplace(raw)
+        self.assertEqual(len(raw.annotations), 0)
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
+        with self.assertRaisesRegex(ValueError, "window_length"):
+            step2.detect_flatline_inplace(raw, window_length=np.nan)
 
     def test_masks_share_good_eeg_pool_excluding_native_reference_and_auxiliary_bads(self):
         for reference_is_bad in (False, True):
