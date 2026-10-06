@@ -121,7 +121,9 @@ class TestRansacFlatline(unittest.TestCase):
                                       @ window.astype(np.float32), axis=0)
                 expected = (predicted32[(n_subsets - 1) // 2].astype(float)
                             + predicted32[n_subsets // 2]) / 2
-                actual = step2._ransac_median(weights, window)
+                # Column t * n_subsets + k holds target t's k-th subset weights.
+                columns = weights.transpose(2, 1, 0).reshape(4, -1)
+                actual = step2._ransac_median(columns, window, n_subsets)
                 np.testing.assert_array_equal(actual, expected)
                 self.assertEqual(actual.dtype, np.dtype(float))
                 predicted64 = np.sort(weights @ window, axis=0)

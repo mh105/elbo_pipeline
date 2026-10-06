@@ -2196,19 +2196,23 @@ def _ransac_predictors(
     return subsets, weights
 
 
-def _ransac_median(weight_stack, window):
+def _ransac_median(weight_columns, window, n_subsets):
     """Per-sample median of every channel's subset predictions in one window.
 
-    weight_stack has shape (n_subsets, scored targets, len(picks)), and window
-    has shape (len(picks), samples), so the result has one row per scored
-    target. Predict in float32,
-    whose sort is several times faster than any float64 median here, and
-    average the middle order statistics: the usual median of those values.
+    weight_columns has shape (len(picks), scored targets * n_subsets), column
+    t * n_subsets + k holding scored target t's k-th subset weights, and
+    window has shape (len(picks), samples), so the result has one row per
+    scored target. Predict in float32, whose sort is several times faster
+    than any float64 median here, with the n_subsets predictions of each
+    target and sample contiguous for the sort, and average the middle order
+    statistics: the usual median of those values.
     """
-    predictions = np.sort(weight_stack.astype(np.float32, copy=False)
-                          @ window.astype(np.float32), axis=0)
-    middle = len(predictions)
-    return (predictions[(middle - 1) // 2].astype(float) + predictions[middle // 2]) / 2
+    predictions = (window.T.astype(np.float32)
+                   @ weight_columns.astype(np.float32, copy=False))
+    predictions = np.sort(predictions.reshape(window.shape[1], -1, n_subsets), axis=-1)
+    median = (predictions[..., (n_subsets - 1) // 2].astype(float)
+              + predictions[..., n_subsets // 2]) / 2
+    return np.ascontiguousarray(median.T)
 
 
 def bad_ch_by_RANSAC(
@@ -2357,11 +2361,12 @@ def bad_ch_by_RANSAC(
             raw, picks[rows], n_subsets, n_predictors, random_state, _geometry=geometry
         )
         subsets = rows[subsets]
-        stack = np.zeros((n_subsets, len(rows), len(picks)), dtype=np.float32)
+        columns = np.zeros((len(picks), len(rows), n_subsets), dtype=np.float32)
         for k in range(n_subsets):
-            stack[k, np.arange(len(rows))[:, None], subsets[:, k]] = weights[:, k]
+            columns[subsets[:, k], np.arange(len(rows))[:, None], k] = weights[:, k]
         configurations.append({
-            "rows": rows, "subsets": subsets, "stack": stack,
+            "rows": rows, "subsets": subsets,
+            "columns": columns.reshape(len(picks), -1),
             "noise_gain": np.median(np.linalg.norm(weights, axis=2), axis=1),
         })
     r = np.full((len(picks), n_windows), np.nan)
@@ -2381,7 +2386,7 @@ def bad_ch_by_RANSAC(
         _require_variance(
             window[rows], active_names, "The band-limited signal", start, sfreq
         )
-        median = _ransac_median(configuration["stack"], window)
+        median = _ransac_median(configuration["columns"], window, n_subsets)
         _require_variance(median, active_names, "The median prediction", start, sfreq)
         r[rows, index] = _row_pearson(window[rows], median)
     pooled = r[np.isfinite(r)]
@@ -2432,8 +2437,9 @@ def bad_ch_by_RANSAC(
             median = np.full((len(rows), window_samples), np.nan)
             if len(scored):
                 active = np.searchsorted(configuration["rows"], scored)
+                columns = configuration["columns"].reshape(len(picks), -1, n_subsets)
                 median[~flat[rows, index]] = _ransac_median(
-                    configuration["stack"][:, active], window
+                    columns[:, active].reshape(len(picks), -1), window, n_subsets
                 )
             for prediction, i in zip(median, rows):
                 predicted["flagged_filtered_uv"][names[i]].append(window[i] * 1e6)
