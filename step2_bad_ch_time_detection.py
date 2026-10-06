@@ -291,22 +291,33 @@ def _finish_window_details(details, window_samples):
 def _near_constant_segments(data, min_samples, tolerance_v):
     """Union blocks of min_samples consecutive samples
     within tolerance_v volts.
+
+    A block's range is at least each of its steps, so only runs of at least
+    min_samples - 1 steps within tolerance_v can hold one; scan those runs
+    alone, then merge blocks of neighbouring runs that touch.
     """
     if len(data) < min_samples:
         return []
-    n_starts = len(data) - min_samples + 1
-    high = maximum_filter1d(data, size=min_samples, origin=-(min_samples // 2),
-                            mode="nearest")[:n_starts]
-    low = minimum_filter1d(data, size=min_samples, origin=-(min_samples // 2),
-                           mode="nearest")[:n_starts]
-    starts = np.flatnonzero(high - low <= tolerance_v)
-    if not len(starts):
-        return []
-    changes = np.zeros(len(data) + 1, dtype=np.int16)
-    changes[starts] += 1
-    changes[starts + min_samples] -= 1
-    flat = np.cumsum(changes[:-1]) > 0
-    return np.flatnonzero(np.diff(np.r_[False, flat, False])).reshape(-1, 2).tolist()
+    small = np.abs(np.diff(data)) <= tolerance_v
+    runs = np.flatnonzero(np.diff(np.r_[False, small, False])).reshape(-1, 2)
+    segments = []
+    for first, last in runs[runs[:, 1] - runs[:, 0] >= min_samples - 1].tolist():
+        run = data[first:last + 1]
+        n_starts = len(run) - min_samples + 1
+        high = maximum_filter1d(run, size=min_samples, origin=-(min_samples // 2),
+                                mode="nearest")[:n_starts]
+        low = minimum_filter1d(run, size=min_samples, origin=-(min_samples // 2),
+                               mode="nearest")[:n_starts]
+        starts = np.flatnonzero(high - low <= tolerance_v)
+        if not len(starts):
+            continue
+        changes = np.zeros(len(run) + 1, dtype=np.int16)
+        changes[starts] += 1
+        changes[starts + min_samples] -= 1
+        flat = np.cumsum(changes[:-1]) > 0
+        bounds = np.flatnonzero(np.diff(np.r_[False, flat, False])).reshape(-1, 2)
+        segments += (bounds + first).tolist()
+    return _merge_segments(segments)
 
 
 def _ramp_segments(data, block_samples, tolerance_v):
