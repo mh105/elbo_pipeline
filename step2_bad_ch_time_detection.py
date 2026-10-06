@@ -2057,7 +2057,7 @@ def bad_ch_by_RANSAC(
 
 
 def plot_bad_ch_report(raw, bad_ch_report):
-    """Show bad-channel categories on an EEG sensor
+    """Print bad_ch_report and show its categories on an EEG sensor
     topoplot; return the figure.
 
     Use the EEG sensor locations in raw.info, including existing bad channels.
@@ -2418,8 +2418,12 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     an interpolated Raw copy.
 
     Whole-channel bads are repaired throughout the record. Local flat channels
-    join them only in their exact intervals outside global BAD annotations.
-    Every configuration reads its genuine donors from the original recording.
+    join them only in their intervals outside the global dropout intervals
+    that mask_segment_by_flatline saved in flatlines (or that
+    _flatline_configurations derives from the current bads when they are
+    missing). raw.annotations is never read, so other BAD spans do not stop
+    the local repair. Every configuration reads its genuine donors from the
+    original recording.
     """
     # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
     sample_chunk = 8192
