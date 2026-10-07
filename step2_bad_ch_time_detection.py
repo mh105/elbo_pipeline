@@ -69,11 +69,14 @@ from collections import defaultdict
 from functools import partial
 import warnings
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import mne
 import numpy as np
 from mne.annotations import _annotations_starts_stops
 from mne.bem import _check_origin
 from mne.channels.interpolation import _calc_g
+from mne.channels.layout import _find_topomap_coords
+from mne.utils import _check_sphere
 from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin
@@ -2441,13 +2444,14 @@ def bad_ch_by_RANSAC(
 
 def plot_bad_ch_report(raw, bad_ch_report):
     """Print bad_ch_report and show its categories on an EEG sensor
-    topoplot; return the figure.
+    topoplot and accompanying scalp traces; return the topoplot figure.
 
     Use the EEG sensor locations in raw.info, including existing bad channels.
     Each report category gets a different colored ring; concentric rings show
     channels flagged by multiple criteria. Omit categories without EEG
     detections from the legend. Non-EEG entries are not plotted. Unflagged
-    sensors are gray, and raw and bad_ch_report are unchanged.
+    sensors are gray. Also call plot_bad_ch_topo_traces for a random unmasked
+    10-s window. raw and bad_ch_report are unchanged.
     """
     print(bad_ch_report)
 
@@ -2481,7 +2485,105 @@ def plot_bad_ch_report(raw, bad_ch_report):
         label.set_fontsize(8)
     if ring_counts.any():
         ax.legend(title="Criterion", loc="upper left", bbox_to_anchor=(1.01, 1))
+    plot_bad_ch_topo_traces(raw, bad_ch_report)
     plt.show()
+    return fig
+
+
+def plot_bad_ch_topo_traces(raw, bad_ch_report):
+    """Show a random unmasked 10-s window as scalp-organized EEG traces.
+
+    Call _temporary_voltage_mask and exclude its spans and existing BAD
+    annotations. Choose uniformly among all sample-aligned 10-s windows that
+    fit entirely in the remaining continuous spans. Include all EEG channels,
+    including existing bads and the reference, at fixed +/-100 µV limits,
+    without axes or panel backgrounds. Plot the input data as supplied,
+    without filtering, re-referencing, or interpolation.
+
+    Use the report's topoplot colors: the first listed criterion sets each
+    trace's color, with dots beside its label for additional criteria.
+    Unflagged traces are black. Return the figure, or warn and return None if
+    no unmasked 10-s window exists. raw and bad_ch_report are unchanged.
+    """
+    sfreq = raw.info["sfreq"]
+    window_samples = int(round(10 * sfreq))
+    if raw.n_times < window_samples:
+        warnings.warn("No unmasked 10-s window; scalp traces not plotted.",
+                      stacklevel=2)
+        return None
+    mask_spans, _ = _temporary_voltage_mask(raw)
+    good = ~_rejected_samples(raw, mask_spans)
+    runs = np.flatnonzero(np.diff(np.r_[False, good, False])).reshape(-1, 2)
+    counts = np.maximum(runs[:, 1] - runs[:, 0] - window_samples + 1, 0)
+    if not counts.sum():
+        warnings.warn("No unmasked 10-s window; scalp traces not plotted.",
+                      stacklevel=2)
+        return None
+    draw = np.random.default_rng().integers(counts.sum())
+    run = np.searchsorted(counts.cumsum(), draw, side="right")
+    start = int(runs[run, 0] + draw - counts[:run].sum())
+    stop = start + window_samples
+
+    picks = mne.pick_types(raw.info, eeg=True, exclude=[])
+    layout = mne.channels.make_eeg_layout(raw.info, radius=0.46, exclude=[])
+    data = raw.get_data(picks=layout.names, start=start, stop=stop,
+                        reject_by_annotation=None) * 1e6
+    times = np.arange(start, stop) / sfreq
+    palette = plt.get_cmap("tab10")
+    colors = {criterion: palette(i % 10)
+              for i, criterion in enumerate(bad_ch_report)}
+
+    # Map the head outline into the same normalized layout as the trace panels.
+    projected = _find_topomap_coords(raw.info, picks)
+    centers = layout.pos[:, :2] + layout.pos[:, 2:] / 2
+    affine = np.linalg.lstsq(np.c_[projected, np.ones(len(picks))],
+                             centers, rcond=None)[0]
+    sphere = _check_sphere(None, raw.info)
+    theta = np.linspace(0, 2 * np.pi, 200)
+    head = sphere[:2] + sphere[3] * np.c_[np.cos(theta), np.sin(theta)]
+    nose = sphere[:2] + sphere[3] * np.array([[-0.09, 0.99], [0, 1.14],
+                                              [0.09, 0.99]])
+    fig = plt.figure(figsize=(21, 22))
+    outline = fig.add_axes([0, 0, 1, 1])
+    outline.set(xlim=(0, 1), ylim=(0, 1))
+    outline.set_axis_off()
+    for points in (head, nose):
+        points = np.c_[points, np.ones(len(points))] @ affine
+        outline.plot(0.06 + 0.88 * points[:, 0], 0.1 + 0.8 * points[:, 1],
+                     color="0.85", linewidth=1)
+    for name, signal, (left, bottom, width, height) in zip(
+        layout.names, data, layout.pos
+    ):
+        ax = fig.add_axes([0.06 + 0.88 * left, 0.1 + 0.8 * bottom,
+                           0.88 * width, 0.8 * height])
+        criteria = [criterion for criterion, channels in bad_ch_report.items()
+                    if name in channels]
+        color = colors[criteria[0]] if criteria else "black"
+        ax.plot(times, signal, color=color, linewidth=0.6)
+        ax.set(xlim=(start / sfreq, stop / sfreq), ylim=(-100, 100))
+        ax.set_axis_off()
+        ax.patch.set_visible(False)
+        ax.text(0.5, 1.02, name, transform=ax.transAxes, ha="center",
+                va="bottom", fontsize=7.5, color=color)
+        for i, criterion in enumerate(criteria[1:]):
+            ax.plot(0.86 + 0.16 * i, 1.14, marker="o", markersize=4,
+                    color=colors[criterion], transform=ax.transAxes,
+                    clip_on=False)
+    handles = [Line2D([], [], color="black", label="Unflagged")]
+    handles += [Line2D([], [], color=colors[criterion], label=criterion)
+                for criterion, channels in bad_ch_report.items()
+                if any(name in channels for name in layout.names)]
+    fig.legend(handles=handles, loc="lower center", ncols=4, frameon=False,
+               bbox_to_anchor=(0.5, 0.01), fontsize=12)
+    fig.text(0.5, 0.065,
+             "Trace color: first listed criterion; dots: additional criteria",
+             ha="center", fontsize=11)
+    fig.suptitle(
+        f"EEG traces: {start / sfreq:.3f}–{stop / sfreq:.3f} s "
+        "from recording crop start\n"
+        "10 s per channel; ±100 µV", y=0.98, fontsize=16,
+    )
+    plt.show(block=False)
     return fig
 
 
@@ -3105,3 +3207,9 @@ if __name__ == "__main__":
     psd_topomap_figure = raw_bads.compute_psd(
         fmax=45.0, average="median", verbose=False
     ).plot_topomap()
+
+    # Average-referenced traces, excluding interpolated bad channels.
+    plot_voltage_traces(
+        raw_bads,
+        exclude=[name for names in bad_ch_report.values() for name in names],
+    )
