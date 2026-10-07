@@ -9,8 +9,8 @@ detect_flatline_inplace finds constant flatlines and exact ramps, annotates
 global dropouts (more than 25% of the eligible channels flat at once) as
 BAD_by_flatline, and bridges each channel's local flat spans linearly so that
 later filters see no step. It returns a flatlines dictionary whose local
-intervals are widened by the reach of the later 0.3 Hz high-pass (5.5 s on
-each side). Every later detector and robust_average_reference_inplace takes
+intervals are widened by the reach of the later 0.3 Hz high-pass (5.5 s on each
+side). Every later detector and robust_average_reference_inplace takes
 that dictionary.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
@@ -19,15 +19,15 @@ bad_ch_by_std returns two criteria, std_high and std_low. Signal data and
 input annotations are unchanged.
 
 The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
-bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more
-than 25% of its scorable 2-s windows: the windows clear of BAD annotations
+bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more than
+25% of its scorable 2-s windows: the windows clear of BAD annotations
 (BAD_by_flatline included) and of the temporary BAD_voltage_mask, without the
-channel's local flat intervals (and, for std_low, without the windows where
-the channel violates std_high). Three rules differ by design.
-bad_ch_by_RANSAC counts local flat windows as
-failures to predict within the shared denominator; bad_ch_by_voltage counts
-scorable samples, not windows, since every sample beyond its threshold
-matters; and bad_ch_by_pop counts pops per scorable minute.
+channel's local flat intervals (and, for std_low, without the windows where the
+channel violates std_high). Three rules differ by design. bad_ch_by_RANSAC
+counts local flat windows as failures to predict within the shared denominator;
+bad_ch_by_voltage counts scorable samples, not windows, since every sample
+beyond its threshold matters; and bad_ch_by_pop counts pops per
+scorable minute.
 
 The 2-second window detectors accept return_details=True to return (report,
 details), including window metrics and original flagged waveforms.
@@ -36,31 +36,28 @@ each channel's pop times and step sizes.
 
 bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
 on a copy band-limited to 1-45 Hz. The first flags channels that frequently
-lose the signal they share with their neighbours (PREP's correlation
-criterion, with 25% occurrence); the second flags channels that random subsets
-of the others, through spherical splines, persistently fail to predict
-(RANSAC).
+lose the signal they share with their neighbours (PREP's correlation criterion,
+with 25% occurrence); the second flags channels that random subsets of the
+others, through spherical splines, persistently fail to predict (RANSAC).
 
 The native reference is the one non-bad EEG channel whose samples are all
-exactly zero, or a channel named with reference_channel, which must be
-entirely zero (other all-zero channels are then ordinary, dead channels).
-bad_ch_by_nan, detect_flatline_inplace, bad_ch_by_flatline,
-pca_cleaning_inplace, and robust_average_reference_inplace require it;
-bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
-require re-referenced data, with no entirely zero EEG channel, bad or not;
-bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
-exclude the native reference if present.
-mask_segment_by_voltage accepts either by default, requires re-referenced
-data with require_average=True, and takes a named native reference.
+exactly zero, or a channel named with reference_channel, which must be entirely
+zero (other all-zero channels are then ordinary, dead channels). bad_ch_by_nan,
+detect_flatline_inplace, bad_ch_by_flatline, pca_cleaning_inplace, and
+robust_average_reference_inplace require it; bad_ch_by_std, bad_ch_by_BBnoise,
+bad_ch_by_correlation, and bad_ch_by_RANSAC require re-referenced data, with no
+entirely zero EEG channel, bad or not; bad_ch_by_voltage, bad_ch_by_HFnoise,
+and bad_ch_by_pop accept either and exclude the native reference if present.
+mask_segment_by_voltage accepts either by default, requires re-referenced data
+with require_average=True, and takes a named native reference.
 
 pca_cleaning_inplace (currently disabled in __main__) modifies the data in
-place: after the initial bad-channel
-pass, it removes the PC1 of each 1-second window where PC1 explains at least
-90% of the variance, on the input or on 2 Hz high-passed data, and exceeds 100
-µV on some channel, suppressing large artifacts shared across channels. With
-return_removed=True, remove_pca_signal_inplace can subtract the same removed
-signals from a copy high-passed at a lower cutoff
-(filter first, then subtract).
+place: after the initial bad-channel pass, it removes the PC1 of each 1-second
+window where PC1 explains at least 90% of the variance, on the input or on 2 Hz
+high-passed data, and exceeds 100 µV on some channel, suppressing large
+artifacts shared across channels. With return_removed=True,
+remove_pca_signal_inplace can subtract the same removed signals from a copy
+high-passed at a lower cutoff (filter first, then subtract).
 
 robust_average_reference_inplace then iterates bad-channel detection under a
 robust average reference (the mean with bad channels and local flat intervals
@@ -104,8 +101,8 @@ def bad_ch_by_impedance(
     Impedances and imp_cutoff are in kOhm. Each supplied list must contain one
     value per channel, in raw.ch_names order, including non-EEG and existing
     bad channels. Values must be finite and nonnegative, or NaN. Initial
-    readings are required; end readings are optional unless
-    reject_by is "end" or "both".
+    readings are required; end readings are optional unless reject_by is
+    "end" or "both".
 
     "initial" uses only initial readings; "end" uses only end readings; "both"
     flags a channel if either reading exceeds the cutoff. NaN readings (e.g.,
@@ -171,8 +168,8 @@ def bad_ch_by_nan(raw, reference_channel=None):
 def _zero_eeg_channels(raw, picks, known_zeros=None):
     """Names of the picked channels whose samples are all exactly zero.
 
-    known_zeros, the set of such EEG names from _mask_inputs, replaces the
-    scan.
+    known_zeros, the set of such EEG names from _mask_inputs,
+    replaces the scan.
     """
     if known_zeros is not None:
         return [raw.ch_names[i] for i in picks if raw.ch_names[i] in known_zeros]
@@ -364,15 +361,16 @@ def _merge_segments(segments):
 
 
 def _widen_segments(segments, samples, n_times):
-    """Widen half-open intervals by samples on each side within the data, then
-    merge them.
+    """Widen half-open intervals by samples on each side within the data,
+    then merge them.
     """
     return _merge_segments([[max(start - samples, 0), min(stop + samples, n_times)]
                             for start, stop in segments])
 
 
 def _subtract_segments(segments, removed):
-    """Parts of sorted, disjoint half-open intervals outside the removed ones."""
+    """Parts of sorted, disjoint half-open intervals outside the removed ones.
+    """
     kept = []
     for start, stop in segments:
         for cut_start, cut_stop in removed:
@@ -453,11 +451,10 @@ def detect_flatline_inplace(
     - ramp: 2 * min_samples consecutive samples whose first differences have
       a range of at most tolerance_v, i.e. exact ramps.
     The ramp rule reads the unfiltered input; its blocks are twice as long
-    because live EEG comes closer to its tolerance (on sub-02, -03, -10 and
-    -17 at 1 kHz, the closest live 20-sample blocks stay at least 16 times
-    above it). min_samples must be an integer of at
-    least 2 (default 10), independent of sampling rate: one sample always
-    has zero range. tolerance_v must be
+    because live EEG comes closer to its tolerance (on sub-02, -03, -10 and -17
+    at 1 kHz, the closest live 20-sample blocks stay at least 16 times above
+    it). min_samples must be an integer of at least 2 (default 10), independent
+    of sampling rate: one sample always has zero range. tolerance_v must be
     finite and nonnegative (default 1e-9 V, or 1e-3 µV). highpass_hz must be
     finite, positive, and below Nyquist (default 1 Hz). Bounds are
     crop-relative half-open sample indices. The dictionary records these
@@ -465,13 +462,12 @@ def detect_flatline_inplace(
     validation by later consumers. segments contains the widened local
     intervals; segments_on_subtypes stores the exact detections per rule as
     segments_on_raw, segments_on_highpass, and segments_on_ramp. All are
-    aligned with ch_names. The exact global
-    dropouts are saved as global_segments, with global_ch_names and
-    global_channel_fraction_cutoff; downstream_highpass_hz and widen_samples
-    (the reach, in samples) record the widening.
-    Run bad_ch_by_nan first; the native zero
-    reference is exempt. Include finite existing bad EEG channels; skip
-    already bad nonfinite channels.
+    aligned with ch_names. The exact global dropouts are saved as
+    global_segments, with global_ch_names and global_channel_fraction_cutoff;
+    downstream_highpass_hz and widen_samples (the reach, in samples) record the
+    widening. Run bad_ch_by_nan first; the native zero reference is exempt.
+    Include finite existing bad EEG channels; skip already bad
+    nonfinite channels.
     """
     # One sample always has zero range, so a block needs at least two.
     if (isinstance(min_samples, (bool, np.bool_))
@@ -809,8 +805,8 @@ def _mask_segment_by_flatline(
     widen_samples on each side (the later high-pass's reach) within the data,
     before whole-channel flatline rejection, and carry these annotations
     through preprocessing. Save the eligible names, cutoff, and exact global
-    intervals in flatlines so later local repair uses the same dropout
-    decision.
+    intervals in flatlines so later local repair uses the same
+    dropout decision.
 
     Before changing raw or flatlines, raise if the dropouts cover the entire
     recording, or leave no complete window_length window (the detectors'
@@ -860,9 +856,9 @@ def mask_segment_by_voltage(
     re-referencing, include the former reference channel if it is not bad.
     reference_channel names the native reference explicitly, as
     bad_ch_by_flatline does: it must be entirely zero, and any other all-zero
-    channel is then an ordinary (dead) member of the pool.
-    These selected channels form both the exceedance count and the denominator
-    for channel_fraction_cutoff; bads, non-EEG channels, and the native zero
+    channel is then an ordinary (dead) member of the pool. These selected
+    channels form both the exceedance count and the denominator for
+    channel_fraction_cutoff; bads, non-EEG channels, and the native zero
     reference contribute to neither. With require_average=True, require
     re-referenced data with no entirely zero EEG channel. A channel exceeds the
     threshold in a window if any sample is strictly outside
@@ -1086,17 +1082,16 @@ def bad_ch_by_voltage(
     """Return {"voltage": names} for excessive voltage outside temporary masks.
 
     Flag if strictly more than occurrence_cutoff of a channel's scorable
-    samples exceed +/-voltage_threshold_uv. Unlike the windowed detectors,
-    this rule counts samples, not windows, by design: every sample beyond the
-    threshold matters. Scorable samples are retained
-    samples outside the channel's local flat intervals: with flatlines, flat
-    samples leave both the count and the denominator, since they would
-    otherwise pass as valid samples within range and dilute the fraction.
-    Exclude existing bads, the reference, non-EEG
-    channels, existing BAD annotations, and the temporary 0.1-second voltage
-    mask. Add detections to raw.info["bads"], preserving existing labels
-    without duplicates. Input data and annotations are unchanged. Accept the
-    native reference or re-referenced data: exclude the one entirely zero
+    samples exceed +/-voltage_threshold_uv. Unlike the windowed detectors, this
+    rule counts samples, not windows, by design: every sample beyond the
+    threshold matters. Scorable samples are retained samples outside the
+    channel's local flat intervals: with flatlines, flat samples leave both the
+    count and the denominator, since they would otherwise pass as valid samples
+    within range and dilute the fraction. Exclude existing bads, the reference,
+    non-EEG channels, existing BAD annotations, and the temporary 0.1-second
+    voltage mask. Add detections to raw.info["bads"], preserving existing
+    labels without duplicates. Input data and annotations are unchanged. Accept
+    the native reference or re-referenced data: exclude the one entirely zero
     non-bad EEG channel, the native reference, if present, and raise if there
     are several (mark the dead ones bad first with detect_flatline_inplace and
     bad_ch_by_flatline, naming the reference_channel).
@@ -1106,7 +1101,8 @@ def bad_ch_by_voltage(
     +/-500 microvolts. The bottom also shows 20-ms min/max envelopes for
     channels with any absolute value above the plotted samples' pooled 95th
     percentile, including masked samples. Keep this call's detections visible
-    and label them in the top legend. Shade temporary voltage masks in both panels.
+    and label them in the top legend. Shade temporary voltage masks
+    in both panels.
 
     With return_details=True, return (report, details): ch_names of the
     evaluated channels and exceed_fraction, each one's fraction of scorable
@@ -1173,7 +1169,8 @@ def plot_voltage_traces(
     original absolute sample values across those channels and all times, then
     show the same 20-ms min/max envelopes for channels with any value strictly
     above their pooled 95th percentile in the bottom panel, at its full
-    amplitude range. This plot selection is separate from bad-channel detection.
+    amplitude range. This plot selection is separate from
+    bad-channel detection.
 
     Keep channel colors consistent across panels. Highlight bad_names in the
     top legend and label all selected channels in the bottom legend. Draw
@@ -1418,8 +1415,8 @@ def _prep_hf_ratio(data, lowpass, *, return_mads=False):
     its low-pass from _lowpass_45_hz; like PREP's, the filter is low-pass only.
 
     Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
-    With return_mads=True, also return the HF and LF
-    MAD arrays, in input units.
+    With return_mads=True, also return the HF and LF MAD arrays,
+    in input units.
     """
     hf_mad = _mad(data - lowpass, axis=1)
     lf_mad = _mad(lowpass, axis=1)
@@ -1448,11 +1445,10 @@ def bad_ch_by_HFnoise(
     including the candidate. Only candidates below that median need HF/LF
     confirmation: compare their median HF and LF MADs in violating (F) versus
     non-violating (N) windows and require log(H_F / H_N) > max(0, -log(L_F /
-    L_N)). Numerical ties, within 1e-12 in log ratio, do not confirm the
-    flag. Floor MADs at machine
-    epsilon before taking log ratios. Keep candidates that violate in every
-    scorable (retained, non-flat) window, since no non-violating baseline is
-    available.
+    L_N)). Numerical ties, within 1e-12 in log ratio, do not confirm the flag.
+    Floor MADs at machine epsilon before taking log ratios. Keep candidates
+    that violate in every scorable (retained, non-flat) window, since no
+    non-violating baseline is available.
 
     As in PREP, the low-pass filters the whole record once; each voltage-mask
     and BAD_by_flatline span is widened on both sides by the filter's reach
@@ -1475,10 +1471,10 @@ def bad_ch_by_HFnoise(
     channels that do not pass the channel-level HF/LF confirmation.
 
     With flatlines, local-flat observations are missing, including from
-    cross-channel baselines, HF/LF confirmation, and
-    each channel's denominator. detect_flatline_inplace has already widened
-    the local intervals by the 0.3 Hz high-pass reach (5.5 s), beyond the
-    low-pass's, so they are not widened again here.
+    cross-channel baselines, HF/LF confirmation, and each channel's
+    denominator. detect_flatline_inplace has already widened the local
+    intervals by the 0.3 Hz high-pass reach (5.5 s), beyond the low-pass's, so
+    they are not widened again here.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -1569,8 +1565,8 @@ def bad_ch_by_HFnoise(
         hf_log_change = np.log(max(hf_flagged, eps) / max(hf_baseline, eps))
         lf_log_change = np.log(max(lf_flagged, eps) / max(lf_baseline, eps))
         required_increase = max(0.0, -lf_log_change)
-        # The absolute tolerance keeps ties from confirming when no LF decrease is
-        # required (required_increase = 0).
+        # The absolute tolerance keeps ties from confirming when no LF decrease
+        # is required (required_increase = 0).
         if hf_log_change > required_increase and not np.isclose(
             hf_log_change, required_increase, rtol=1e-12, atol=1e-12
         ):
@@ -1655,8 +1651,8 @@ def bad_ch_by_BBnoise(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        # Welch needs a row to define its frequency grid
-        # even when none are scorable.
+        # Welch needs a row to define its frequency grid even when
+        # none are scorable.
         psds, freqs = mne.time_frequency.psd_array_welch(
             data[valid] if valid.any() else np.zeros((1, window_samples)),
             sfreq=raw.info["sfreq"], fmin=0, fmax=45,
@@ -1739,8 +1735,8 @@ def bad_ch_by_pop(
     nearest eligible sensors (3D positions in raw.info), so shared artifacts do
     not count; and (3) is mostly complete within about 20 ms: the level change
     over 10-20 ms windows is at least sharpness_cutoff times the 10-60 ms one,
-    so slow drifts do not count. Confirmed jumps no more than
-    100 ms apart form one pop.
+    so slow drifts do not count. Confirmed jumps no more than 100 ms
+    apart form one pop.
 
     Flag channels with strictly more than rate_cutoff pops per minute of
     retained data. Accept the native reference or re-referenced data as in
@@ -1810,8 +1806,8 @@ def bad_ch_by_pop(
     )
 
     names = [raw.ch_names[i] for i in picks]
-    # Samples each channel does not score: unretained, or in its local flat
-    # intervals.
+    # Samples each channel does not score: unretained, or in its local
+    # flat intervals.
     unretained = ~retained
     excluded = {}
     for name in names:
@@ -1854,7 +1850,8 @@ def bad_ch_by_pop(
         )
         sharp_step = _level_change(target, jumps, gap, short)
         with np.errstate(divide="ignore", invalid="ignore"), warnings.catch_warnings():
-            # A candidate whose neighbours are all flat or masked has no median.
+            # A candidate whose neighbours are all flat or
+            # masked has no median.
             warnings.simplefilter("ignore", RuntimeWarning)
             neighbor_step = np.nanmedian(np.abs(step[1:]), axis=0)
             confirmed = (
@@ -1981,19 +1978,18 @@ def bad_ch_by_correlation(
     """Return {"correlation": names} for channels that frequently
     lose their shared signal.
 
-    PREP findNoisyChannels.m, Method 3, with signed r, 2-s windows, and
-    PREP's 0.4 / 1% cutoffs raised to 0.5 / 25%, the occurrence cutoff of the
-    other windowed detectors. In each
-    retained window, correlate (Pearson r) every evaluated channel with every
-    other one and score it by the quantile of its r with the others (numpy's
-    default linear method; the self-correlation is excluded). At 0.98 with
-    110-128 partners, the score lies between the channel's 3rd and 4th best
-    partner, so it drops only when the channel loses the signal it shares even
-    with its closest neighbours, e.g., from a broken contact. Unlike PREP's
-    |r|, r is signed, so anticorrelated channels do not count as partners. A
-    window violates when the score is strictly below correlation_cutoff; flag
-    channels violating in strictly more than occurrence_cutoff of their
-    scorable retained windows.
+    PREP findNoisyChannels.m, Method 3, with signed r, 2-s windows, and PREP's
+    0.4 / 1% cutoffs raised to 0.5 / 25%, the occurrence cutoff of the other
+    windowed detectors. In each retained window, correlate (Pearson r) every
+    evaluated channel with every other one and score it by the quantile of its
+    r with the others (numpy's default linear method; the self-correlation is
+    excluded). At 0.98 with 110-128 partners, the score lies between the
+    channel's 3rd and 4th best partner, so it drops only when the channel loses
+    the signal it shares even with its closest neighbours, e.g., from a broken
+    contact. Unlike PREP's |r|, r is signed, so anticorrelated channels do not
+    count as partners. A window violates when the score is strictly below
+    correlation_cutoff; flag channels violating in strictly more than
+    occurrence_cutoff of their scorable retained windows.
 
     Compute correlation scores for detection on a copy of the EEG data
     band-limited to 1-45 Hz by _band_limited_windows() (via _band_limit).
@@ -2220,8 +2216,8 @@ def bad_ch_by_RANSAC(
     persistently fail to predict.
 
     Compute RANSAC predictions and Pearson correlations for detection on a copy
-    of the EEG data band-limited to 1-45 Hz by
-    _band_limited_windows() (via _band_limit).
+    of the EEG data band-limited to 1-45 Hz by _band_limited_windows()
+    (via _band_limit).
 
     PREP findNoisyChannels.m, Method 4, and EEGLAB clean_channels, changed so
     that no channel predicts itself, the subset size is fixed, the median is
@@ -2233,17 +2229,17 @@ def bad_ch_by_RANSAC(
     for 129 channels. Every evaluated channel gets n_subsets subsets drawn
     uniformly from the other evaluated channels (_ransac_predictors): they
     never contain the channel itself, are reproducible from random_state, and
-    change little when a newly bad channel is replaced by the next eligible
-    one in its ordering. Map each subset to the channel with MNE's spherical
-    spline, take the per-sample median of the
-    n_subsets predicted traces, and correlate it with the channel in each
-    retained window (Pearson r). flatlines is the original
-    detect_flatline_inplace result, whose local intervals are already widened
-    beyond this band-limit's reach, so they are not widened again here. In
-    each window, omit its flat channels from all predictor subsets,
-    replacing them by the next eligible channels in the fixed orderings.
-    Prepare each observed eligibility configuration once, using shared cached
-    geometry and weights; prediction does not refit splines inside windows.
+    change little when a newly bad channel is replaced by the next eligible one
+    in its ordering. Map each subset to the channel with MNE's spherical
+    spline, take the per-sample median of the n_subsets predicted traces, and
+    correlate it with the channel in each retained window (Pearson r).
+    flatlines is the original detect_flatline_inplace result, whose local
+    intervals are already widened beyond this band-limit's reach, so they are
+    not widened again here. In each window, omit its flat channels from all
+    predictor subsets, replacing them by the next eligible channels in the
+    fixed orderings. Prepare each observed eligibility configuration once,
+    using shared cached geometry and weights; prediction does not refit splines
+    inside windows.
 
     method="threshold" flags a window when r is strictly below
     correlation_cutoff (0.5 by default). method="robust_z" pools r over all
@@ -2256,10 +2252,9 @@ def bad_ch_by_RANSAC(
     failure to predict. This is deliberate and differs from the other
     flat-aware detectors, which leave local-flat windows out of both counts;
     partly flat channels below bad_ch_by_flatline's cutoff can therefore still
-    be flagged here. Pool only
-    finite measured correlations for robust_z. Either way, flag channels
-    violating in strictly more than occurrence_cutoff (25% by default) of
-    retained windows.
+    be flagged here. Pool only finite measured correlations for robust_z.
+    Either way, flag channels violating in strictly more than occurrence_cutoff
+    (25% by default) of retained windows.
 
     Selection, band-limiting, masking, the re-reference requirement, and the
     error for constant channels follow bad_ch_by_correlation; also raise if a
@@ -2299,8 +2294,8 @@ def bad_ch_by_RANSAC(
         raise ValueError("n_subsets must be a positive integer.")
     if not np.isfinite(subset_fraction) or not 0 < subset_fraction <= 1:
         raise ValueError("subset_fraction must be greater than 0 and at most 1.")
-    # Filter a copy of the EEG data to 1-45 Hz for
-    # prediction and correlation scoring.
+    # Filter a copy of the EEG data to 1-45 Hz for prediction and
+    # correlation scoring.
     rejected, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff, _pass
     )
@@ -2626,8 +2621,8 @@ def pca_cleaning_inplace(
         )
 
     # Runs are separated by at least one uncleaned window, so their fades never
-    # overlap and each run can be cleaned from its own
-    # copy of the original data.
+    # overlap and each run can be cleaned from its own copy of
+    # the original data.
     edges = np.flatnonzero(np.diff(np.r_[False, cleaned, False])).reshape(-1, 2)
     for first, last in edges - [0, 1]:
         span_start = max(starts[first] - fade, 0)
@@ -2665,8 +2660,8 @@ def remove_pca_signal_inplace(raw, pca_details):
     Hz): filter first, then subtract. Subtracting after the same cutoff
     reproduces the cleaned data exactly; after a lower cutoff, the result is
     the cleaned data plus the recording's own band between the two cutoffs. For
-    higher cutoffs (e.g., 1 Hz for ICA), filter the cleaned
-    data instead of calling this.
+    higher cutoffs (e.g., 1 Hz for ICA), filter the cleaned data instead
+    of calling this.
 
     pca_details must come from pca_cleaning_inplace(..., return_removed=True)
     on data covering the same samples (first_samp, n_times, sfreq) and
@@ -2705,8 +2700,8 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     out just outside it. The bad channel's panel shades the same runs pink
     instead, since nothing was removed there. In the second figure, finite
     samples are drawn and gray shading with a legend marks NaN or infinite
-    samples, which can occur only in the bad channel. Times are
-    relative to the cropped Raw.
+    samples, which can occur only in the bad channel. Times are relative to
+    the cropped Raw.
     """
     sfreq = raw.info["sfreq"]
     names = pca_details["ch_names"]
@@ -2776,8 +2771,8 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
         missing = np.flatnonzero(
             np.diff(np.r_[False, ~np.isfinite(data), False])
         ).reshape(-1, 2)
-        # A 3-pt edge keeps runs far shorter than a pixel
-        # visible at full-recording scale.
+        # A 3-pt edge keeps runs far shorter than a pixel visible at
+        # full-recording scale.
         for i, (start, stop) in enumerate(missing / sfreq):
             ax.axvspan(start, stop, color="0.6", alpha=0.6, linewidth=3, zorder=0,
                        label="_nolegend_" if i else "NaN/inf samples (not drawn)")
@@ -2814,11 +2809,11 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     an interpolated Raw copy.
 
     Whole-channel bads are repaired throughout the record. Local flat channels
-    join them only in their intervals outside the global dropout intervals
-    that detect_flatline_inplace saved in flatlines["global_segments"].
+    join them only in their intervals outside the global dropout intervals that
+    detect_flatline_inplace saved in flatlines["global_segments"].
     raw.annotations is never read, so other BAD spans do not stop the local
-    repair. Every configuration reads its genuine donors from the original
-    recording.
+    repair. Every configuration reads its genuine donors from the
+    original recording.
     """
     # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
     sample_chunk = 8192
@@ -2888,26 +2883,25 @@ def robust_average_reference_inplace(
 
     Each pass takes the robust mean after spherical repair of existing EEG bads
     and the previous pass's flags, plus the local flat intervals
-    (detect_flatline_inplace's widened intervals). For each
-    configuration, repair their union using genuine, nonflat donors. Cached
-    weights combine repair and averaging into one projection without making
-    reconstructed channel traces. Subtract this mean from every EEG channel of
-    another copy, whose bad channels are not interpolated, and run
-    bad_ch_by_voltage (no plot), bad_ch_by_HFnoise, bad_ch_by_pop,
-    bad_ch_by_std, bad_ch_by_BBnoise, and bad_ch_by_correlation on it in that
-    order: the detectors that require average reference after the others,
-    with correlation last. RANSAC is not run. The correlation detector's
-    1-45 Hz band-limit is linear and filters each channel on its own, so it is
-    computed once for the native non-bad EEG channels and, in each pass, only
-    for the robust mean; their difference equals the band-limited referenced
-    copy up to rounding. Each pass starts from the existing bads, and
-    each detector also excludes the channels flagged before it in the same
-    pass. Stop when a pass flags exactly the channels its robust mean
-    interpolated. If a pass instead flags the set an earlier robust mean
-    interpolated (none for the first), the passes would cycle: warn, treat
-    every channel flagged within the cycle as bad, and recompute the robust
-    mean with them interpolated. Raise if neither has happened
-    within max_iterations passes.
+    (detect_flatline_inplace's widened intervals). For each configuration,
+    repair their union using genuine, nonflat donors. Cached weights combine
+    repair and averaging into one projection without making reconstructed
+    channel traces. Subtract this mean from every EEG channel of another copy,
+    whose bad channels are not interpolated, and run bad_ch_by_voltage (no
+    plot), bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise,
+    and bad_ch_by_correlation on it in that order: the detectors that require
+    average reference after the others, with correlation last. RANSAC is not
+    run. The correlation detector's 1-45 Hz band-limit is linear and filters
+    each channel on its own, so it is computed once for the native non-bad EEG
+    channels and, in each pass, only for the robust mean; their difference
+    equals the band-limited referenced copy up to rounding. Each pass starts
+    from the existing bads, and each detector also excludes the channels
+    flagged before it in the same pass. Stop when a pass flags exactly the
+    channels its robust mean interpolated. If a pass instead flags the set an
+    earlier robust mean interpolated (none for the first), the passes would
+    cycle: warn, treat every channel flagged within the cycle as bad, and
+    recompute the robust mean with them interpolated. Raise if neither has
+    happened within max_iterations passes.
 
     Then reconstruct whole-channel bads and local flat intervals in raw,
     using the same cached geometry/configurations, and subtract the last robust
@@ -2969,7 +2963,8 @@ def robust_average_reference_inplace(
     )
     flagged, used, reports, iterations = [], [], [], []
     for _ in range(max_iterations):
-        used.append(flagged)  # used[p]: channels interpolated for pass p + 1's mean
+        # used[p]: channels interpolated for pass p + 1's mean
+        used.append(flagged)
         reference = _robust_mean(raw, initial + flagged, flatlines, geometry)
         referenced = raw.copy()
         for i in eeg:
@@ -3002,8 +2997,8 @@ def robust_average_reference_inplace(
             (p for p, earlier in enumerate(used[:-1]) if set(earlier) == set(new)), None
         )
         if start is not None:
-            # The next pass would repeat pass start + 1, so
-            # used[start:] keeps recurring.
+            # The next pass would repeat pass start + 1, so used[start:]
+            # keeps recurring.
             cycle = used[start:]
             flagged = [
                 name for name in eeg_names if any(name in names for names in cycle)
@@ -3094,8 +3089,8 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
-    # %% Robust average reference: interpolate all bad channels, which info["bads"]
-    # no longer lists; bad_ch_report keeps them by criterion.
+    # %% Robust average reference: interpolate all bad channels, which
+    # info["bads"] no longer lists; bad_ch_report keeps them by criterion.
     robust_bad_ch_report = robust_average_reference_inplace(
         raw_bads, flatlines=flatlines
     )
