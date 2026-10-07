@@ -2958,8 +2958,9 @@ def robust_average_reference_inplace(
         # the remaining detectors require average reference
         partial(bad_ch_by_std, flatlines=flatlines),
         partial(bad_ch_by_BBnoise, flatlines=flatlines),
-        # cross-channel correlation last
+        # cross-channel detectors last
         partial(bad_ch_by_correlation, flatlines=flatlines),
+        # partial(bad_ch_by_RANSAC, flatlines=flatlines, _geometry=geometry),
     )
     flagged, used, reports, iterations = [], [], [], []
     for _ in range(max_iterations):
