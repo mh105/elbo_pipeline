@@ -65,6 +65,7 @@ signals from a copy high-passed at a lower cutoff
 robust_average_reference_inplace then iterates bad-channel detection under a
 robust average reference (the mean with bad channels and local flat intervals
 interpolated), interpolates them, and subtracts the final robust mean.
+RANSAC remains available separately and is not used in this iteration.
 """
 
 from collections import defaultdict
@@ -2203,7 +2204,7 @@ def bad_ch_by_RANSAC(
     raw,
     window_length=2.0,
     method="threshold",
-    correlation_cutoff=0.75,
+    correlation_cutoff=0.5,
     robust_z_cutoff=5.0,
     occurrence_cutoff=0.25,
     n_subsets=50,
@@ -2232,9 +2233,9 @@ def bad_ch_by_RANSAC(
     for 129 channels. Every evaluated channel gets n_subsets subsets drawn
     uniformly from the other evaluated channels (_ransac_predictors): they
     never contain the channel itself, are reproducible from random_state, and
-    change little across robust-reference passes, since a newly bad channel is
-    just replaced by the next eligible one in its ordering. Map each subset to
-    the channel with MNE's spherical spline, take the per-sample median of the
+    change little when a newly bad channel is replaced by the next eligible
+    one in its ordering. Map each subset to the channel with MNE's spherical
+    spline, take the per-sample median of the
     n_subsets predicted traces, and correlate it with the channel in each
     retained window (Pearson r). flatlines is the original
     detect_flatline_inplace result, whose local intervals are already widened
@@ -2245,7 +2246,7 @@ def bad_ch_by_RANSAC(
     geometry and weights; prediction does not refit splines inside windows.
 
     method="threshold" flags a window when r is strictly below
-    correlation_cutoff (PREP style). method="robust_z" pools r over all
+    correlation_cutoff (0.5 by default). method="robust_z" pools r over all
     evaluated channels and retained windows, computes z = (median - r) /
     (1.4826 * MAD), flooring a zero scale at machine epsilon, so that a low r
     gives a high z, and flags a window when z is strictly above
@@ -2257,7 +2258,8 @@ def bad_ch_by_RANSAC(
     partly flat channels below bad_ch_by_flatline's cutoff can therefore still
     be flagged here. Pool only
     finite measured correlations for robust_z. Either way, flag channels
-    violating in strictly more than occurrence_cutoff of retained windows.
+    violating in strictly more than occurrence_cutoff (25% by default) of
+    retained windows.
 
     Selection, band-limiting, masking, the re-reference requirement, and the
     error for constant channels follow bad_ch_by_correlation; also raise if a
@@ -2875,8 +2877,8 @@ def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=
 
 
 def robust_average_reference_inplace(
-    raw, reference_channel=None, max_iterations=10, *, ransac_method="threshold",
-    flatlines=None, return_details=False,
+    raw, reference_channel=None, max_iterations=10, *, flatlines=None,
+    return_details=False,
 ):
     """Robust-average-reference preloaded raw in place;
     return its bad-channel report.
@@ -2892,15 +2894,13 @@ def robust_average_reference_inplace(
     reconstructed channel traces. Subtract this mean from every EEG channel of
     another copy, whose bad channels are not interpolated, and run
     bad_ch_by_voltage (no plot), bad_ch_by_HFnoise, bad_ch_by_pop,
-    bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and
-    bad_ch_by_RANSAC (with method=ransac_method) on it in that order: the
-    detectors that require average reference after the others, and the
-    cross-channel detectors last, so that correlation's flags
-    are not RANSAC predictors. The cross-channel detectors' 1-45 Hz band-limit
-    is linear and filters each channel on its own, so it is computed once for
-    the native non-bad EEG channels and, in each pass, only for the robust
-    mean; their difference equals the band-limited referenced copy up to
-    rounding. Each pass starts from the existing bads, and
+    bad_ch_by_std, bad_ch_by_BBnoise, and bad_ch_by_correlation on it in that
+    order: the detectors that require average reference after the others,
+    with correlation last. RANSAC is not run. The correlation detector's
+    1-45 Hz band-limit is linear and filters each channel on its own, so it is
+    computed once for the native non-bad EEG channels and, in each pass, only
+    for the robust mean; their difference equals the band-limited referenced
+    copy up to rounding. Each pass starts from the existing bads, and
     each detector also excludes the channels flagged before it in the same
     pass. Stop when a pass flags exactly the channels its robust mean
     interpolated. If a pass instead flags the set an earlier robust mean
@@ -2938,8 +2938,6 @@ def robust_average_reference_inplace(
         raise ValueError("raw must be preloaded.")
     if not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer.")
-    if ransac_method not in ("threshold", "robust_z"):
-        raise ValueError('ransac_method must be "threshold" or "robust_z".')
     reference_channel = _reference_channel(raw, "native", reference_channel)
     _validate_flatlines(raw, flatlines)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
@@ -2963,14 +2961,11 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_voltage, plot=False, flatlines=flatlines),
         partial(bad_ch_by_HFnoise, flatlines=flatlines),
         partial(bad_ch_by_pop, flatlines=flatlines),
-        # the next four require average reference
+        # the remaining detectors require average reference
         partial(bad_ch_by_std, flatlines=flatlines),
         partial(bad_ch_by_BBnoise, flatlines=flatlines),
-        # cross-channel detectors last; RANSAC's predictors
-        # exclude correlation's flags
+        # cross-channel correlation last
         partial(bad_ch_by_correlation, flatlines=flatlines),
-        partial(bad_ch_by_RANSAC, method=ransac_method, flatlines=flatlines,
-                _geometry=geometry),
     )
     flagged, used, reports, iterations = [], [], [], []
     for _ in range(max_iterations):

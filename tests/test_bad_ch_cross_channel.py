@@ -185,7 +185,7 @@ class TestRANSAC(unittest.TestCase):
         pooled = threshold["r"][:, threshold["retained"]]
         scale = 1.4826 * np.median(np.abs(pooled - np.median(pooled)))
         np.testing.assert_allclose(robust["robust_z"], (np.median(pooled) - robust["r"]) / scale)
-        np.testing.assert_array_equal(threshold["violates"], threshold["r"] < 0.75)
+        np.testing.assert_array_equal(threshold["violates"], threshold["r"] < 0.5)
         np.testing.assert_array_equal(robust["violates"], robust["robust_z"] > 5)
 
     def test_details_store_input_band_limited_and_predicted_waveforms(self):

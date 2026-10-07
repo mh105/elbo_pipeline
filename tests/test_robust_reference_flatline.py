@@ -19,8 +19,7 @@ from test_robust_average_reference import NAMES, make_native_raw
 
 CRITERIA = {"bad_ch_by_voltage": ("voltage",), "bad_ch_by_HFnoise": ("HFnoise",),
             "bad_ch_by_pop": ("pop",), "bad_ch_by_std": ("std_high", "std_low"),
-            "bad_ch_by_BBnoise": ("BBnoise",), "bad_ch_by_correlation": ("correlation",),
-            "bad_ch_by_RANSAC": ("RANSAC",)}
+            "bad_ch_by_BBnoise": ("BBnoise",), "bad_ch_by_correlation": ("correlation",)}
 
 
 def native_with_flatlines(global_dropout=False):
@@ -57,11 +56,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
             self.assertEqual(detector.call_count, 1)
             kwargs = detector.call_args.kwargs
             self.assertIs(kwargs["flatlines"], flatlines)
-            if name == "bad_ch_by_RANSAC":
-                self.assertIn("_geometry", kwargs)
-                self.assertEqual(kwargs["_geometry"]["kernel"].dtype, np.dtype(np.float64))
-            else:
-                self.assertNotIn("_geometry", kwargs)
+            self.assertNotIn("_geometry", kwargs)
 
     def test_multiple_passes_reconstruct_joint_invalid_sets_and_preserve_dropouts(self):
         raw, flatlines = native_with_flatlines(global_dropout=True)

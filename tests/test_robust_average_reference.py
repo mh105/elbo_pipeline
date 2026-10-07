@@ -24,8 +24,8 @@ def make_native_raw(noisy=None, seconds=40, sfreq=250):
     """Smooth scalp fields plus sensor noise in the native Cz reference, plus an EOG channel.
 
     The fields give neighbouring channels the shared signal that bad_ch_by_correlation
-    and bad_ch_by_RANSAC expect. Each field averages to zero across channels and every
-    channel gets the same field power, so the average-referenced variance is uniform,
+    expects. Each field averages to zero across channels and every channel gets
+    the same field power, so the average-referenced variance is uniform,
     as with independent noise. The noisy channel gets ten times more independent noise.
     """
     rng = np.random.default_rng(11)
@@ -81,8 +81,7 @@ class TestRobustAverageReference(unittest.TestCase):
         reference = details["final_reference"]
 
         self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std_high": ["O1"],
-                                  "std_low": [], "BBnoise": [], "correlation": [],
-                                  "RANSAC": []})
+                                  "std_low": [], "BBnoise": [], "correlation": []})
         self.assertEqual(details["initial_bads"], ["T7"])
         self.assertEqual(set().union(*report.values()), {"O1"})
         self.assertEqual(raw.info["bads"], ["EOG"])
@@ -116,13 +115,12 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual([d["interpolated"] for d in iterations], [["T7"], ["T7", "O1"]])
         self.assertEqual([d["flagged"] for d in iterations], [["O1"], ["O1"]])
         for criterion in ("voltage", "HFnoise", "pop", "std_high", "std_low", "BBnoise",
-                          "correlation", "RANSAC"):
+                          "correlation"):
             self.assertIn(criterion, iterations[-1])
         # std flags O1, so the detectors that run after it in the pass no longer evaluate it.
         self.assertIn("O1", iterations[-1]["std_high"]["ch_names"])
-        for criterion in ("BBnoise", "correlation", "RANSAC"):
+        for criterion in ("BBnoise", "correlation"):
             self.assertNotIn("O1", iterations[-1][criterion]["ch_names"])
-        self.assertNotIn("O1", iterations[-1]["RANSAC"]["subsets"])
         voltage = iterations[-1]["voltage"]
         self.assertEqual(len(voltage["exceed_fraction"]), len(voltage["ch_names"]))
         self.assertTrue((voltage["exceed_fraction"] <= 0.25).all())
@@ -201,27 +199,24 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual(raw.info["bads"], [])
         np.testing.assert_array_equal(raw.get_data(), original)
 
-    def test_ransac_method_is_passed_to_every_pass(self):
-        methods = []
-
-        def recorder(raw, method, **kwargs):
-            methods.append(method)
-            return {"RANSAC": []}
-        with patch.object(step2, "bad_ch_by_RANSAC", recorder):
-            step2.robust_average_reference_inplace(make_native_raw(noisy="O1"),
-                                                   ransac_method="robust_z")
-        self.assertEqual(methods, ["robust_z", "robust_z"])
+    def test_ransac_is_not_run_in_any_pass(self):
+        with patch.object(step2, "bad_ch_by_RANSAC", side_effect=AssertionError(
+            "RANSAC must not run during robust average referencing."
+        )) as ransac:
+            report, details = step2.robust_average_reference_inplace(
+                make_native_raw(noisy="O1"), return_details=True,
+            )
+        ransac.assert_not_called()
+        self.assertEqual(len(details["iterations"]), 2)
+        self.assertNotIn("RANSAC", report)
+        for iteration in details["iterations"]:
+            self.assertNotIn("RANSAC", iteration)
 
     def test_input_requirements(self):
         for max_iterations in (0, 1.5):
             with self.subTest(max_iterations=max_iterations), self.assertRaises(ValueError):
                 step2.robust_average_reference_inplace(make_native_raw(),
                                                        max_iterations=max_iterations)
-        raw = make_native_raw()
-        original = raw.get_data().copy()
-        with self.assertRaisesRegex(ValueError, "ransac_method"):
-            step2.robust_average_reference_inplace(raw, ransac_method="cosine")
-        np.testing.assert_array_equal(raw.get_data(), original)
         raw = make_native_raw()
         raw._data[0, 5] = np.nan
         with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
