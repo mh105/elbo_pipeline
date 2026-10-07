@@ -17,10 +17,10 @@ from test_flatline_interpolation import flatlines_for, mne_reconstruction
 from test_robust_average_reference import NAMES, make_native_raw
 
 
-CRITERIA = {"bad_ch_by_voltage": "voltage", "bad_ch_by_HFnoise": "HFnoise",
-            "bad_ch_by_pop": "pop", "bad_ch_by_smallness": "smallness",
-            "bad_ch_by_std": "std", "bad_ch_by_BBnoise": "BBnoise",
-            "bad_ch_by_correlation": "correlation", "bad_ch_by_RANSAC": "RANSAC"}
+CRITERIA = {"bad_ch_by_voltage": ("voltage",), "bad_ch_by_HFnoise": ("HFnoise",),
+            "bad_ch_by_pop": ("pop",), "bad_ch_by_std": ("std_high", "std_low"),
+            "bad_ch_by_BBnoise": ("BBnoise",), "bad_ch_by_correlation": ("correlation",),
+            "bad_ch_by_RANSAC": ("RANSAC",)}
 
 
 def native_with_flatlines(global_dropout=False):
@@ -45,12 +45,14 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
         raw, flatlines = native_with_flatlines()
         with ExitStack() as stack:
             detectors = {name: stack.enter_context(patch.object(step2, name,
-                           return_value={criterion: []})) for name, criterion in CRITERIA.items()}
+                           return_value={criterion: [] for criterion in criteria}))
+                         for name, criteria in CRITERIA.items()}
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))
             report = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
-        self.assertEqual(report, {criterion: [] for criterion in CRITERIA.values()})
+        self.assertEqual(report, {criterion: [] for criteria in CRITERIA.values()
+                                  for criterion in criteria})
         for name, detector in detectors.items():
             self.assertEqual(detector.call_count, 1)
             kwargs = detector.call_args.kwargs
@@ -78,7 +80,8 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
 
         with ExitStack() as stack:
             detectors = {name: stack.enter_context(patch.object(step2, name,
-                           return_value=({criterion: []}, {}))) for name, criterion in CRITERIA.items()}
+                           return_value=({criterion: [] for criterion in criteria}, {})))
+                         for name, criteria in CRITERIA.items()}
             detectors["bad_ch_by_HFnoise"].side_effect = flag_f4
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))

@@ -16,8 +16,7 @@ import step2_bad_ch_time_detection as step2
 
 # bad_ch_by_RANSAC also requires average reference; its tests need sensor positions,
 # so they live in test_bad_ch_cross_channel.py.
-AVERAGE_ONLY = (step2.bad_ch_by_smallness, step2.bad_ch_by_std, step2.bad_ch_by_BBnoise,
-                step2.bad_ch_by_correlation)
+AVERAGE_ONLY = (step2.bad_ch_by_std, step2.bad_ch_by_BBnoise, step2.bad_ch_by_correlation)
 EITHER = (step2.bad_ch_by_voltage, step2.bad_ch_by_HFnoise)
 NATIVE_ONLY = (step2.bad_ch_by_nan, step2.bad_ch_by_flatline)
 
@@ -127,10 +126,13 @@ class TestReferenceRequirements(unittest.TestCase):
                     data = raw.get_data().copy()
                     annotations = raw.annotations.copy()
                     result = detector(raw)
-                    self.assertEqual(list(result), [criterion(detector)])
-                    self.assertEqual(raw.info["bads"], ["E0"] + result[criterion(detector)])
-                    self.assertNotIn("E0", result[criterion(detector)])
-                    self.assertNotIn("EOG", result[criterion(detector)])
+                    criteria = (["std_high", "std_low"] if detector is step2.bad_ch_by_std
+                                else [criterion(detector)])
+                    self.assertEqual(list(result), criteria)
+                    flagged = list(dict.fromkeys(sum(result.values(), [])))
+                    self.assertEqual(raw.info["bads"], ["E0"] + flagged)
+                    self.assertNotIn("E0", flagged)
+                    self.assertNotIn("EOG", flagged)
                     np.testing.assert_array_equal(raw.get_data(), data)
                     self.assertEqual(raw.annotations, annotations)
 

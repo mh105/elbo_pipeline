@@ -80,8 +80,8 @@ class TestRobustAverageReference(unittest.TestCase):
         report, details = step2.robust_average_reference_inplace(raw, return_details=True)
         reference = details["final_reference"]
 
-        self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],
-                                  "BBnoise": [], "smallness": [], "correlation": [],
+        self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std_high": ["O1"],
+                                  "std_low": [], "BBnoise": [], "correlation": [],
                                   "RANSAC": []})
         self.assertEqual(details["initial_bads"], ["T7"])
         self.assertEqual(set().union(*report.values()), {"O1"})
@@ -115,11 +115,11 @@ class TestRobustAverageReference(unittest.TestCase):
         iterations = details["iterations"]
         self.assertEqual([d["interpolated"] for d in iterations], [["T7"], ["T7", "O1"]])
         self.assertEqual([d["flagged"] for d in iterations], [["O1"], ["O1"]])
-        for criterion in ("voltage", "smallness", "HFnoise", "pop", "std", "BBnoise",
+        for criterion in ("voltage", "HFnoise", "pop", "std_high", "std_low", "BBnoise",
                           "correlation", "RANSAC"):
             self.assertIn(criterion, iterations[-1])
         # std flags O1, so the detectors that run after it in the pass no longer evaluate it.
-        self.assertIn("O1", iterations[-1]["std"]["ch_names"])
+        self.assertIn("O1", iterations[-1]["std_high"]["ch_names"])
         for criterion in ("BBnoise", "correlation", "RANSAC"):
             self.assertNotIn("O1", iterations[-1][criterion]["ch_names"])
         self.assertNotIn("O1", iterations[-1]["RANSAC"]["subsets"])
@@ -176,10 +176,10 @@ class TestRobustAverageReference(unittest.TestCase):
                 np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
 
     def test_cycle_report_merges_only_the_cycling_passes(self):
-        # Pass 1 (mean of []) flags F3 by std. Pass 2 (mean of [F3]) flags F3 and F4
-        # by HFnoise. Pass 3 (mean of [F3, F4]) flags F3 by HFnoise, the set pass 2's
-        # mean used, so passes 2 and 3 cycle. Pass 1's std label is outside the cycle.
-        std, _ = scheduled_detector([["F3"], [], []], criterion="std")
+        # Pass 1 (mean of []) flags F3 by std_high. Pass 2 (mean of [F3]) flags F3 and
+        # F4 by HFnoise. Pass 3 (mean of [F3, F4]) flags F3 by HFnoise, the set pass 2's
+        # mean used, so passes 2 and 3 cycle. Pass 1's std_high label is outside the cycle.
+        std, _ = scheduled_detector([["F3"], [], []], criterion="std_high")
         hf, calls = scheduled_detector([[], ["F3", "F4"], ["F3"]])
         with patch.object(step2, "bad_ch_by_std", std), patch.object(
             step2, "bad_ch_by_HFnoise", hf
@@ -187,7 +187,7 @@ class TestRobustAverageReference(unittest.TestCase):
             report = step2.robust_average_reference_inplace(make_native_raw())
         self.assertEqual(len(calls), 3)
         self.assertEqual(report["HFnoise"], ["F3", "F4"])
-        self.assertEqual(report["std"], [])
+        self.assertEqual(report["std_high"], [])
 
     def test_raises_without_changes_if_passes_neither_converge_nor_cycle(self):
         raw = make_native_raw()

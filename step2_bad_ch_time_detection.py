@@ -14,15 +14,17 @@ each side). Every later detector and robust_average_reference_inplace takes
 that dictionary.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
-duplicates and returns {criterion: [channel names]} for that call's detections.
-Signal data and input annotations are unchanged.
+duplicates and returns {criterion: [channel names]} for that call's detections;
+bad_ch_by_std returns two criteria, std_high and std_low. Signal data and
+input annotations are unchanged.
 
-The windowed detectors (bad_ch_by_flatline, bad_ch_by_smallness,
-bad_ch_by_std, bad_ch_by_HFnoise, bad_ch_by_BBnoise, bad_ch_by_correlation)
-flag a channel violating in more than 25% of its scorable 2-s windows: the
-windows clear of BAD annotations (BAD_by_flatline included) and of the
-temporary BAD_voltage_mask, without the channel's local flat intervals. Three
-rules differ by design. bad_ch_by_RANSAC counts local flat windows as
+The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
+bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more
+than 25% of its scorable 2-s windows: the windows clear of BAD annotations
+(BAD_by_flatline included) and of the temporary BAD_voltage_mask, without the
+channel's local flat intervals (and, for std_low, without the windows where
+the channel violates std_high). Three rules differ by design.
+bad_ch_by_RANSAC counts local flat windows as
 failures to predict within the shared denominator; bad_ch_by_voltage counts
 scorable samples, not windows, since every sample beyond its threshold
 matters; and bad_ch_by_pop counts pops per scorable minute.
@@ -44,10 +46,10 @@ exactly zero, or a channel named with reference_channel, which must be
 entirely zero (other all-zero channels are then ordinary, dead channels).
 bad_ch_by_nan, detect_flatline_inplace, bad_ch_by_flatline,
 pca_cleaning_inplace, and robust_average_reference_inplace require it;
-bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation,
-and bad_ch_by_RANSAC require re-referenced data, with no entirely zero EEG
-channel, bad or not; bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop
-accept either and exclude the native reference if present.
+bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
+require re-referenced data, with no entirely zero EEG channel, bad or not;
+bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
+exclude the native reference if present.
 mask_segment_by_voltage accepts either by default, requires re-referenced
 data with require_average=True, and takes a named native reference.
 
@@ -868,11 +870,11 @@ def mask_segment_by_voltage(
     exceedances are not simultaneous. Merge adjacent masked windows; include
     the final partial window with its actual duration.
 
-    The nine detectors that use this mask compute the same spans without
+    The eight detectors that use this mask compute the same spans without
     copying or annotating their input (_temporary_voltage_mask):
     bad_ch_by_flatline (with the named native reference), bad_ch_by_voltage,
-    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_smallness, bad_ch_by_std,
-    bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC.
+    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise,
+    bad_ch_by_correlation, and bad_ch_by_RANSAC.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -952,7 +954,7 @@ def _mask_inputs(raw):
     each one's finiteness and 0.1-s exceedances of +/-500 µV, the defaults of
     mask_segment_by_voltage. Only bad labels change between the detectors of
     a robust-reference pass, so the pass computes this once and passes it to
-    all eight; a detector called on its own computes it from its input.
+    all seven; a detector called on its own computes it from its input.
     """
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     window_samples = int(round(0.1 * raw.info["sfreq"]))
@@ -1040,12 +1042,6 @@ def _unmasked_windows(
         yield (start, data) if return_start else data
 
 
-def _iqr(values, axis=0):
-    """IQR using MATLAB's midpoint (Hazen) quantile convention."""
-    q25, q75 = np.percentile(values, [25, 75], axis=axis, method="hazen")
-    return q75 - q25
-
-
 def _mad(values, axis=0):
     """Unscaled median absolute deviation, as in MATLAB mad(values, 1)."""
     return np.median(
@@ -1053,21 +1049,13 @@ def _mad(values, axis=0):
     )
 
 
-def _robust_channel_z(values, use_iqr=False):
-    """One cross-channel baseline per metric; floor a zero
-    scale at machine epsilon.
+def _robust_channel_z(values, scale_floor=np.finfo(float).eps):
+    """(values - median) / (1.4826 * MAD) across channels, one baseline per
+    metric; floor a zero scale at scale_floor (machine epsilon by default).
     """
     center = np.median(values, axis=0)
-    scale = 0.7413 * _iqr(values) if use_iqr else 1.4826 * _mad(values)
-    return (values - center) / np.maximum(scale, np.finfo(float).eps)
-
-
-def _robust_z_value(values, z, scale_floor=np.finfo(float).eps):
-    """Value at robust z across channels, with _robust_channel_z's MAD scale.
-
-    A zero scale is floored at scale_floor (machine epsilon by default).
-    """
-    return np.median(values) + z * max(1.4826 * _mad(values), scale_floor)
+    scale = 1.4826 * _mad(values)
+    return (values - center) / np.maximum(scale, scale_floor)
 
 
 def _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff):
@@ -1258,116 +1246,6 @@ def plot_voltage_traces(
     return fig
 
 
-def bad_ch_by_smallness(
-    raw,
-    window_length=2.0,
-    robust_z_cutoff=5.0,
-    occurrence_cutoff=0.25,
-    *,
-    flatlines=None,
-    return_details=False,
-    _pass=None,
-):
-    """Return {"smallness": names} for persistently low-variance EEG channels.
-
-    Require re-referenced data: raise if any EEG channel, bad or not, is
-    entirely zero, as the native reference is. Exclude existing bads and
-    non-EEG channels. Use complete non-overlapping windows, starting at the
-    first sample of this Raw; window_length is in seconds, rounded to samples.
-    Ignore the trailing partial window and windows overlapping BAD annotations
-    or a temporary voltage mask. Known local flat channels are excluded from
-    each window's calculation and baseline, and their occurrence denominator.
-
-    In each window, compute each channel's variance (ddof=0) and work with its
-    natural log: variance is strongly right-skewed across channels, so a
-    median - z * MAD cutoff on the variance itself is often below zero and
-    cannot flag any channel. Compute each log variance's robust z across
-    channels, (log variance - median) / (1.4826 * MAD), flooring a zero scale
-    at 1e-6, far below any real spread, so that rounding cannot split
-    identical variances. Remove values with robust z strictly above
-    robust_z_cutoff, then recompute the median and MAD on the retained log
-    variances. Flag retained values with new robust z strictly below
-    -robust_z_cutoff. Upper-tail removal is a single pass, keeps
-    strong-artifact channels from inflating the MAD, and does not itself flag a
-    channel. Return channels flagged in strictly more than occurrence_cutoff of
-    their scorable retained windows, and add them to raw.info["bads"].
-    Preserve existing labels without duplicates; data/annotations are
-    unchanged.
-
-    With return_details=True, return (report, details). Common fields follow
-    bad_ch_by_HFnoise: ch_names, crop-relative start_s/stop_s, retained,
-    violates, and flagged_data_uv. Excluded observations contain NaN.
-    variance_uv2 and baseline_retained (0/1) have shape (channels, windows);
-    upper_cutoff_uv2 and lower_cutoff_uv2 have one value per window: the
-    log-variance cutoffs converted back to variances. Variances and cutoffs
-    are in squared microvolts.
-    """
-    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
-        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    shared = _mask_inputs(raw) if _pass is None else _pass
-    spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
-    picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
-    )
-    rejected = _rejected_samples(raw, spans)
-    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
-    if return_details:
-        details = _init_window_details(
-            raw, picks, window_samples, n_windows, ("variance_uv2", "baseline_retained")
-        )
-        for metric in ("upper_cutoff_uv2", "lower_cutoff_uv2"):
-            details[metric] = np.full(n_windows, np.nan)
-    for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, rejected, return_start=True
-    ):
-        valid = ~flat[:, start // window_samples]
-        if not np.isfinite(data[valid]).all():
-            raise ValueError(
-                "Nonfinite data in eligible channels; run bad_ch_by_nan first."
-            )
-        variances = np.full(len(picks), np.nan)
-        variances[valid] = data[valid].var(axis=1)
-        log_variances = np.log(np.maximum(variances, np.finfo(float).tiny))
-        # Cutoffs come from log variances; comparing variances with their
-        # exponentials keeps the details' cutoffs exact.
-        high_cutoff = (
-            np.exp(_robust_z_value(log_variances[valid], robust_z_cutoff, 1e-6))
-            if valid.any()
-            else np.nan
-        )
-        keep = valid & (variances <= high_cutoff)
-        low_cutoff = (
-            np.exp(_robust_z_value(log_variances[keep], -robust_z_cutoff, 1e-6))
-            if keep.any()
-            else np.nan
-        )
-        violates = keep & (variances < low_cutoff)
-        counts += violates
-        scorable += valid
-        n_retained += 1
-        if return_details:
-            window = _record_window_details(
-                details, start, window_samples, data, violates
-            )
-            details["violates"][~valid, window] = np.nan
-            details["variance_uv2"][:, window] = variances * 1e12
-            details["baseline_retained"][:, window] = keep
-            details["baseline_retained"][~valid, window] = np.nan
-            details["upper_cutoff_uv2"][window] = high_cutoff * 1e12
-            details["lower_cutoff_uv2"][window] = low_cutoff * 1e12
-
-    _require_retained_windows(n_retained)
-    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
-    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    report = {"smallness": bad_names}
-    if return_details:
-        return report, _finish_window_details(details, window_samples)
-    return report
-
-
 def bad_ch_by_std(
     raw,
     window_length=2.0,
@@ -1378,28 +1256,42 @@ def bad_ch_by_std(
     return_details=False,
     _pass=None,
 ):
-    """Return {"std": names} for persistently high robust standard deviation.
+    """Return {"std_high": names, "std_low": names} for EEG channels whose
+    robust standard deviation is persistently high or low across channels.
 
-    PREP findNoisyChannels.m, Method 1: d = 0.7413 * IQR over time; z = (d -
-    median(d)) / (0.7413 * IQR(d)) across channels. Use z strictly above
-    robust_z_cutoff, never abs(z). Compute a fresh baseline once per complete
-    window; exclude existing bads and non-EEG channels. Require re-referenced
-    data as in bad_ch_by_smallness.
+    Require re-referenced data: raise if any EEG channel, bad or not, is
+    entirely zero, as the native reference is. Exclude existing bads and
+    non-EEG channels. Use complete non-overlapping windows, starting at the
+    first sample of this Raw; window_length is in seconds, rounded to samples.
+    Ignore the trailing partial window and windows overlapping BAD annotations
+    or the temporary 0.1-second voltage mask. With flatlines, omit each
+    channel's overlapping local-flat windows from its metrics, from the
+    cross-channel baselines, and from its occurrence denominators.
 
-    Apply the temporary 0.1-second voltage mask. Omit every window
-    overlapping any BAD annotation and the trailing partial window. Flag
-    channels offending in strictly more than occurrence_cutoff of retained
-    windows. Add detections to raw.info["bads"], preserving existing labels
-    without duplicates. Input data and annotations are unchanged.
+    In each window, compute each channel's robust standard deviation, d =
+    1.4826 * MAD over time, and its robust z across channels, (d - median) /
+    (1.4826 * MAD); the channel violates std_high where z > robust_z_cutoff.
+    The channels that do not violate std_high form the window's low
+    baseline. d is right-skewed across channels, so a median - z * MAD cutoff
+    on d itself is usually below zero and cannot flag any channel; std_low
+    therefore uses the robust z of log(d) across the low baseline, flooring a
+    zero scale at 1e-6, far below any real spread, so that rounding cannot
+    split identical values, and the channel violates std_low where z <
+    -robust_z_cutoff. Return, for each criterion, the channels violating in
+    strictly more than occurrence_cutoff of their scorable windows; a
+    channel's scorable windows for std_low leave out those where it violates
+    std_high. A channel can be flagged by both. Add the detections to
+    raw.info["bads"], preserving existing labels without duplicates. Input
+    data and annotations are unchanged.
 
-    With flatlines, omit each channel's overlapping local-flat windows from its
-    metrics and occurrence denominator and from cross-channel baselines.
-
-    With return_details=True, return (report, details), with the common fields
-    described in bad_ch_by_HFnoise. robust_std_uv, robust_z, and violates have
-    shape (channels, complete windows); masked windows contain NaN. The robust
-    standard deviation is reported in microvolts. flagged_data_uv stores the
-    original violating window waveforms in chronological order.
+    With return_details=True, return (report, details), where details holds
+    one dictionary per criterion with the common fields described in
+    bad_ch_by_HFnoise, plus robust_std_uv (d in microvolts) and robust_z (the
+    robust z of d for std_high and of log(d) for std_low), each of shape
+    (channels, complete windows). Observations a criterion does not score
+    contain NaN: masked and local-flat windows, and for std_low the channel's
+    std_high windows. flagged_data_uv stores each criterion's original
+    violating window waveforms in chronological order.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -1410,38 +1302,62 @@ def bad_ch_by_std(
     )
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
+    criteria = ("std_high", "std_low")
+    counts = {criterion: np.zeros(len(picks), dtype=int) for criterion in criteria}
+    scorable = {criterion: np.zeros(len(picks), dtype=int) for criterion in criteria}
     n_retained = 0
     if return_details:
-        details = _init_window_details(
-            raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
-        )
+        details = {
+            criterion: _init_window_details(
+                raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
+            )
+            for criterion in criteria
+        }
     for start, data in _unmasked_windows(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        deviation, z = np.full((2, len(picks)), np.nan)
+        deviation, high_z, low_z = np.full((3, len(picks)), np.nan)
         if valid.any():
-            deviation[valid] = 0.7413 * _iqr(data[valid], axis=1)
-            z[valid] = _robust_channel_z(deviation[valid], use_iqr=True)
-        violates = z > robust_z_cutoff
-        counts += violates
-        scorable += valid
-        n_retained += 1
-        if return_details:
-            window = _record_window_details(
-                details, start, window_samples, data, violates
+            deviation[valid] = 1.4826 * _mad(data[valid], axis=1)
+            high_z[valid] = _robust_channel_z(deviation[valid])
+        high = high_z > robust_z_cutoff
+        baseline = valid & ~high
+        if baseline.any():
+            low_z[baseline] = _robust_channel_z(
+                np.log(np.maximum(deviation[baseline], np.finfo(float).tiny)),
+                scale_floor=1e-6,
             )
-            details["violates"][~valid, window] = np.nan
-            details["robust_std_uv"][:, window] = deviation * 1e6
-            details["robust_z"][:, window] = z
+        low = low_z < -robust_z_cutoff
+        n_retained += 1
+        for criterion, violates, scored, z in (
+            ("std_high", high, valid, high_z), ("std_low", low, baseline, low_z),
+        ):
+            counts[criterion] += violates
+            scorable[criterion] += scored
+            if return_details:
+                tail = details[criterion]
+                window = _record_window_details(
+                    tail, start, window_samples, data, violates
+                )
+                tail["violates"][~scored, window] = np.nan
+                tail["robust_std_uv"][:, window] = deviation * 1e6
+                tail["robust_z"][:, window] = z
     _require_retained_windows(n_retained)
-    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
-    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
-    report = {"std": bad_names}
+    report = {
+        criterion: _noisy_window_bads(
+            raw, picks, counts[criterion], scorable[criterion], occurrence_cutoff
+        )
+        for criterion in criteria
+    }
+    raw.info["bads"] = list(dict.fromkeys(
+        raw.info["bads"] + report["std_high"] + report["std_low"]
+    ))
     if return_details:
-        return report, _finish_window_details(details, window_samples)
+        return report, {
+            criterion: _finish_window_details(tail, window_samples)
+            for criterion, tail in details.items()
+        }
     return report
 
 
@@ -1689,7 +1605,7 @@ def bad_ch_by_BBnoise(
     for each band. Flag every channel with z > robust_z_cutoff in at least
     min_bad_bands, in a single pass with no iterative removal.
 
-    Require re-referenced data as in bad_ch_by_smallness. Selection, temporary
+    Require re-referenced data as in bad_ch_by_std. Selection, temporary
     masking, and occurrence denominator follow bad_ch_by_std. Add detections to
     raw.info["bads"], preserving existing labels without duplicates. Input data
     and annotations are unchanged.
@@ -2080,7 +1996,7 @@ def bad_ch_by_correlation(
 
     Compute correlation scores for detection on a copy of the EEG data
     band-limited to 1-45 Hz by _band_limited_windows() (via _band_limit).
-    Require re-referenced data as in bad_ch_by_smallness, and sfreq > 100 Hz.
+    Require re-referenced data as in bad_ch_by_std, and sfreq > 100 Hz.
     Exclude existing bads and non-EEG channels. Compute the temporary voltage
     mask on the input, as in bad_ch_by_std, then widen each masked span on both
     sides by the filters' reach, since filtering spreads masked artifacts into
@@ -2976,10 +2892,10 @@ def robust_average_reference_inplace(
     reconstructed channel traces. Subtract this mean from every EEG channel of
     another copy, whose bad channels are not interpolated, and run
     bad_ch_by_voltage (no plot), bad_ch_by_HFnoise, bad_ch_by_pop,
-    bad_ch_by_smallness, bad_ch_by_std, bad_ch_by_BBnoise,
-    bad_ch_by_correlation, and bad_ch_by_RANSAC (with method=ransac_method) on
-    it in that order: the detectors that require average reference after the
-    others, and the cross-channel detectors last, so that correlation's flags
+    bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and
+    bad_ch_by_RANSAC (with method=ransac_method) on it in that order: the
+    detectors that require average reference after the others, and the
+    cross-channel detectors last, so that correlation's flags
     are not RANSAC predictors. The cross-channel detectors' 1-45 Hz band-limit
     is linear and filters each channel on its own, so it is computed once for
     the native non-bad EEG channels and, in each pass, only for the robust
@@ -3047,8 +2963,7 @@ def robust_average_reference_inplace(
         partial(bad_ch_by_voltage, plot=False, flatlines=flatlines),
         partial(bad_ch_by_HFnoise, flatlines=flatlines),
         partial(bad_ch_by_pop, flatlines=flatlines),
-        # the next five require average reference
-        partial(bad_ch_by_smallness, flatlines=flatlines),
+        # the next four require average reference
         partial(bad_ch_by_std, flatlines=flatlines),
         partial(bad_ch_by_BBnoise, flatlines=flatlines),
         # cross-channel detectors last; RANSAC's predictors
@@ -3076,7 +2991,9 @@ def robust_average_reference_inplace(
             result = detector(referenced, return_details=return_details, _pass=shared)
             if return_details:
                 result, detector_details = result
-                pass_details[next(iter(result))] = detector_details
+                # bad_ch_by_std nests its two criteria's details by criterion.
+                pass_details.update(detector_details if len(result) > 1
+                                    else {next(iter(result)): detector_details})
             robust_bad_ch_report.update(result)
         new = [name for name in eeg_names
                if name in referenced.info["bads"] and name not in initial]

@@ -81,6 +81,17 @@ WINDOW_DETECTORS = (
 )
 
 
+def expected_report(detector, flagged):
+    """flagged is std_high for std, whose std_low always has std_raw's 0.01x E0/M0."""
+    if detector is step2.bad_ch_by_std:
+        return {"std_high": flagged, "std_low": ["E0", "M0"]}
+    return {detector.__name__.removeprefix("bad_ch_by_"): flagged}
+
+
+def expected_bads(detector, flagged):
+    return [name for names in expected_report(detector, flagged).values() for name in names]
+
+
 class TestVoltageMask(unittest.TestCase):
     def test_strict_thresholds_merge_partial_tail_and_channel_exclusions(self):
         data = np.ones((6, 45)) * 1e-6
@@ -452,30 +463,34 @@ class TestRobustMetrics(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(), original)
         self.assertEqual(raw.annotations, annotations)
 
-    def test_matlab_iqr_and_distinct_cross_channel_scales(self):
-        self.assertEqual(step2._iqr(np.arange(1, 9)), 4)
+    def test_robust_channel_z_uses_mad_and_floors_a_zero_scale(self):
         values = np.array([0, 1, 2, 3, 7, 8])
-        np.testing.assert_allclose(
-            step2._robust_channel_z(values, use_iqr=True), (values - 2.5) / (0.7413 * 6)
-        )
         np.testing.assert_allclose(
             step2._robust_channel_z(values), (values - 2.5) / (1.4826 * 2)
         )
         np.testing.assert_array_equal(step2._robust_channel_z(np.ones(8)), np.zeros(8))
-        np.testing.assert_array_equal(
-            step2._robust_channel_z(np.ones(8), use_iqr=True), np.zeros(8)
-        )
+        values = np.array([0, 0, 0, 0, 0, 1e-7])  # Zero MAD.
+        np.testing.assert_allclose(step2._robust_channel_z(values, scale_floor=1e-6),
+                                   values / 1e-6)
 
-    def test_std_and_hf_use_strict_positive_z_threshold(self):
-        for detector, factory, _ in WINDOW_DETECTORS[:2]:
-            with self.subTest(detector=detector.__name__):
-                raw = factory()
-                z = np.zeros(18 if detector is step2.bad_ch_by_std else 9)
-                z[:3] = [-10, 5, 5.001]
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
-                with patch.object(step2, "_robust_channel_z", return_value=z):
-                    self.assertEqual(detector(raw), {criterion: ["E2"]})
-                self.assertEqual(raw.info["bads"], ["E2"])
+    def test_hf_uses_strict_positive_z_threshold(self):
+        raw = hf_raw()
+        z = np.zeros(9)
+        z[:3] = [-10, 5, 5.001]
+        with patch.object(step2, "_robust_channel_z", return_value=z):
+            self.assertEqual(step2.bad_ch_by_HFnoise(raw), {"HFnoise": ["E2"]})
+        self.assertEqual(raw.info["bads"], ["E2"])
+
+    def test_std_tails_use_strict_z_thresholds(self):
+        raw = std_raw()
+        high_z = np.zeros(18)
+        high_z[:3] = [-10, 5, 5.001]  # Only E2 is high; a very low z is not.
+        low_z = np.zeros(17)  # The low baseline leaves out E2.
+        low_z[:3] = [-5.001, -5, 10]  # E0 is low; E1, at -5, and E3 are not.
+        with patch.object(step2, "_robust_channel_z",
+                          side_effect=lambda values, **kwargs: high_z if len(values) == 18 else low_z):
+            self.assertEqual(step2.bad_ch_by_std(raw), {"std_high": ["E2"], "std_low": ["E0"]})
+        self.assertEqual(raw.info["bads"], ["E2", "E0"])
 
     def test_std_flags_only_by_occurrence_above_its_z_cutoff(self):
         raw = std_raw(n_bad=0)
@@ -483,8 +498,8 @@ class TestRobustMetrics(unittest.TestCase):
         z[3:5] = [2.5, 4.999]  # Moderately high in every window, but never above 5.
         with patch.object(step2, "_robust_channel_z", return_value=z):
             report, details = step2.bad_ch_by_std(raw, return_details=True)
-        self.assertEqual(report, {"std": []})
-        self.assertNotIn("median_robust_z", details)
+        self.assertEqual(report, {"std_high": [], "std_low": []})
+        self.assertNotIn("median_robust_z", details["std_high"])
         with self.assertRaises(TypeError):
             step2.bad_ch_by_std(std_raw(), median_z_cutoff=2.0)
 
@@ -534,11 +549,15 @@ class TestWindowedNoiseDetection(unittest.TestCase):
         report.update(step2.bad_ch_by_nan(raw))  # Needs the native reference, Cz.
         raw.set_eeg_reference("average", projection=False, verbose=False)
         report.update(step2.bad_ch_by_std(raw))
-        self.assertEqual(report, {"nan": ["E1"], "std": ["E8", "M8"]})
-        self.assertEqual(raw.info["bads"], ["E1", "E8", "M8"])
+        # The mirrored pairs cancel in the average, so Cz keeps only a small
+        # share of E1 and is low, like E0/M0.
+        self.assertEqual(report, {"nan": ["E1"], "std_high": ["E8", "M8"],
+                                  "std_low": ["E0", "M0", "Cz"]})
+        bads = ["E1", "E8", "M8", "E0", "M0", "Cz"]
+        self.assertEqual(raw.info["bads"], bads)
         # Report lists are independent of the accumulated labels on Raw.
-        report["std"].append("E2")
-        self.assertEqual(raw.info["bads"], ["E1", "E8", "M8"])
+        report["std_high"].append("E2")
+        self.assertEqual(raw.info["bads"], bads)
 
     def test_actual_metrics_strict_occurrence_and_multiple_bb_outliers(self):
         for detector, factory, expected in WINDOW_DETECTORS:
@@ -546,9 +565,9 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 with self.subTest(detector=detector.__name__, n_bad=n_bad):
                     raw = factory(n_bad)
                     original = raw.get_data().copy()
-                    criterion = detector.__name__.removeprefix("bad_ch_by_")
-                    self.assertEqual(detector(raw), {criterion: expected if n_bad == 2 else []})
-                    self.assertEqual(raw.info["bads"], expected if n_bad == 2 else [])
+                    flagged = expected if n_bad == 2 else []
+                    self.assertEqual(detector(raw), expected_report(detector, flagged))
+                    self.assertEqual(raw.info["bads"], expected_bads(detector, flagged))
                     np.testing.assert_array_equal(raw.get_data(), original)
                     self.assertEqual(len(raw.annotations), 0)
 
@@ -567,10 +586,9 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 raw.set_annotations(mne.Annotations([7], [0], ["event"]))
                 original = raw.get_data().copy()
                 annotations = raw.annotations.copy()
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
                 # One bad window / three retained, not one / four.
-                self.assertEqual(detector(raw), {criterion: expected})
-                self.assertEqual(raw.info["bads"], expected)
+                self.assertEqual(detector(raw), expected_report(detector, expected))
+                self.assertEqual(raw.info["bads"], expected_bads(detector, expected))
                 np.testing.assert_array_equal(raw.get_data(), original)
                 self.assertEqual(raw.annotations, annotations)
 
@@ -580,9 +598,8 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 raw = factory(n_bad=1)
                 raw.set_annotations(mne.Annotations([0.5], [0.01], ["BAD_previous"]))
                 annotations = raw.annotations.copy()
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
-                self.assertEqual(detector(raw), {criterion: []})
-                self.assertEqual(raw.info["bads"], [])
+                self.assertEqual(detector(raw), expected_report(detector, []))
+                self.assertEqual(raw.info["bads"], expected_bads(detector, []))
                 self.assertEqual(raw.annotations, annotations)
 
     def test_custom_window_and_occurrence_cutoff(self):
@@ -590,13 +607,13 @@ class TestWindowedNoiseDetection(unittest.TestCase):
             for cutoff in (0.25, 0.5):
                 with self.subTest(detector=detector.__name__, cutoff=cutoff):
                     raw = factory(window_length=1)
-                    criterion = detector.__name__.removeprefix("bad_ch_by_")
+                    flagged = expected if cutoff == 0.25 else []
                     # Two of four windows are bad.
                     self.assertEqual(
                         detector(raw, window_length=1, occurrence_cutoff=cutoff),
-                        {criterion: expected if cutoff == 0.25 else []},
+                        expected_report(detector, flagged),
                     )
-                    self.assertEqual(raw.info["bads"], expected if cutoff == 0.25 else [])
+                    self.assertEqual(raw.info["bads"], expected_bads(detector, flagged))
 
     def test_existing_bads_and_non_eeg_excluded_and_labels_preserved(self):
         for detector, factory, expected in WINDOW_DETECTORS:
@@ -608,9 +625,8 @@ class TestWindowedNoiseDetection(unittest.TestCase):
                 raw._data[2] = np.inf
                 if detector is not step2.bad_ch_by_HFnoise:
                     raw.set_eeg_reference("average", projection=False, verbose=False)
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
-                self.assertEqual(detector(raw), {criterion: expected})
-                self.assertEqual(raw.info["bads"], ["E1"] + expected)
+                self.assertEqual(detector(raw), expected_report(detector, expected))
+                self.assertEqual(raw.info["bads"], ["E1"] + expected_bads(detector, expected))
                 self.assertEqual(len(raw.annotations), 0)
 
     def test_bb_band_requirement_is_configurable(self):

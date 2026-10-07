@@ -16,7 +16,7 @@ from step2_bad_ch_time_detection import (
     _reference_channel,
     bad_ch_by_flatline,
     bad_ch_by_nan,
-    bad_ch_by_smallness,
+    bad_ch_by_std,
     detect_flatline_inplace,
 )
 
@@ -112,8 +112,10 @@ class TestNativeReferenceChannel(unittest.TestCase):
                 _reference_channel(raw, "native", name)
 
 
-class TestBadChBySmallness(unittest.TestCase):
-    def test_upper_outlier_removal_and_strict_occurrence_cutoff(self):
+class TestBadChByStdLowTail(unittest.TestCase):
+    """make_raw's square waves have robust SD 1.4826 * sqrt(variance)."""
+
+    def test_high_channels_leave_low_baseline_and_strict_occurrence_cutoff(self):
         for low_windows, expected in ((1, []), (2, ["E0", "M0"])):
             with self.subTest(low_windows=low_windows):
                 variances = np.ones((4, 9))
@@ -121,12 +123,13 @@ class TestBadChBySmallness(unittest.TestCase):
                 variances[:, -1] = 100
                 raw = make_raw(variances, average=True)
                 original = raw.get_data().copy()
-                self.assertEqual(bad_ch_by_smallness(raw), {"smallness": expected})
-                self.assertEqual(raw.info["bads"], expected)
+                self.assertEqual(bad_ch_by_std(raw),
+                                 {"std_high": ["E8", "M8"], "std_low": expected})
+                self.assertEqual(raw.info["bads"], ["E8", "M8"] + expected)
                 np.testing.assert_array_equal(raw.get_data(), original)
 
     def test_custom_parameters(self):
-        # E0 has a log-variance robust z of about -2.7 in the first two windows.
+        # E0's log robust SD has a robust z of about -2.7 in the first two windows.
         variances = np.tile([1.0, 0.9, 1.1, 0.95, 1.05, 1.0, 0.85, 1.15, 100], (4, 1))
         variances[:2, 0] = 0.65
         for kwargs, expected in (
@@ -137,30 +140,38 @@ class TestBadChBySmallness(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs):
                 raw = make_raw(variances, window_samples=100, average=True)
-                self.assertEqual(bad_ch_by_smallness(raw, **kwargs), {"smallness": expected})
-                self.assertEqual(raw.info["bads"], expected)
+                self.assertEqual(bad_ch_by_std(raw, **kwargs),
+                                 {"std_high": ["E8", "M8"], "std_low": expected})
+                self.assertEqual(raw.info["bads"], ["E8", "M8"] + expected)
 
-    def test_low_gain_channel_is_found_among_right_skewed_variances(self):
-        # Variances spread over a factor of 20 across channels, as in real recordings.
-        # On the variance scale, median - 2 * 1.4826 * MAD is below zero, so no channel
-        # could ever be small; on the log scale a low-gain channel stands out.
+    def test_low_gain_channel_is_found_among_right_skewed_robust_sds(self):
+        # Robust SDs spread over a factor of 4.5 across channels, as in real recordings.
+        # On the linear scale, median - 2 * 1.4826 * MAD is below zero, so no channel
+        # could ever be low; on the log scale a low-gain channel stands out.
         variances = np.exp(np.tile(np.linspace(-1.5, 1.5, 30), (4, 1)))
-        mad = np.median(np.abs(variances[0] - np.median(variances[0])))
-        self.assertLess(np.median(variances[0]) - 2 * 1.4826 * mad, 0)
-        self.assertEqual(bad_ch_by_smallness(make_raw(variances, average=True), robust_z_cutoff=2.0),
-                         {"smallness": []})
+        sds = np.sqrt(variances[0])
+        mad = np.median(np.abs(sds - np.median(sds)))
+        self.assertLess(np.median(sds) - 2 * 1.4826 * mad, 0)
+        # At z > 2 the upper tail of the linear spread is high, but no channel is low.
+        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), robust_z_cutoff=2.0),
+                         {"std_high": ["E29", "M29"], "std_low": []})
         variances[:, 0] = np.exp(-2.6)  # About a quarter of the typical amplitude.
-        self.assertEqual(bad_ch_by_smallness(make_raw(variances, average=True), robust_z_cutoff=2.0),
-                         {"smallness": ["E0", "M0"]})
+        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), robust_z_cutoff=2.0),
+                         {"std_high": ["E29", "M29"], "std_low": ["E0", "M0"]})
 
     def test_strong_artifact_channels_do_not_inflate_baseline(self):
-        # A mean/std baseline keeps the three 100s and its lower cutoff goes negative.
+        # The three 100s are high, so they leave the low baseline; a mean/std
+        # baseline would keep them and its lower cutoff would go negative.
         variances = np.tile([0.6, 0.9, 1.1, 0.95, 1.05, 1.0, 100, 100, 100], (2, 1))
         raw = make_raw(variances, average=True)
-        self.assertEqual(bad_ch_by_smallness(raw, robust_z_cutoff=2.0), {"smallness": ["E0", "M0"]})
+        self.assertEqual(bad_ch_by_std(raw, robust_z_cutoff=2.0),
+                         {"std_high": ["E6", "E7", "E8", "M6", "M7", "M8"],
+                          "std_low": ["E0", "M0"]})
 
     def test_bads_auxiliary_and_reference_are_excluded(self):
-        variances = np.ones((2, 11))
+        # Distinct amplitudes: if more than half the channels shared one robust SD,
+        # its cross-channel MAD would be 0 and every other channel would be high.
+        variances = np.tile(np.linspace(0.8, 1.2, 11), (2, 1))
         variances[:, 0] = 0.01
         raw = make_raw(variances, average=True)
         raw.info["bads"] = ["E9"]
@@ -168,11 +179,24 @@ class TestBadChBySmallness(unittest.TestCase):
         raw.set_channel_types({"E10": "eog"})
         raw._data[10] = np.inf
         raw.set_eeg_reference("average", projection=False, verbose=False)
-        result = bad_ch_by_smallness(raw)
-        self.assertEqual(result, {"smallness": ["E0", "M0"]})
+        result = bad_ch_by_std(raw)
+        self.assertEqual(result, {"std_high": [], "std_low": ["E0", "M0"]})
         raw.set_eeg_reference("average", projection=False, verbose=False)
-        self.assertEqual(bad_ch_by_smallness(raw), {"smallness": []})
+        self.assertEqual(bad_ch_by_std(raw), {"std_high": [], "std_low": []})
         self.assertEqual(raw.info["bads"], ["E9", "E0", "M0"])
+
+    def test_low_occurrence_leaves_out_the_channels_high_windows(self):
+        # E0 is high in windows 0-1 and low in window 2: one low window out of
+        # its two non-high windows, so std_low flags it at the default 25%.
+        variances = np.ones((4, 9))
+        variances[:2, 0] = 100
+        variances[2, 0] = 0.01
+        raw = make_raw(variances, average=True)
+        self.assertEqual(bad_ch_by_std(raw), {"std_high": ["E0", "M0"],
+                                              "std_low": ["E0", "M0"]})
+        self.assertEqual(raw.info["bads"], ["E0", "M0"])
+        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), occurrence_cutoff=0.5),
+                         {"std_high": [], "std_low": []})
 
 
 class TestBadChByFlatline(unittest.TestCase):
@@ -240,20 +264,27 @@ class TestBadChByFlatline(unittest.TestCase):
 
 
 def run_detector(detector, raw, **kwargs):
-    """Call smallness directly; detect flatlines first for bad_ch_by_flatline."""
+    """Call std directly; detect flatlines first for bad_ch_by_flatline."""
     if detector is bad_ch_by_flatline:
         return flatline(raw, **kwargs)
     return detector(raw, **kwargs)
 
 
+def report_of(detector, names):
+    """Expected report; these window rules flag only std's low tail."""
+    if detector is bad_ch_by_std:
+        return {"std_high": [], "std_low": names}
+    return {detector.__name__.removeprefix("bad_ch_by_"): names}
+
+
 class TestWindowRules(unittest.TestCase):
     def test_partial_tail_and_bad_annotations_excluded_with_raw_start_respected(self):
-        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+        for detector in (bad_ch_by_std, bad_ch_by_flatline):
             with self.subTest(detector=detector.__name__):
                 variances = np.ones((5, 9))
                 variances[0, 0] = 0
                 variances[4, 0] = 0
-                average = detector is bad_ch_by_smallness
+                average = detector is bad_ch_by_std
                 raw = make_raw(variances, first_samp=500, average=average)
                 raw.crop(tmax=8.99)  # Four complete windows and one 1-second tail.
                 kwargs = {}
@@ -262,36 +293,34 @@ class TestWindowRules(unittest.TestCase):
                         raw, downstream_highpass_hz=None
                     )
                 raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
                 # Only one of four full windows violates the rule.
-                self.assertEqual(detector(raw, **kwargs), {criterion: []})
+                self.assertEqual(detector(raw, **kwargs), report_of(detector, []))
                 self.assertEqual(raw.info["bads"], [])
                 self.assertEqual(detector(raw, occurrence_cutoff=0.2, **kwargs),
-                                 {criterion: []})
+                                 report_of(detector, []))
                 raw.set_annotations(None)
                 expected = ["E0", "M0"] if average else ["E0"]
                 self.assertEqual(detector(raw, occurrence_cutoff=0.2, **kwargs),
-                                 {criterion: expected})
+                                 report_of(detector, expected))
                 self.assertEqual(raw.info["bads"], expected)
 
     def test_invalid_values_need_nan_detection_first(self):
-        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+        for detector in (bad_ch_by_std, bad_ch_by_flatline):
             with self.subTest(detector=detector.__name__):
-                raw = make_raw(np.ones((1, 9)), average=detector is bad_ch_by_smallness)
+                raw = make_raw(np.ones((1, 9)), average=detector is bad_ch_by_std)
                 raw._data[0, 50] = np.nan
                 with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
                     run_detector(detector, raw)
                 self.assertEqual(raw.info["bads"], [])
-                if detector is bad_ch_by_smallness:
+                if detector is bad_ch_by_std:
                     raw.info["bads"] = ["E0"]  # bad_ch_by_nan needs the native reference.
                 else:
                     self.assertEqual(bad_ch_by_nan(raw), {"nan": ["E0"]})
-                criterion = detector.__name__.removeprefix("bad_ch_by_")
-                self.assertEqual(run_detector(detector, raw), {criterion: []})
+                self.assertEqual(run_detector(detector, raw), report_of(detector, []))
                 self.assertEqual(raw.info["bads"], ["E0"])
 
     def test_invalid_parameters_and_insufficient_data(self):
-        for detector in (bad_ch_by_smallness, bad_ch_by_flatline):
+        for detector in (bad_ch_by_std, bad_ch_by_flatline):
             for kwargs in (
                 {"window_length": 0}, {"window_length": np.inf},
                 {"window_length": 0.01}, {"window_length": 3},
@@ -306,15 +335,15 @@ class TestWindowRules(unittest.TestCase):
             with self.subTest(detector=detector.__name__), self.assertRaisesRegex(
                 ValueError, "At least two"
             ):
-                raw = make_raw([[1]], average=detector is bad_ch_by_smallness)
-                if detector is bad_ch_by_smallness:
+                raw = make_raw([[1]], average=detector is bad_ch_by_std)
+                if detector is bad_ch_by_std:
                     raw.info["bads"] = ["M0"]
                 run_detector(detector, raw)
         for cutoff in (0, -1, np.nan, np.inf):
             with self.subTest(cutoff=cutoff), self.assertRaisesRegex(
                 ValueError, "robust_z_cutoff"
             ):
-                bad_ch_by_smallness(make_raw([[1, 1]]), robust_z_cutoff=cutoff)
+                bad_ch_by_std(make_raw([[1, 1]]), robust_z_cutoff=cutoff)
 
 
 if __name__ == "__main__":
