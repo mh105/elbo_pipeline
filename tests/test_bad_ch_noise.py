@@ -193,6 +193,7 @@ class TestVoltageDetection(unittest.TestCase):
     def test_plot_omits_existing_bads_and_non_eeg_and_keeps_peaks(self):
         raw = make_raw(np.ones((4, 1000)) * 1e-6, sfreq=1000)
         raw._data[0] = 300e-6  # Detected by this call: plotted and labeled.
+        raw._data[0, 250] = 800e-6  # A masked peak still selects the lower trace.
         raw._data[1] = 5000e-6  # Existing bad: neither plotted nor used for the y-axis.
         raw._data[2, 501] = 150e-6  # A one-sample peak survives the 20-ms envelope.
         raw._data[3] = 2000e-6 * np.sin(2 * np.pi * raw.times)  # ECG: not plotted.
@@ -202,16 +203,84 @@ class TestVoltageDetection(unittest.TestCase):
             self.assertEqual(step2.bad_ch_by_voltage(raw), {"voltage": ["E0"]})
         fig = plt.gcf()
         try:
-            ax = fig.axes[0]
+            self.assertEqual(len(fig.axes), 2)
+            ax, lower = fig.axes
             # 50 bins of 20 ms, each drawn as its minimum and maximum.
             traces = [line for line in ax.lines if len(line.get_ydata()) == 2 * 50]
             self.assertEqual(len(traces), 3)  # E0, E2, and Cz.
             # Sample 501 lies in bin 25, whose maximum is point 51: Cz, E2, E0.
             self.assertEqual(sorted(line.get_ydata()[51] for line in traces), [0, 150, 300])
             self.assertTrue(all(line.get_ydata().max() < 1000 for line in traces))
-            self.assertLess(ax.get_ylim()[1], 1000)
+            self.assertEqual(ax.get_ylim(), (-500, 500))
             self.assertIn("min/max envelope in 20-ms bins", ax.get_title())
             self.assertEqual([text.get_text() for text in ax.get_legend().get_texts()], ["E0"])
+            self.assertEqual([text.get_text() for text in lower.get_legend().get_texts()], ["E0"])
+            np.testing.assert_array_equal(lower.lines[0].get_xdata(), ax.lines[0].get_xdata())
+            np.testing.assert_array_equal(lower.lines[0].get_ydata(), ax.lines[0].get_ydata())
+            self.assertEqual(lower.lines[0].get_ydata().max(), 800)
+            self.assertIn("min/max envelope in 20-ms bins", lower.get_title())
+            self.assertEqual(lower.lines[0].get_color().tolist(), ax.lines[0].get_color().tolist())
+            self.assertGreater(lower.get_ylim()[1], 800)
+            for panel in fig.axes:
+                self.assertEqual(len(panel.patches), 1)
+                self.assertAlmostEqual(panel.patches[0].get_x(), 0.2)
+                self.assertAlmostEqual(panel.patches[0].get_width(), 0.1)
+        finally:
+            plt.close(fig)
+
+
+class TestVoltagePlot(unittest.TestCase):
+    def test_pooled_absolute_percentile_envelopes_and_input_unchanged(self):
+        raw = make_raw(np.vstack([
+            np.arange(100), np.r_[-90, np.ones(99)], np.linspace(1, 2, 100),
+        ]) * 1e-6, sfreq=100)
+        raw.set_annotations(mne.Annotations([0], [0.01], ["BAD_existing"]))
+        original = raw.get_data().copy()
+        annotations = raw.annotations.copy()
+        with patch.object(step2.plt, "show"):
+            fig = step2.plot_voltage_traces(raw)
+        try:
+            upper, lower = fig.axes
+            # A separate percentile per channel would also select low-amplitude E2.
+            self.assertEqual([text.get_text() for text in lower.get_legend().get_texts()],
+                             ["E0", "E1"])
+            for row, line in enumerate(lower.lines[:2]):
+                np.testing.assert_array_equal(line.get_xdata(), upper.lines[row].get_xdata())
+                np.testing.assert_array_equal(line.get_ydata(), upper.lines[row].get_ydata())
+            self.assertEqual(upper.get_ylim(), (-500, 500))
+            self.assertEqual(upper.get_xlim(), lower.get_xlim())
+            np.testing.assert_array_equal(raw.get_data(), original)
+            self.assertEqual(raw.info["bads"], [])
+            self.assertEqual(raw.annotations, annotations)
+        finally:
+            plt.close(fig)
+
+    def test_percentile_ties_do_not_select_channels(self):
+        raw = make_raw(np.ones((2, 100)) * 10e-6, sfreq=100)
+        with patch.object(step2.plt, "show"):
+            fig = step2.plot_voltage_traces(raw)
+        try:
+            lower = fig.axes[1]
+            self.assertEqual(len(lower.lines), 2)  # Only the voltage guide lines.
+            self.assertIsNone(lower.get_legend())
+            self.assertIn("No channels exceed", lower.texts[0].get_text())
+        finally:
+            plt.close(fig)
+
+    def test_final_partial_bin_keeps_last_sample_peak(self):
+        raw = make_raw(np.vstack([np.ones(1003), np.full(1003, 2)]) * 1e-6,
+                       sfreq=1000)
+        raw._data[0, -1] = -400e-6
+        with patch.object(step2.plt, "show"):
+            fig = step2.plot_voltage_traces(raw)
+        try:
+            upper, lower = fig.axes
+            self.assertEqual(len(upper.lines[0].get_ydata()), 102)
+            np.testing.assert_array_equal(upper.lines[0].get_ydata()[-2:], [-400, 1])
+            self.assertEqual([text.get_text() for text in lower.get_legend().get_texts()],
+                             ["E0"])
+            self.assertEqual(len(lower.lines[0].get_ydata()), 102)
+            np.testing.assert_array_equal(lower.lines[0].get_ydata()[-2:], [-400, 1])
         finally:
             plt.close(fig)
 

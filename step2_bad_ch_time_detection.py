@@ -1112,15 +1112,12 @@ def bad_ch_by_voltage(
     are several (mark the dead ones bad first with detect_flatline_inplace and
     bad_ch_by_flatline, naming the reference_channel).
 
-    With plot=True, show all EEG channels except existing bads over the full
-    time range, including the reference and masked samples; non-EEG channels
-    are not drawn. To keep the figure small, draw each trace as its min/max
-    envelope in 20-ms bins (50 bins per second), which keeps every peak; the
-    title says so. Plot in microvolts with dotted cutoff lines and a different
-    color per channel. Highlight and label
-    only this call's detections in the legend. Shade temporary voltage masks in
-    light gray and scale the y-axis from the plotted channels' finite samples
-    outside all BAD annotations.
+    With plot=True, call plot_voltage_traces for a two-panel figure. The top
+    shows all EEG channels except existing bads as 20-ms min/max envelopes at
+    +/-500 microvolts. The bottom also shows 20-ms min/max envelopes for
+    channels with any absolute value above the plotted samples' pooled 95th
+    percentile, including masked samples. Keep this call's detections visible
+    and label them in the top legend. Shade temporary voltage masks in both panels.
 
     With return_details=True, return (report, details): ch_names of the
     evaluated channels and exceed_fraction, each one's fraction of scorable
@@ -1161,56 +1158,104 @@ def bad_ch_by_voltage(
             "ch_names": [raw.ch_names[i] for i in picks],
             "exceed_fraction": fractions,
         }
-    if not plot:
-        if return_details:
-            return report, details
-        return report
+    if plot:
+        plot_voltage_traces(
+            raw, voltage_threshold_uv, bad_names=bad_names, exclude=bads_before,
+            voltage_spans=spans,
+        )
+    if return_details:
+        return report, details
+    return report
 
-    fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
+
+def plot_voltage_traces(
+    raw,
+    voltage_threshold_uv=200.0,
+    *,
+    bad_names=(),
+    exclude=None,
+    voltage_spans=(),
+):
+    """Show voltage envelopes and high-amplitude channels; return the figure.
+
+    Plot EEG except exclude (raw.info["bads"] by default), including the
+    reference and all times, without omitting BAD annotations. The top panel
+    draws exact min/max envelopes in 20-ms bins at +/-500 microvolts. Pool
+    original absolute sample values across those channels and all times, then
+    show the same 20-ms min/max envelopes for channels with any value strictly
+    above their pooled 95th percentile in the bottom panel, at its full
+    amplitude range. This plot selection is separate from bad-channel detection.
+
+    Keep channel colors consistent across panels. Highlight bad_names in the
+    top legend and label all selected channels in the bottom legend. Draw
+    dotted +/-voltage_threshold_uv lines and shade voltage_spans (half-open
+    sample intervals relative to this Raw) in both panels. Raw data, labels,
+    and annotations are unchanged. Times are relative to the cropped Raw.
+    """
+    exclude = raw.info["bads"] if exclude is None else exclude
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    picks = [i for i in eeg if raw.ch_names[i] not in exclude]
+    # Partition a disposable copy in place, without another full-record copy.
+    pooled_abs = raw.get_data(picks=picks, reject_by_annotation=None)
+    np.abs(pooled_abs, out=pooled_abs)
+    cutoff_uv = np.percentile(pooled_abs, 95, overwrite_input=True) * 1e6
+    del pooled_abs
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
+                             layout="constrained")
     sfreq = raw.info["sfreq"]
-    # Draw each trace as its min/max in 20-ms bins (50 bins per second): every
-    # peak survives with far fewer points than samples.
     bin_samples = max(int(round(0.02 * sfreq)), 1)
     bin_starts = np.arange(0, raw.n_times, bin_samples)
     envelope_times = np.repeat(bin_starts / sfreq, 2)
-    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     colors = plt.get_cmap("turbo")(np.linspace(0, 1, len(eeg)))
-    ymin, ymax = np.inf, -np.inf
+    times = raw.times
+    selected = []
     for color, i in zip(colors, eeg):
         name = raw.ch_names[i]
-        if name in bads_before:
+        if i not in picks:
             continue
         data_uv = raw.get_data(picks=[i], reject_by_annotation=None)[0] * 1e6
         envelope = np.column_stack([
             np.minimum.reduceat(data_uv, bin_starts),
             np.maximum.reduceat(data_uv, bin_starts),
         ]).ravel()
-        retained_uv = data_uv[retained]
-        retained_uv = retained_uv[np.isfinite(retained_uv)]
-        if retained_uv.size:
-            ymin = min(ymin, retained_uv.min())
-            ymax = max(ymax, retained_uv.max())
         if name in bad_names:
-            ax.plot(envelope_times, envelope, color=color, linewidth=0.8, label=name,
-                    zorder=2)
+            axes[0].plot(envelope_times, envelope, color=color, linewidth=0.8,
+                         label=name, zorder=2)
         else:
-            ax.plot(envelope_times, envelope, color=color, linewidth=0.5, alpha=0.7,
-                    zorder=1)
-    for start, stop in spans / sfreq:
-        ax.axvspan(start, stop, color="lightgray", zorder=0)
-    padding = 0.05 * (ymax - ymin) if ymax > ymin else 1.0
-    ax.set_ylim(ymin - padding, ymax + padding)
-    for cutoff in (-voltage_threshold_uv, voltage_threshold_uv):
-        ax.axhline(cutoff, color="black", linestyle=":", linewidth=1, zorder=3)
-    ax.set(xlabel="Time (s)", ylabel="Voltage (µV)",
-           title="Bad channels by voltage; each EEG trace drawn as its min/max "
-                 f"envelope in {1000 * bin_samples / sfreq:.3g}-ms bins")
+            axes[0].plot(envelope_times, envelope, color=color, linewidth=0.5,
+                         alpha=0.7, zorder=1)
+        if np.max(np.abs(data_uv)) > cutoff_uv:
+            selected.append(name)
+            axes[1].plot(envelope_times, envelope, color=color, linewidth=0.5,
+                         alpha=0.7, label=name, zorder=1)
+    for ax in axes:
+        for start, stop in voltage_spans:
+            ax.axvspan(start / sfreq, stop / sfreq, color="lightgray", zorder=0)
+        for cutoff in (-voltage_threshold_uv, voltage_threshold_uv):
+            ax.axhline(cutoff, color="black", linestyle=":", linewidth=1, zorder=3)
+        ax.set_ylabel("Voltage (µV)")
+    axes[0].set(ylim=(-500, 500),
+                title="EEG traces; min/max envelope in "
+                      f"{1000 * bin_samples / sfreq:.3g}-ms bins (fixed ±500 µV)")
+    axes[1].set(xlabel="Time (s)", xlim=(0, times[-1]),
+                title="Selected EEG traces; min/max envelope in "
+                      f"{1000 * bin_samples / sfreq:.3g}-ms bins\n"
+                      f"{len(selected)} channels above the pooled 95th percentile "
+                      f"(|Voltage| > {cutoff_uv:.3g} µV)")
     if bad_names:
-        ax.legend(title="Flagged channels", loc="upper left", bbox_to_anchor=(1.01, 1))
+        axes[0].legend(title="Flagged channels", loc="upper left",
+                       bbox_to_anchor=(1.01, 1), fontsize=8,
+                       ncols=max(1, (len(bad_names) + 19) // 20))
+    if selected:
+        axes[1].legend(title="Above 95th percentile", loc="upper left",
+                       bbox_to_anchor=(1.01, 1), fontsize=8,
+                       ncols=max(1, (len(selected) + 19) // 20))
+    else:
+        axes[1].text(0.5, 0.5, "No channels exceed the pooled 95th percentile.",
+                     ha="center", va="center", transform=axes[1].transAxes)
     plt.show()
-    if return_details:
-        return report, details
-    return report
+    return fig
 
 
 def bad_ch_by_smallness(
