@@ -44,12 +44,11 @@ class TestBadChannelReport(unittest.TestCase):
                 original.get_data(picks=[name], start=2 * sfreq,
                                   stop=12 * sfreq)[0] * 1e6,
             )
-        palette = plt.get_cmap("tab10")
-        self.assertEqual(to_rgba(axes["O1"].lines[0].get_color()), palette(1))
-        self.assertEqual(to_rgba(axes["F3"].lines[0].get_color()), palette(2))
+        self.assertEqual(to_rgba(axes["O1"].lines[0].get_color()), to_rgba("#ff7f0e"))
+        self.assertEqual(to_rgba(axes["F3"].lines[0].get_color()), to_rgba("#00796b"))
         self.assertEqual(to_rgba(axes["Cz"].lines[0].get_color()), to_rgba("black"))
         self.assertEqual(axes["O1"].lines[1].get_marker(), "o")
-        self.assertEqual(to_rgba(axes["O1"].lines[1].get_color()), palette(2))
+        self.assertEqual(to_rgba(axes["O1"].lines[1].get_color()), to_rgba("#00796b"))
         self.assertEqual([text.get_text() for text in fig.legends[0].get_texts()],
                          ["Unflagged", "std", "correlation"])
         np.testing.assert_array_equal(raw.get_data(), original.get_data())

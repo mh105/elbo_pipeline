@@ -72,12 +72,26 @@ def scheduled_detector(schedule, criterion="HFnoise"):
 
 
 class TestRobustAverageReference(unittest.TestCase):
+    def setUp(self):
+        plot_report = patch.object(step2, "plot_bad_ch_report")
+        self.plot_report = plot_report.start()
+        self.addCleanup(plot_report.stop)
+
     def test_interpolates_all_bads_and_subtracts_the_robust_mean(self):
         raw = make_native_raw(noisy="O1")
         raw._data[NAMES.index("T7"), 100:200] = np.nan  # Interpolation never reads bads.
         raw.info["bads"] = ["T7", "EOG"]
         native = raw.copy()
+
+        def check_uninterpolated(plotted_raw, report):
+            self.assertIs(plotted_raw, raw)
+            self.assertEqual(plotted_raw.info["bads"], ["T7", "EOG"])
+            np.testing.assert_array_equal(plotted_raw.get_data(), native.get_data())
+            self.assertEqual(report["std"], ["O1"])
+
+        self.plot_report.side_effect = check_uninterpolated
         report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        self.plot_report.assert_called_once_with(raw, report)
         reference = details["final_reference"]
 
         self.assertEqual(report, {"voltage": [], "HFnoise": [], "pop": [], "std": ["O1"],

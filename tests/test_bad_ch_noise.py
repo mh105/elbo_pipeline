@@ -249,10 +249,10 @@ class TestVoltagePlot(unittest.TestCase):
             fig = step2.plot_voltage_traces(raw)
         try:
             upper, lower = fig.axes
-            # A separate percentile per channel would also select low-amplitude E2.
+            # The pooled 99.9th percentile excludes E1's 90-uV peak and E2.
             self.assertEqual([text.get_text() for text in lower.get_legend().get_texts()],
-                             ["E0", "E1"])
-            for row, line in enumerate(lower.lines[:2]):
+                             ["E0"])
+            for row, line in enumerate(lower.lines[:1]):
                 np.testing.assert_array_equal(line.get_xdata(), upper.lines[row].get_xdata())
                 np.testing.assert_array_equal(line.get_ydata(), upper.lines[row].get_ydata())
             self.assertEqual(upper.get_ylim(), (-500, 500))

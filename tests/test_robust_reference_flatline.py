@@ -40,6 +40,11 @@ def native_with_flatlines(global_dropout=False):
 
 
 class TestRobustReferenceFlatlines(unittest.TestCase):
+    def setUp(self):
+        plot_report = patch.object(step2, "plot_bad_ch_report")
+        plot_report.start()
+        self.addCleanup(plot_report.stop)
+
     def test_forwards_local_masks_to_every_detector(self):
         raw, flatlines = native_with_flatlines()
         with ExitStack() as stack:

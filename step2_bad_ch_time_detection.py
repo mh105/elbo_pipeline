@@ -960,7 +960,7 @@ def plot_voltage_traces(
     draws exact min/max envelopes in 20-ms bins at +/-500 microvolts. Pool
     original absolute sample values across those channels and all times, then
     show the same 20-ms min/max envelopes for channels with any value strictly
-    above their pooled 95th percentile in the bottom panel, at its full
+    above their pooled 99.9th percentile in the bottom panel, at its full
     amplitude range. This plot selection is separate from
     bad-channel detection.
 
@@ -976,7 +976,7 @@ def plot_voltage_traces(
     # Partition a disposable copy in place, without another full-record copy.
     pooled_abs = raw.get_data(picks=picks, reject_by_annotation=None)
     np.abs(pooled_abs, out=pooled_abs)
-    cutoff_uv = np.percentile(pooled_abs, 95, overwrite_input=True) * 1e6
+    cutoff_uv = np.percentile(pooled_abs, 99.9, overwrite_input=True) * 1e6
     del pooled_abs
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
@@ -1019,18 +1019,18 @@ def plot_voltage_traces(
     axes[1].set(xlabel="Time (s)", xlim=(0, times[-1]),
                 title="Selected EEG traces; min/max envelope in "
                       f"{1000 * bin_samples / sfreq:.3g}-ms bins\n"
-                      f"{len(selected)} channels above the pooled 95th percentile "
+                      f"{len(selected)} channels above the pooled 99.9th percentile "
                       f"(|Voltage| > {cutoff_uv:.3g} µV)")
     if bad_names:
         axes[0].legend(title="Flagged channels", loc="upper left",
                        bbox_to_anchor=(1.01, 1), fontsize=8,
                        ncols=max(1, (len(bad_names) + 19) // 20))
     if selected:
-        axes[1].legend(title="Above 95th percentile", loc="upper left",
+        axes[1].legend(title="Above 99.9th percentile", loc="upper left",
                        bbox_to_anchor=(1.01, 1), fontsize=8,
                        ncols=max(1, (len(selected) + 19) // 20))
     else:
-        axes[1].text(0.5, 0.5, "No channels exceed the pooled 95th percentile.",
+        axes[1].text(0.5, 0.5, "No channels exceed the pooled 99.9th percentile.",
                      ha="center", va="center", transform=axes[1].transAxes)
     plt.show()
     return fig
@@ -1320,42 +1320,72 @@ def _ransac_median(weight_columns, window, n_subsets):
     return np.ascontiguousarray(median.T)
 
 
+_BAD_CH_COLORS = {
+    "impedance": "#8c564b",
+    "nan": "#bcbd22",
+    "flatline": "#17becf",
+    "voltage": "#d62728",
+    "std": "#ff7f0e",
+    "HFnoise": "#9467bd",
+    "BBnoise": "#e377c2",
+    "pop": "#2ca02c",
+    "small": "#1f77b4",
+    "correlation": "#00796b",
+    "RANSAC": "#b8860b",
+    'raw.info["bads"]': "#7f7f7f",
+}
+
+
 def plot_bad_ch_report(raw, bad_ch_report):
     """Print bad_ch_report and show its categories on an EEG sensor
     topoplot and accompanying scalp traces; return the topoplot figure.
 
     Use the EEG sensor locations in raw.info, including existing bad channels.
-    Each report category gets a different colored ring; concentric rings show
+    Each criterion has a fixed color; concentric rings show
     channels flagged by multiple criteria. Omit categories without EEG
     detections from the legend. Non-EEG entries are not plotted. Unflagged
     sensors are gray. Also call plot_bad_ch_topo_traces for a random unmasked
-    10-s window. raw and bad_ch_report are unchanged.
+    10-s window. If raw.info["bads"] is empty and the report has detections,
+    the topoplot title states that bad channels have been interpolated. If
+    nonempty raw.info["bads"] differs from the report's detections, show those
+    existing bads as a separate gray raw.info["bads"] category on both plots.
+    raw and bad_ch_report are unchanged.
     """
     print(bad_ch_report)
+
+    reported_bads = {name for names in bad_ch_report.values() for name in names}
+    raw_bads = set(raw.info["bads"])
+    title = "Bad channels by criterion"
+    plot_report = bad_ch_report
+    if not raw_bads and reported_bads:
+        title += "\nBad channels have been interpolated"
+    elif raw_bads and raw_bads != reported_bads:
+        plot_report = dict(bad_ch_report)
+        plot_report['raw.info["bads"]'] = list(raw.info["bads"])
 
     picks = mne.pick_types(raw.info, eeg=True, exclude=[])
     info = mne.pick_info(raw.info, picks)
     info["bads"] = []  # Category rings provide the bad-channel colors.
     fig, ax = plt.subplots(figsize=(10, 9), layout="constrained")
+    fig.suptitle(title)
     mne.viz.plot_sensors(
         info, kind="topomap", ch_type="eeg", axes=ax, show=False,
         show_names=True, pointsize=18, linewidth=0.4,
-        title="Bad channels by criterion",
+        title=title,
     )
     sensors = ax.collections[0]
     sensors.set_facecolor("0.75")
     sensors.set_edgecolor("0.55")
     positions = sensors.get_offsets()
     ring_counts = np.zeros(len(picks), dtype=int)
-    colors = plt.get_cmap("tab10")
-    for category_index, (category, names) in enumerate(bad_ch_report.items()):
+    for category, names in plot_report.items():
         indices = np.flatnonzero(np.isin(info["ch_names"], names))
         if not len(indices):
             continue
         ax.scatter(
             positions[indices, 0], positions[indices, 1],
             s=(10 + 4 * ring_counts[indices]) ** 2, facecolors="none",
-            edgecolors=[colors(category_index % 10)], linewidths=2,
+            edgecolors=[_BAD_CH_COLORS.get(category, "0.5")], linewidths=2,
             label=category, zorder=2, clip_on=False,
         )
         ring_counts[indices] += 1
@@ -1363,7 +1393,7 @@ def plot_bad_ch_report(raw, bad_ch_report):
         label.set_fontsize(8)
     if ring_counts.any():
         ax.legend(title="Criterion", loc="upper left", bbox_to_anchor=(1.01, 1))
-    plot_bad_ch_topo_traces(raw, bad_ch_report)
+    plot_bad_ch_topo_traces(raw, plot_report)
     plt.show()
     return fig
 
@@ -1378,8 +1408,9 @@ def plot_bad_ch_topo_traces(raw, bad_ch_report):
     without axes or panel backgrounds. Plot the input data as supplied,
     without filtering, re-referencing, or interpolation.
 
-    Use the report's topoplot colors: the first listed criterion sets each
-    trace's color, with dots beside its label for additional criteria.
+    Use the fixed criterion colors from the topoplot: the first listed
+    criterion sets each trace's color, with dots beside its label for
+    additional criteria.
     Unflagged traces are black. Return the figure, or warn and return None if
     no unmasked 10-s window exists. raw and bad_ch_report are unchanged.
     """
@@ -1407,9 +1438,8 @@ def plot_bad_ch_topo_traces(raw, bad_ch_report):
     data = raw.get_data(picks=layout.names, start=start, stop=stop,
                         reject_by_annotation=None) * 1e6
     times = np.arange(start, stop) / sfreq
-    palette = plt.get_cmap("tab10")
-    colors = {criterion: palette(i % 10)
-              for i, criterion in enumerate(bad_ch_report)}
+    colors = {criterion: _BAD_CH_COLORS.get(criterion, "0.5")
+              for criterion in bad_ch_report}
 
     # Map the head outline into the same normalized layout as the trace panels.
     projected = _find_topomap_coords(raw.info, picks)
@@ -2020,7 +2050,7 @@ def bad_ch_by_voltage(
     With plot=True, call plot_voltage_traces for a two-panel figure. The top
     shows all EEG channels except existing bads as 20-ms min/max envelopes at
     +/-500 microvolts. The bottom also shows 20-ms min/max envelopes for
-    channels with any absolute value above the plotted samples' pooled 95th
+    channels with any absolute value above the plotted samples' pooled 99.9th
     percentile, including masked samples. Keep this call's detections visible
     and label them in the top legend. Shade temporary voltage masks
     in both panels.
@@ -3100,7 +3130,9 @@ def robust_average_reference_inplace(
     recompute the robust mean with them interpolated. Raise if neither has
     happened within max_iterations passes.
 
-    Then reconstruct whole-channel bads and local flat intervals in raw,
+    Plot the final report and the original native-referenced traces before
+    interpolation, including existing bads as a gray category. Then
+    reconstruct whole-channel bads and local flat intervals in raw,
     using the same cached geometry/configurations, and subtract the last robust
     mean from every EEG channel, and remove the EEG channels from
     raw.info["bads"], so all EEG channels average to zero. Non-EEG channels are
@@ -3227,6 +3259,7 @@ def robust_average_reference_inplace(
         )
 
     bads = [name for name in eeg_names if name in initial or name in flagged]
+    plot_bad_ch_report(raw, robust_bad_ch_report)  # Plot before interpolation.
     _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines, geometry)
     for i in eeg:
         raw._data[i] -= reference
@@ -3293,7 +3326,6 @@ if __name__ == "__main__":
     )
     for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
-    plot_bad_ch_report(raw_bads, bad_ch_report)
 
     # Band-power topomaps after robust average referencing (bads interpolated).
     # The median Welch PSD shows persistent channel power; brief

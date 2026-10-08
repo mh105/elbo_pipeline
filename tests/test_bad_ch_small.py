@@ -247,7 +247,8 @@ class TestSmallDetection(unittest.TestCase):
         native = raw.copy()
         small = step2.bad_ch_by_small(raw)
         self.assertIn("E10", small["small"])
-        report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        with patch.object(step2, "plot_bad_ch_report"):
+            report, details = step2.robust_average_reference_inplace(raw, return_details=True)
         self.assertEqual(details["initial_bads"], small["small"])
         self.assertNotIn("small", report)
         for iteration in details["iterations"]:
