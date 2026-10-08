@@ -3451,7 +3451,7 @@ if __name__ == "__main__":
     # The median Welch PSD shows persistent channel power; brief
     # large events barely count.
     psd_topomap_figure = raw_bads.compute_psd(
-        fmax=45.0, average="median", verbose=False
+        fmax=45.0, average="median", verbose=False, exclude="bads"
     ).plot_topomap()
 
     # Average-referenced traces, excluding interpolated bad channels.
