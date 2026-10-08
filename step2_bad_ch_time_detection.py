@@ -2058,6 +2058,10 @@ def bad_ch_by_voltage(
     With return_details=True, return (report, details): ch_names of the
     evaluated channels and exceed_fraction, each one's fraction of scorable
     samples beyond +/-voltage_threshold_uv (NaN without scorable samples).
+
+    _pass is an internal cache of reference-check and voltage-mask inputs
+    shared by detectors within a robust_average_reference_inplace iteration.
+    Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
         raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
@@ -2140,6 +2144,10 @@ def bad_ch_by_std(
     (channels, complete windows). Observations a criterion does not score
     contain NaN: masked and local-flat windows. flagged_data_uv stores original
     violating window waveforms in chronological order.
+
+    _pass is an internal cache of reference-check and voltage-mask inputs
+    shared by detectors within a robust_average_reference_inplace iteration.
+    Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -2236,6 +2244,10 @@ def bad_ch_by_HFnoise(
     denominator. detect_flatline_inplace has already widened the local
     intervals by the 0.3 Hz high-pass reach (5.5 s), beyond the low-pass's, so
     they are not widened again here.
+
+    _pass is an internal cache of reference-check and voltage-mask inputs
+    shared by detectors within a robust_average_reference_inplace iteration.
+    Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
@@ -2365,6 +2377,10 @@ def bad_ch_by_BBnoise(
 
     With flatlines, omit local-flat observations from metrics, cross-channel
     baselines, and each channel's occurrence denominator.
+
+    _pass is an internal cache of reference-check and voltage-mask inputs
+    shared by detectors within a robust_average_reference_inplace iteration.
+    Leave _pass=None for standalone calls to compute their own setup.
     """
     SPECTRAL_BANDS = ((0, 4), (4, 8), (8, 12), (12, 30), (30, 45))
 
@@ -2494,6 +2510,10 @@ def bad_ch_by_pop(
     and dicts pop_times_s and pop_steps_uv keyed by channel name. Each pop is
     described by its first confirmed jump: crop-relative time of the sample
     before it, and its signed 10-60 ms level change in microvolts.
+
+    _pass is an internal cache of reference-check and voltage-mask inputs
+    shared by detectors within a robust_average_reference_inplace iteration.
+    Leave _pass=None for standalone calls to compute their own setup.
     """
     for name, value in (
         ("jump_sd_cutoff", jump_sd_cutoff),
@@ -2807,6 +2827,11 @@ def bad_ch_by_correlation(
     detect_flatline_inplace has already widened the local intervals by the
     0.3 Hz high-pass reach (5.5 s), beyond this band-limit's 2.31-s reach, so
     they are not widened again here.
+
+    _pass is an internal cache shared within a robust_average_reference_inplace
+    iteration, reusing reference-check inputs, voltage-mask inputs, and
+    band-limited data. Leave _pass=None for standalone calls to compute their
+    own setup.
     """
     if not np.isfinite(correlation_cutoff) or not -1 <= correlation_cutoff <= 1:
         raise ValueError("correlation_cutoff must be between -1 and 1.")
@@ -2948,6 +2973,11 @@ def bad_ch_by_RANSAC(
     boolean local-flat mask, shape (channels, complete windows), over all
     complete windows: unlike the per-window metrics, it is not NaN in
     unretained windows.
+
+    _pass is an internal cache shared within a robust_average_reference_inplace
+    iteration, reusing reference-check inputs, voltage-mask inputs, and
+    band-limited data. Leave _pass=None for standalone calls to compute their
+    own setup.
     """
     if method not in ("threshold", "robust_z"):
         raise ValueError('method must be "threshold" or "robust_z".')
