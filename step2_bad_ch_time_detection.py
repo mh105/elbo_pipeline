@@ -1,8 +1,8 @@
 """ELBO step 2: bad-channel and bad-time detection.
 
 Bad-channel criteria may be local or cross-channel, and time invariant or time
-dependent. Bad-time detection and iteration between the two parts will be
-developed after the initial bad-channel criteria.
+dependent. ASR corrects bad time periods after the initial bad-channel criteria;
+iteration between bad-channel and bad-time detection remains to be developed.
 
 Flatlines come first. On the native data, right after bad_ch_by_nan,
 detect_flatline_inplace finds constant flatlines and exact ramps, annotates
@@ -80,23 +80,37 @@ intervals of the good channels from the other good channels. If the native
 reference is itself bad, validate_reference_inplace then re-references the
 data to the nearest good one of its five nearest electrodes, or raises if all
 five are bad.
+
+apply_asr_inplace refreshes the voltage mask and calibrates standard ASR on
+good EEG channels without the effective zero reference. Calibration omits BAD
+annotations and widened local flat intervals, then uses automatic selection;
+at least 60 seconds must remain. Its statistics use a four-second minimum-phase
+FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Correction
+processes the full timeline, including masked periods, at cutoff 20. Afterwards,
+local flat spans are reconstructed again from corrected donors. Return the
+component-rejection and applied-correction intervals on the original sample
+timeline; return_details=True also returns calibration and window diagnostics.
 """
 
 from collections import defaultdict
+from dataclasses import replace
 from functools import partial
+from unittest.mock import patch
 import warnings
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import mne
+import mne_denoise
 import numpy as np
 from mne.annotations import _annotations_starts_stops
 from mne.bem import _check_origin
 from mne.channels.interpolation import _calc_g
 from mne.channels.layout import _find_topomap_coords
 from mne.utils import _check_sphere
+from mne_denoise.asr import calibrate_asr, process_asr, _calibration, _reconstruction
 from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
-from scipy.signal import fftconvolve, firwin
+from scipy.signal import fftconvolve, firwin, firwin2, minimum_phase, oaconvolve
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (  # noqa: F401
     ZapLine_notch,
@@ -3362,6 +3376,7 @@ def bad_ch_under_robust_ref(
         exclude=raw.info["bads"] + [reference_channel],
     ).plot_topomap(dB=True)
     plot_voltage_traces(raw)
+
     if return_details:
         details = {
             "initial_bads": initial,
@@ -3372,7 +3387,7 @@ def bad_ch_under_robust_ref(
     return robust_bad_ch_report
 
 
-def interpolate_local_flatline_inplace(raw, flatlines):
+def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None):
     """Interpolate the local flat intervals of the good EEG channels in place
     from the other good EEG channels; return None.
 
@@ -3387,22 +3402,33 @@ def interpolate_local_flatline_inplace(raw, flatlines):
     a donor; on native data the all-zero reference is a donor unless it is
     bad. The EEG data lose rank within the repaired intervals. Bad labels,
     annotations, non-EEG channels, and all other samples are unchanged.
+
+    After ASR, pass the effective reference_channel to keep its zero trace
+    unchanged if validation switched electrodes. Its original flat intervals
+    still exclude it from the donors.
     """
     # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
     sample_chunk = 8192
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     _validate_flatlines(raw, flatlines)
+    reference_pick = None
+    if reference_channel is not None:
+        reference_channel = _reference_channel(raw, "native", reference_channel)
+        reference_pick = raw.ch_names.index(reference_channel)
     geometry = _spline_geometry(raw)
     bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
     for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
         if flat:
             invalid = np.union1d(np.asarray(bads, dtype=int), flat)
             donors = geometry["picks"][~np.isin(geometry["picks"], invalid)]
-            weights = _spline_weights(geometry, donors, flat)
+            targets = [pick for pick in flat if pick != reference_pick]
+            if not targets:
+                continue
+            weights = _spline_weights(geometry, donors, targets)
             for first in range(start, stop, sample_chunk):
                 last = min(first + sample_chunk, stop)
-                raw._data[list(flat), first:last] = (
+                raw._data[targets, first:last] = (
                     weights @ raw._data[donors, first:last]
                 )
 
@@ -3453,7 +3479,172 @@ def validate_reference_inplace(raw, flatlines):
     return good[0]
 
 
-# %% Part 2: Definitive bad-time detection (to be developed)
+# %% Part 2: Bad-time correction with ASR
+
+def _asr_statistics_filter(sfreq):
+    """Four-second minimum-phase FIR for ASR's statistics-only amplitude curve."""
+    nyquist = sfreq / 2
+    if sfreq <= 82:
+        raise ValueError("ASR statistics filter requires a sampling rate above 82 Hz.")
+    frequencies = [0, 2, 3, 13, 16, 40, min(80, nyquist - 1), nyquist]
+    gains = [3, 0.75, 0.33, 0.33, 1, 1, 3, 3]
+    n_taps = 2 * int(2 * sfreq + 0.5) + 1
+    linear = firwin2(n_taps, frequencies, gains, fs=sfreq)
+    n_fft = 2 ** int(np.ceil(np.log2(64 * n_taps)))
+    return minimum_phase(linear, half=False, n_fft=n_fft), np.array([1.0])
+
+
+def _asr_filter_channels(data, b, a, zi=None):
+    """Apply the custom FIR causally, returning SciPy-compatible final state.
+
+    Warm up missing history by reflecting the sequence's beginning. Convolve
+    one channel at a time to bound temporary FFT storage on long recordings.
+    """
+    order = len(b) - 1
+    if zi is None:
+        history = 2 * data[:, [0]] - data[:, order:0:-1]
+        _, zi = _asr_filter_channels(
+            history, b, a, np.zeros((data.shape[0], order))
+        )
+    n_times = data.shape[1]
+    filtered = np.empty_like(data)
+    final_state = np.empty((data.shape[0], order))
+    n_initial = min(n_times, order)
+    for row in range(data.shape[0]):
+        convolved = oaconvolve(data[row], b, mode="full")
+        filtered[row] = convolved[:n_times]
+        filtered[row, :n_initial] += zi[row, :n_initial]
+        final_state[row] = convolved[n_times:n_times + order]
+        if n_times < order:
+            final_state[row, :order - n_times] += zi[row, n_times:]
+    return filtered, final_state
+
+
+def apply_asr_inplace(
+    raw, reference_channel=None, *, flatlines=None, return_details=False,
+):
+    """Correct good EEG channels with automatic-calibration ASR in place.
+
+    Run after local flatline interpolation and validate_reference_inplace;
+    pass its returned reference_channel if it switched electrodes. Exclude
+    raw.info["bads"] and the effective zero reference from ASR. Refresh only
+    BAD_voltage_mask annotations using this final pool. Calibration omits
+    every case-insensitive BAD* period and widened local flat intervals of
+    the included channels and effective reference. Concatenate this support
+    for native automatic selection, requiring at least 60 retained seconds.
+
+    Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
+    and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
+    their native defaults. Initialize the statistics filter from reflected
+    sequence starts rather than calibration-ending history. Correction sees
+    the full original timeline, including global BAD periods; their existing
+    annotations remain for later rejection. Re-interpolate local flat spans
+    from corrected good, nonflat donors, protecting the effective reference.
+
+    Return report with component_segments (updates rejecting components) and
+    corrected_segments (full applied support, including blending). Both are
+    lists of half-open (start, stop) Python-int sample bounds relative to this
+    Raw's beginning, including any annotated periods processed by ASR. They
+    describe the ASR stage; flatlines retains local interpolation provenance.
+    No ASR annotations are added. Bads, reference, and non-EEG data are unchanged.
+    With return_details=True, return (report, details), including original
+    calibration sample indices, filter coefficients, settings, and native
+    calibration and processing diagnostics. Insufficient calibration raises
+    before any corrected voltages are written back.
+    """
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    if flatlines is None:
+        raise ValueError("Pass the flatlines dictionary from detect_flatline_inplace.")
+    _validate_flatlines(raw, flatlines)
+    reference_channel = _reference_channel(raw, "native", reference_channel)
+    if reference_channel in raw.info["bads"]:
+        raise ValueError("The reference is bad; run validate_reference_inplace first.")
+    picks = _mask_eeg_picks(raw, reference_channel)
+    sfreq = float(raw.info["sfreq"])
+    names = [raw.ch_names[pick] for pick in picks]
+
+    raw.annotations.delete(np.flatnonzero(raw.annotations.description == "BAD_voltage_mask"))
+    mask_segment_by_voltage(raw, reference_channel=reference_channel)
+    excluded = _rejected_samples(raw)
+    calibration_channels = set(names) | {reference_channel}
+    for name, intervals in zip(flatlines["ch_names"], flatlines["segments"]):
+        if name in calibration_channels:
+            for start, stop in intervals:
+                excluded[start:stop] = True
+    calibration_input = np.flatnonzero(~excluded)
+    minimum_samples = int(np.ceil(60 * sfreq))
+
+    def require_calibration(n_samples):
+        if n_samples < minimum_samples:
+            raise ValueError(
+                f"ASR requires at least 60 seconds of retained calibration data; "
+                f"only {n_samples / sfreq:.3f} seconds remain."
+            )
+
+    require_calibration(len(calibration_input))
+    data = raw.get_data(picks=picks, reject_by_annotation=None)
+    if not np.isfinite(data).all():
+        raise ValueError("Nonfinite data in ASR channels; run bad_ch_by_nan first.")
+    b, a = _asr_statistics_filter(sfreq)
+    blocksize = max(1, int(0.1 * sfreq + 0.5))
+
+    def filter_calibration(data, b, a, zi=None):
+        # This input is the subset retained by native automatic selection.
+        require_calibration(data.shape[1])
+        return _asr_filter_channels(data, b, a, zi)
+
+    # mne-denoise has no coefficient argument; restore its private hooks on exit.
+    with patch.object(_calibration, "_design_statistics_filter", return_value=(b, a)), \
+            patch.object(_calibration, "_lfilter_channels", side_effect=filter_calibration):
+        state, calibration = calibrate_asr(
+            data[:, calibration_input], sfreq, calibration="auto", cutoff=20,
+            filter_kind="asr", blocksize=blocksize, method="standard",
+        )
+    calibration_indices = calibration_input[calibration["clean_sample_mask"]]
+    require_calibration(len(calibration_indices))
+    history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
+    _, initial_state = _asr_filter_channels(
+        history, b, a, np.zeros((len(picks), len(b) - 1))
+    )
+    state = replace(state, filter_zi=initial_state)
+    with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
+        corrected, processing = process_asr(data, sfreq, state)
+
+    component_segments = _merge_segments([
+        [int(start), int(stop)]
+        for start, stop, count in zip(
+            processing["window_starts"], processing["window_stops"],
+            processing["n_components_reconstructed"],
+        ) if count > 0
+    ])
+    corrected_segments = np.flatnonzero(
+        np.diff(np.r_[False, processing["sample_mask"], False])
+    ).reshape(-1, 2)
+    report = {
+        "component_segments": [tuple(bounds) for bounds in component_segments],
+        "corrected_segments": [tuple(map(int, bounds)) for bounds in corrected_segments],
+    }
+    raw._data[picks] = corrected
+    interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
+    if return_details:
+        details = {
+            "sfreq": sfreq,
+            "first_samp": int(raw.first_samp),
+            "ch_names": names,
+            "reference_channel": reference_channel,
+            "calibration_input_sample_indices": calibration_input,
+            "calibration_sample_indices": calibration_indices,
+            "filter_b": b,
+            "filter_a": a,
+            "settings": {"cutoff": 20.0, "blocksize": blocksize,
+                         "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
+                         "method": "standard", "mne_denoise_version": mne_denoise.__version__},
+            "calibration": calibration,
+            "processing": processing,
+        }
+        return report, details
+    return report
 
 
 if __name__ == "__main__":
@@ -3503,3 +3694,8 @@ if __name__ == "__main__":
 
     # %% Move a bad native reference to its nearest good electrode
     reference_channel = validate_reference_inplace(raw_bads, flatlines)
+
+    # %% Correct transient artifacts, then reconstruct local flat spans again
+    asr_report = apply_asr_inplace(
+        raw_bads, reference_channel, flatlines=flatlines
+    )
