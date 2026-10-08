@@ -32,6 +32,26 @@ def flatline(raw, **kwargs):
     return bad_ch_by_flatline(raw, flatlines=flatlines, **kwargs)
 
 
+def set_sphere_positions(raw):
+    """Give EEG channels distinct positions on a 9-cm sphere for bad_ch_by_std's
+    neighbours: a Fibonacci spiral over the upper hemisphere in channel order,
+    with each M{i} channel antipodal to E{i}.
+    """
+    names = [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])]
+    upper = [name for name in names if not name.startswith("M")]
+    i = np.arange(len(upper)) + 0.5
+    z = 1 - i / len(upper)
+    angle = np.pi * (3 - np.sqrt(5)) * i
+    xyz = 0.09 * np.column_stack(
+        [np.sqrt(1 - z ** 2) * np.cos(angle), np.sqrt(1 - z ** 2) * np.sin(angle), z]
+    )
+    ch_pos = dict(zip(upper, xyz))
+    ch_pos.update({name: -ch_pos["E" + name[1:]] for name in names if name.startswith("M")})
+    raw.set_montage(mne.channels.make_dig_montage(ch_pos, coord_frame="head"),
+                    verbose=False)
+    return raw
+
+
 def make_raw(variances, window_samples=200, first_samp=0, average=False):
     """Make prescribed variances with a native reference or balanced channel pairs."""
     variances = np.asarray(variances, dtype=float)
@@ -47,7 +67,9 @@ def make_raw(variances, window_samples=200, first_samp=0, average=False):
         data = np.vstack([data, np.zeros(data.shape[1])])
         names += ["Cz"]
     info = mne.create_info(names, 100, "eeg")
-    return mne.io.RawArray(data, info, first_samp=first_samp, verbose=False)
+    return set_sphere_positions(
+        mne.io.RawArray(data, info, first_samp=first_samp, verbose=False)
+    )
 
 
 class TestBadChByNan(unittest.TestCase):
@@ -144,21 +166,37 @@ class TestBadChByStd(unittest.TestCase):
                 self.assertEqual(bad_ch_by_std(raw, **kwargs), {"std": expected})
                 self.assertEqual(raw.info["bads"], expected)
 
-    def test_low_gain_channel_stays_unflagged_among_right_skewed_robust_sds(self):
-        # Robust SDs spread over a factor of 4.5 across channels, as in real recordings.
+    def test_smooth_amplitude_gradient_is_absorbed_but_an_isolated_excess_is_not(self):
+        # Robust SDs rise 4.5-fold from the top of the sphere to the equator, as
+        # amplitude rises toward the face and the cap edge in real recordings. A
+        # cross-channel z of d would put E29 at 2, but its neighbours share the
+        # gradient.
         variances = np.exp(np.tile(np.linspace(-1.5, 1.5, 30), (4, 1)))
         self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), robust_z_cutoff=2.0),
-                         {"std": ["E29", "M29"]})
-        variances[:, 0] = np.exp(-2.6)  # About a quarter of the typical amplitude.
-        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), robust_z_cutoff=2.0),
-                         {"std": ["E29", "M29"]})
+                         {"std": []})
+        variances[:, 10] *= 100  # Ten times the robust SD of its part of the gradient.
+        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True)),
+                         {"std": ["E10", "M10"]})
+        variances[:, 0] = np.exp(-2.6)  # A low-gain channel is not flagged.
+        self.assertEqual(bad_ch_by_std(make_raw(variances, average=True)),
+                         {"std": ["E10", "M10"]})
 
-    def test_strong_artifact_channels_do_not_inflate_baseline(self):
-        # The median/MAD baseline remains robust to the three high channels.
-        variances = np.tile([0.6, 0.9, 1.1, 0.95, 1.05, 1.0, 100, 100, 100], (2, 1))
+    def test_neighbours_need_sensor_positions(self):
+        raw = make_raw(np.ones((2, 9)), average=True)
+        raw.set_montage(None)
+        with self.assertRaisesRegex(ValueError, "sensor positions"):
+            bad_ch_by_std(raw)
+        self.assertEqual(raw.info["bads"], [])
+
+    def test_separated_strong_channels_do_not_inflate_baselines(self):
+        # The neighbour medians and the cross-channel median/MAD remain robust to
+        # three strong channels apart from one another (no channel has more than
+        # one strong neighbour).
+        variances = np.tile(np.linspace(0.8, 1.2, 30), (2, 1))
+        variances[:, [1, 13, 28]] = 100
         raw = make_raw(variances, average=True)
-        self.assertEqual(bad_ch_by_std(raw, robust_z_cutoff=2.0),
-                         {"std": ["E6", "E7", "E8", "M6", "M7", "M8"]})
+        self.assertEqual(bad_ch_by_std(raw),
+                         {"std": ["E1", "E13", "E28", "M1", "M13", "M28"]})
 
     def test_bads_auxiliary_and_reference_are_excluded(self):
         # Distinct amplitudes: if more than half the channels shared one robust SD,

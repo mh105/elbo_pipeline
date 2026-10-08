@@ -73,6 +73,18 @@ class TestWindowDetails(unittest.TestCase):
                                               (details["robust_z"] > 5)[:, 1:])
                 e8 = names.index("E8")
                 np.testing.assert_array_equal(details["violates"][e8, 1:], 1)
+                # The log ratio uses the six nearest scored channels, never the bads.
+                self.assertEqual(list(details["neighbours"]), names)
+                log_std = np.log(details["robust_std_uv"][:, 1:])
+                for i, name in enumerate(names):
+                    neighbours = details["neighbours"][name]
+                    self.assertEqual(len(neighbours), 6)
+                    self.assertTrue(set(neighbours) <= set(names) - {name})
+                    rows = [names.index(n) for n in neighbours]
+                    np.testing.assert_allclose(
+                        details["log_ratio"][i, 1:],
+                        log_std[i] - np.median(log_std[rows], axis=0), atol=1e-12,
+                    )
 
     def test_flatline_global_exclusions_and_partial_tail(self):
         variances = np.ones((5, 7))

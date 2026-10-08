@@ -12,10 +12,11 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
+from test_bad_ch_local_signals import set_sphere_positions
 
 
-# bad_ch_by_RANSAC also requires average reference; its tests need sensor positions,
-# so they live in test_bad_ch_cross_channel.py.
+# bad_ch_by_RANSAC also requires average reference; its tests need a realistic
+# montage, so they live in test_bad_ch_cross_channel.py.
 AVERAGE_ONLY = (step2.bad_ch_by_std, step2.bad_ch_by_BBnoise, step2.bad_ch_by_correlation)
 EITHER = (step2.bad_ch_by_voltage, step2.bad_ch_by_HFnoise)
 NATIVE_ONLY = (step2.bad_ch_by_nan, step2.bad_ch_by_flatline)
@@ -27,7 +28,7 @@ def make_raw(average=True, with_bads=False):
     data[8] = 0  # Native reference before re-referencing.
     names = [f"E{i}" for i in range(8)] + ["Cz", "EOG"]
     info = mne.create_info(names, 250, ["eeg"] * 9 + ["eog"])
-    raw = mne.io.RawArray(data, info, verbose=False)
+    raw = set_sphere_positions(mne.io.RawArray(data, info, verbose=False))
     if with_bads:
         raw.info["bads"] = ["E0"]
         raw._data[0] = 1e-3

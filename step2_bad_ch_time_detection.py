@@ -15,8 +15,8 @@ that dictionary.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
-bad_ch_by_std reports high standard deviation as std. Signal data and input
-annotations are unchanged.
+bad_ch_by_std reports standard deviation high relative to each channel's six
+nearest neighbours as std. Signal data and input annotations are unchanged.
 
 The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
 bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more than
@@ -2134,36 +2134,52 @@ def bad_ch_by_std(
     _pass=None,
 ):
     """Return {"std": names} for EEG channels whose robust standard deviation
-    is persistently high across channels.
+    is persistently high relative to their nearest neighbours.
 
     Require re-referenced data: raise if any EEG channel, bad or not, is
-    entirely zero, as the native reference is. Exclude existing bads and
+    entirely zero, as the native reference is. Require sensor positions for
+    every EEG channel, as in bad_ch_by_small. Exclude existing bads and
     non-EEG channels. Use complete non-overlapping windows, starting at the
     first sample of this Raw; window_length is in seconds, rounded to samples.
     Ignore the trailing partial window and windows overlapping BAD annotations
     or the temporary 0.1-second voltage mask. With flatlines, omit each
-    channel's overlapping local-flat windows from its metrics, from the
-    cross-channel baselines, and from its occurrence denominators.
+    channel's overlapping local-flat windows from its metrics, from its
+    neighbours' references, from the cross-channel baselines, and from its
+    occurrence denominators.
 
     In each window, compute each channel's robust standard deviation, d =
-    1.4826 * MAD over time, and its robust z across channels, (d - median) /
-    (1.4826 * MAD); the channel violates where z > robust_z_cutoff. Return
-    the channels violating in strictly more than occurrence_cutoff of their
-    scorable windows. Add the detections to raw.info["bads"], preserving
-    existing labels without duplicates. Input data and annotations are
-    unchanged.
+    1.4826 * MAD over time, and its log ratio to its neighbours, r = log d -
+    median of log d over its six nearest other channels on the fitted unit
+    sphere (_spline_geometry) among those scored in that window. Comparing a
+    channel with its neighbours absorbs the smooth spatial profile of
+    amplitude, which is largest at the face and the cap edge, so a channel is
+    flagged for its own excess rather than for its location; neighbours that
+    are noisy together partly mask one another. A channel is unscored in a
+    window where it is local-flat or d = 0: it has no r there, and channels
+    that would use it as a neighbour take the next nearest scored channel.
+    Score r across the scored channels as (r - median) / (1.4826 * MAD), with
+    a 1e-6 floor on the spread; the channel violates where z >
+    robust_z_cutoff. Return the channels violating in strictly more than
+    occurrence_cutoff of their scorable windows. Add the detections to
+    raw.info["bads"], preserving existing labels without duplicates. Input
+    data and annotations are unchanged.
 
     With return_details=True, return (report, details), with the common fields
-    described in bad_ch_by_HFnoise, plus robust_std_uv (d in microvolts) and
-    robust_z (the robust z of d across channels), each of shape
-    (channels, complete windows). Observations a criterion does not score
-    contain NaN: masked and local-flat windows. flagged_data_uv stores original
-    violating window waveforms in chronological order.
+    described in bad_ch_by_HFnoise, plus robust_std_uv (d in microvolts),
+    log_ratio (r) and robust_z (the robust z of r across channels), each of
+    shape (channels, complete windows), and neighbours, {channel: its six
+    nearest eligible channels, nearest first}, as used in windows where every
+    channel is scored. Observations a criterion does not score contain NaN:
+    masked windows, local-flat windows in robust_std_uv, and unscored windows
+    in log_ratio and robust_z. flagged_data_uv stores original violating
+    window waveforms in chronological order.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
     shared by detectors within a robust_average_reference_inplace iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
+    N_NEIGHBOURS = 6
+
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
     shared = _mask_inputs(raw) if _pass is None else _pass
@@ -2171,6 +2187,12 @@ def bad_ch_by_std(
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
+    geometry = _spline_geometry(raw)
+    positions = geometry["positions"][geometry["row_of"][picks]]
+    similarity = positions @ positions.T
+    np.fill_diagonal(similarity, -np.inf)
+    # Each row: the other channels, nearest first.
+    order = np.argsort(-similarity, axis=1, kind="stable")[:, :-1]
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
@@ -2178,26 +2200,41 @@ def bad_ch_by_std(
     n_retained = 0
     if return_details:
         details = _init_window_details(
-            raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
+            raw, picks, window_samples, n_windows,
+            ("robust_std_uv", "log_ratio", "robust_z"),
         )
+        details["neighbours"] = {
+            raw.ch_names[pick]: [raw.ch_names[picks[j]] for j in row[:N_NEIGHBOURS]]
+            for pick, row in zip(picks, order)
+        }
     for start, data in _unmasked_windows(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        robust_std, z = np.full((2, len(picks)), np.nan)
-        if valid.any():
-            robust_std[valid] = 1.4826 * _mad(data[valid], axis=1)
-            z[valid] = _robust_channel_z(robust_std[valid])
+        robust_std, log_std, log_ratio, z = np.full((4, len(picks)), np.nan)
+        robust_std[valid] = 1.4826 * _mad(data[valid], axis=1)
+        np.log(robust_std, out=log_std, where=robust_std > 0)
+        candidates = log_std[order]
+        scored = np.isfinite(candidates)
+        nearest = scored & (np.cumsum(scored, axis=1) <= N_NEIGHBOURS)
+        has_neighbours = nearest.any(axis=1)
+        log_ratio[has_neighbours] = log_std[has_neighbours] - np.nanmedian(
+            np.where(nearest, candidates, np.nan)[has_neighbours], axis=1
+        )
+        scorable = np.isfinite(log_ratio)
+        if scorable.any():
+            z[scorable] = _robust_channel_z(log_ratio[scorable], scale_floor=1e-6)
         violates = z > robust_z_cutoff
         counts += violates
-        n_scorable += valid
+        n_scorable += scorable
         n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~valid, index] = np.nan
+            details["violates"][~scorable, index] = np.nan
             details["robust_std_uv"][:, index] = robust_std * 1e6
+            details["log_ratio"][:, index] = log_ratio
             details["robust_z"][:, index] = z
     _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)

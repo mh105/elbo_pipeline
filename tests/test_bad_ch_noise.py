@@ -14,6 +14,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
+from test_bad_ch_local_signals import set_sphere_positions
 
 
 def make_raw(data, sfreq=250, first_samp=0, meas_date=None, average=False):
@@ -28,10 +29,10 @@ def make_raw(data, sfreq=250, first_samp=0, meas_date=None, average=False):
         data = np.vstack([data, np.zeros(data.shape[1])])
     info = mne.create_info(names, sfreq, "eeg")
     info.set_meas_date(meas_date)
-    return mne.io.RawArray(
+    return set_sphere_positions(mne.io.RawArray(
         data, info,
         first_samp=first_samp, verbose=False,
-    )
+    ))
 
 
 def std_raw(n_bad=2, sfreq=250, window_length=2):
@@ -538,6 +539,7 @@ class TestWindowedNoiseDetection(unittest.TestCase):
         raw = std_raw()
         cz = mne.create_info(["Cz"], raw.info["sfreq"], "eeg")
         raw.add_channels([mne.io.RawArray(np.zeros((1, raw.n_times)), cz, verbose=False)])
+        set_sphere_positions(raw)
         raw._data[1, 5] = np.nan
         report = {}
         report.update(step2.bad_ch_by_nan(raw))  # Needs the native reference, Cz.

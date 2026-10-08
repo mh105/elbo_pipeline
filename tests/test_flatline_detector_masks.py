@@ -14,6 +14,7 @@ if str(pipeline_dir) not in sys.path:
 
 import step2_bad_ch_time_detection as step2
 from step2_bad_ch_time_detection import _flatline_configurations
+from test_bad_ch_local_signals import set_sphere_positions
 
 
 SFREQ = 250
@@ -27,9 +28,9 @@ def native_raw(n_windows=4, n_nonreference=12, first_samp=0, tail=0, seed=17):
     data *= np.linspace(8, 12, n_nonreference)[:, None] * 1e-6
     names = [f"E{i}" for i in range(n_nonreference)] + ["Cz"]
     data = np.vstack([data, np.zeros(n_times)])
-    return mne.io.RawArray(
+    return set_sphere_positions(mne.io.RawArray(
         data, mne.create_info(names, SFREQ, "eeg"), first_samp=first_samp, verbose=False,
-    )
+    ))
 
 
 def flatlines_for(raw, intervals):
