@@ -248,7 +248,7 @@ class TestSmallDetection(unittest.TestCase):
         small = step2.bad_ch_by_small(raw)
         self.assertIn("E10", small["small"])
         with patch.object(step2, "plot_bad_ch_report"):
-            report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+            report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
         self.assertEqual(details["initial_bads"], small["small"])
         self.assertNotIn("small", report)
         for iteration in details["iterations"]:
@@ -258,9 +258,12 @@ class TestSmallDetection(unittest.TestCase):
         flagged = set(small["small"]).union(*report.values())
         expected.info["bads"] = [name for name in raw.ch_names if name in flagged]
         expected.interpolate_bads(reset_bads=True, verbose=False)
-        expected.set_eeg_reference("average", projection=False, verbose=False)
-        np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-14)
-        self.assertEqual(raw.info["bads"], [])
+        np.testing.assert_allclose(details["final_reference"],
+                                   expected.get_data(picks="eeg").mean(axis=0),
+                                   rtol=0, atol=1e-14)
+        np.testing.assert_array_equal(raw.get_data(), native.get_data())
+        new = [name for name in raw.ch_names if name in set().union(*report.values())]
+        self.assertEqual(raw.info["bads"], small["small"] + new)
 
     def test_one_window_is_allowed_and_missing_windows_or_invalid_cutoffs_raise(self):
         _, details = step2.bad_ch_by_small(native_field(seconds=2), return_details=True)

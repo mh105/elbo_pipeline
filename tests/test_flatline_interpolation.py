@@ -72,7 +72,7 @@ class TestSphericalSpline(unittest.TestCase):
         self.assertIs(weights, step2._spline_weights(geometry, donors, targets))
         self.assertEqual(geometry["row_of"][-1], -1)
 
-    def test_whole_bad_nan_channel_mean_and_repair_match_mne(self):
+    def test_whole_bad_nan_channel_mean_matches_mne(self):
         raw = make_raw()
         raw._data[NAMES.index("T7")] = np.nan
         raw.info["bads"] = ["T7", "EOG"]
@@ -83,9 +83,6 @@ class TestSphericalSpline(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
-        step2._interpolate_bads_and_flatlines_inplace(raw, raw.info["bads"], geometry=geometry)
-        np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
-        self.assertEqual(raw.info["bads"], ["T7", "EOG"])
 
     def test_overlapping_local_spans_use_genuine_donors_and_skip_global_bad(self):
         raw = make_raw()
@@ -100,33 +97,49 @@ class TestSphericalSpline(unittest.TestCase):
             raw._data[NAMES.index(name), 450:550] = 0
         flatlines = flatlines_for(raw, spans)
         original = raw.copy()
-        expected = mne_reconstruction(original, ["T7"])
+        # The mean repairs the bad T7 too; the in-place repair leaves it as it is.
+        reconstruction = mne_reconstruction(original, ["T7"])
+        expected = original.copy()
         intervals = [(200, 400, ["F7"]), (400, 450, ["F7", "F3"]),
                      (550, 600, ["F7", "F3"]), (600, 800, ["F3"])]
         for start, stop, local in intervals:
             repaired = mne_reconstruction(original, ["T7"] + local)
             rows = [raw.ch_names.index(name) for name in ["T7"] + local]
-            expected._data[rows, start:stop] = repaired._data[rows, start:stop]
+            reconstruction._data[rows, start:stop] = repaired._data[rows, start:stop]
+            expected._data[rows[1:], start:stop] = repaired._data[rows[1:], start:stop]
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, raw.info["bads"], flatlines, geometry)
         self.assertTrue(np.isfinite(mean).all())
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
-        np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
+        np.testing.assert_allclose(mean, reconstruction._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
-        step2._interpolate_bads_and_flatlines_inplace(raw, raw.info["bads"], flatlines, geometry)
+        with patch.object(step2, "_spline_weights", wraps=step2._spline_weights) as spline:
+            step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
-        raw._data[geometry["picks"]] -= mean
-        np.testing.assert_allclose(raw._data[geometry["picks"]].mean(axis=0), 0,
-                                   rtol=0, atol=1e-18)
-        np.testing.assert_array_equal(raw._data[NAMES.index("Cz")], -mean)
         np.testing.assert_array_equal(raw._data[-1], original._data[-1])
         self.assertEqual(raw.info["bads"], ["T7", "EOG"])
         self.assertEqual(raw.annotations, original.annotations)
-        for donors, targets in geometry["weights"]:
+        self.assertGreater(spline.call_count, 0)
+        for call in spline.call_args_list:
+            donors, targets = call.args[1], call.args[2]
             self.assertFalse(set(donors) & set(targets))
-            self.assertNotIn(NAMES.index("T7"), donors)
+            self.assertNotIn(NAMES.index("T7"), set(donors) | set(targets))
 
-    def test_repeated_mean_and_final_repair_reuse_the_kernel_and_weights(self):
+    def test_local_repair_leaves_bad_channels_alone(self):
+        raw = make_raw()
+        raw._data[NAMES.index("F7"), 100:300] = 0
+        raw._data[NAMES.index("F3"), 200:400] = 0
+        flatlines = flatlines_for(raw, {"F7": [[100, 300]], "F3": [[200, 400]]})
+        raw.info["bads"] = ["F7", "EOG"]  # Flagged after flatline detection.
+        expected = raw.copy()
+        repaired = mne_reconstruction(raw, ["F7", "F3"])
+        row = raw.ch_names.index("F3")
+        expected._data[row, 200:400] = repaired._data[row, 200:400]
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
+        self.assertEqual(raw.info["bads"], ["F7", "EOG"])
+
+    def test_repeated_mean_reuses_the_kernel_and_weights(self):
         raw = make_raw()
         flatlines = flatlines_for(raw, {"F7": [[200, 600]], "F3": [[400, 800]]})
         with patch.object(step2, "_calc_g", wraps=step2._calc_g) as kernel:
@@ -136,7 +149,6 @@ class TestSphericalSpline(unittest.TestCase):
                 first = solve.call_count
                 self.assertGreater(first, 0)
                 again = step2._robust_mean(raw, ["T7"], flatlines, geometry)
-                step2._interpolate_bads_and_flatlines_inplace(raw, ["T7"], flatlines, geometry)
                 self.assertEqual(solve.call_count, first)
             self.assertEqual(kernel.call_count, 1)
         np.testing.assert_array_equal(mean, again)
@@ -149,7 +161,7 @@ class TestSphericalSpline(unittest.TestCase):
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names})
         self.assertEqual(flatlines["global_segments"], [[450, 550]])  # 8 of 29 > 25%.
         default = raw.copy()
-        step2._interpolate_bads_and_flatlines_inplace(default, [], flatlines)
+        step2.interpolate_local_flatline_inplace(default, flatlines)
         np.testing.assert_array_equal(default.get_data(), raw.get_data())
 
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names},
@@ -162,7 +174,7 @@ class TestSphericalSpline(unittest.TestCase):
         mean = step2._robust_mean(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
-        step2._interpolate_bads_and_flatlines_inplace(raw, [], flatlines, geometry)
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         self.assertGreater(np.abs(raw._data[rows, 450:550]).max(), 0)
 
@@ -176,7 +188,7 @@ class TestSphericalSpline(unittest.TestCase):
         expected._data[row, 100:300] = repaired._data[row, 100:300]
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, [], flatlines, geometry)
-        step2._interpolate_bads_and_flatlines_inplace(raw, [], flatlines, geometry)
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
@@ -184,12 +196,19 @@ class TestSphericalSpline(unittest.TestCase):
     def test_long_recording_is_applied_in_chunks(self):
         raw = make_raw(n_times=17000)
         raw._data[NAMES.index("T7")] = np.nan
+        raw.info["bads"] = ["T7"]
         expected = mne_reconstruction(raw, ["T7"])
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, ["T7"], geometry=geometry)
-        step2._interpolate_bads_and_flatlines_inplace(raw, ["T7"], geometry=geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
+        row = raw.ch_names.index("F7")
+        raw._data[row, 100:16900] = 0  # Longer than one 8192-sample chunk.
+        flatlines = flatlines_for(raw, {"F7": [[100, 16900]]})
+        expected = raw.copy()
+        repaired = mne_reconstruction(raw, ["T7", "F7"])
+        expected._data[row, 100:16900] = repaired._data[row, 100:16900]
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
 
     def test_invalid_sensor_position_and_missing_donors_raise(self):

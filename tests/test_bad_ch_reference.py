@@ -60,7 +60,7 @@ class TestReferenceRequirements(unittest.TestCase):
 
     def test_native_only_methods_reject_re_referenced_data(self):
         methods = NATIVE_ONLY + (step2.detect_flatline_inplace, step2.pca_cleaning_inplace,
-                                 step2.robust_average_reference_inplace)
+                                 step2.bad_ch_under_robust_ref)
         for method in methods:
             for reference_channel, message in ((None, "exactly one"), ("Cz", "not entirely zero")):
                 with self.subTest(method=method.__name__, reference=reference_channel):

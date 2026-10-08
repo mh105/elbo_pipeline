@@ -77,20 +77,20 @@ class TestRobustAverageReference(unittest.TestCase):
         self.plot_report = plot_report.start()
         self.addCleanup(plot_report.stop)
 
-    def test_interpolates_all_bads_and_subtracts_the_robust_mean(self):
+    def test_lists_new_bads_and_leaves_the_data_native(self):
         raw = make_native_raw(noisy="O1")
-        raw._data[NAMES.index("T7"), 100:200] = np.nan  # Interpolation never reads bads.
+        raw._data[NAMES.index("T7"), 100:200] = np.nan  # The robust mean never reads bads.
         raw.info["bads"] = ["T7", "EOG"]
         native = raw.copy()
 
-        def check_uninterpolated(plotted_raw, report):
+        def check_unlisted(plotted_raw, report):
             self.assertIs(plotted_raw, raw)
             self.assertEqual(plotted_raw.info["bads"], ["T7", "EOG"])
             np.testing.assert_array_equal(plotted_raw.get_data(), native.get_data())
             self.assertEqual(report["std"], ["O1"])
 
-        self.plot_report.side_effect = check_uninterpolated
-        report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        self.plot_report.side_effect = check_unlisted
+        report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
         self.plot_report.assert_called_once_with(raw, report)
         reference = details["final_reference"]
 
@@ -98,22 +98,18 @@ class TestRobustAverageReference(unittest.TestCase):
                                   "BBnoise": [], "correlation": []})
         self.assertEqual(details["initial_bads"], ["T7"])
         self.assertEqual(set().union(*report.values()), {"O1"})
-        self.assertEqual(raw.info["bads"], ["EOG"])
-        expected, mean = interpolated_average(native, ["T7", "O1"])
-        eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
-        np.testing.assert_allclose(raw._data[eeg], expected._data[eeg], rtol=0, atol=1e-15)
+        self.assertEqual(raw.info["bads"], ["T7", "EOG", "O1"])
+        _, mean = interpolated_average(native, ["T7", "O1"])
         np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
-        np.testing.assert_allclose(raw._data[eeg].mean(axis=0), 0, rtol=0, atol=1e-18)
-        np.testing.assert_array_equal(raw._data[NAMES.index("Cz")], -reference)
-        np.testing.assert_array_equal(raw.get_data(picks="EOG"), native.get_data(picks="EOG"))
-        self.assertIsNone(step2._reference_channel(raw, "average"))
+        np.testing.assert_array_equal(raw.get_data(), native.get_data())
+        self.assertEqual(step2._reference_channel(raw, "native"), "Cz")
 
     def test_details_describe_each_pass_without_changing_the_result(self):
         raw = make_native_raw(noisy="O1")
         raw.info["bads"] = ["T7", "EOG"]
         expected = raw.copy()
-        expected_report = step2.robust_average_reference_inplace(expected)
-        report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+        expected_report = step2.bad_ch_under_robust_ref(expected)
+        report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
         self.assertIsInstance(expected_report, dict)
         self.assertEqual(report, expected_report)
         self.assertNotIn("initial", report)
@@ -121,7 +117,7 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual(details["initial_bads"], ["T7"])
         self.assertIsInstance(details, dict)
         self.assertEqual(set(details), {"iterations", "final_reference", "initial_bads"})
-        np.testing.assert_array_equal(details["final_reference"], -expected._data[NAMES.index("Cz")])
+        self.assertEqual(raw.info["bads"], expected.info["bads"])
         self.assertEqual(details["final_reference"].shape, (raw.n_times,))
         self.assertEqual(details["final_reference"].dtype, np.dtype(np.float64))
         np.testing.assert_array_equal(raw.get_data(), expected.get_data())
@@ -143,7 +139,7 @@ class TestRobustAverageReference(unittest.TestCase):
         with patch.object(step2, "bad_ch_by_small", side_effect=AssertionError(
             "Smallness must only be checked before robust average referencing."
         )) as small:
-            report, details = step2.robust_average_reference_inplace(
+            report, details = step2.bad_ch_under_robust_ref(
                 make_native_raw(noisy="O1"), return_details=True,
             )
         small.assert_not_called()
@@ -162,15 +158,15 @@ class TestRobustAverageReference(unittest.TestCase):
                 native = raw.copy()
                 detector, calls = scheduled_detector(schedule)
                 with patch.object(step2, "bad_ch_by_HFnoise", detector):
-                    report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+                    report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
                 reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
                 self.assertEqual(details["initial_bads"], [])
                 self.assertEqual(report["HFnoise"], final)
                 self.assertEqual(set().union(*report.values()), set(final))
-                expected, mean = interpolated_average(native, final)
-                np.testing.assert_allclose(raw.get_data(), expected.get_data(),
-                                           rtol=0, atol=1e-15)
+                self.assertEqual(raw.info["bads"], final)
+                _, mean = interpolated_average(native, final)
+                np.testing.assert_array_equal(raw.get_data(), native.get_data())
                 np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
 
     def test_cycles_mark_every_channel_flagged_in_the_cycle_as_bad(self):
@@ -189,15 +185,15 @@ class TestRobustAverageReference(unittest.TestCase):
                                  rf"{re.escape(repr(flipping))} flipping.*as bad: "
                                  rf"{re.escape(repr(final))}"
                 ):
-                    report, details = step2.robust_average_reference_inplace(raw, return_details=True)
+                    report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
                 reference = details["final_reference"]
                 self.assertEqual(len(calls), passes)
                 self.assertEqual(details["initial_bads"], [])
                 self.assertEqual(report["HFnoise"], final)
                 self.assertEqual(set().union(*report.values()), set(final))
-                expected, mean = interpolated_average(native, final)
-                np.testing.assert_allclose(raw.get_data(), expected.get_data(),
-                                           rtol=0, atol=1e-15)
+                self.assertEqual(raw.info["bads"], final)
+                _, mean = interpolated_average(native, final)
+                np.testing.assert_array_equal(raw.get_data(), native.get_data())
                 np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
 
     def test_cycle_report_merges_only_the_cycling_passes(self):
@@ -209,7 +205,7 @@ class TestRobustAverageReference(unittest.TestCase):
         with patch.object(step2, "bad_ch_by_std", std), patch.object(
             step2, "bad_ch_by_HFnoise", hf
         ), self.assertWarnsRegex(UserWarning, r"pass 4 would repeat pass 2, with \['F4'\]"):
-            report = step2.robust_average_reference_inplace(make_native_raw())
+            report = step2.bad_ch_under_robust_ref(make_native_raw())
         self.assertEqual(len(calls), 3)
         self.assertEqual(report["HFnoise"], ["F3", "F4"])
         self.assertEqual(report["std"], [])
@@ -221,7 +217,7 @@ class TestRobustAverageReference(unittest.TestCase):
         with patch.object(step2, "bad_ch_by_HFnoise", detector), self.assertRaisesRegex(
             RuntimeError, r"did not converge in 3 passes.*\[\['F3'\], \['F4'\], \['Fz'\]\]"
         ):
-            step2.robust_average_reference_inplace(raw, max_iterations=3)
+            step2.bad_ch_under_robust_ref(raw, max_iterations=3)
         self.assertEqual(len(calls), 3)
         self.assertEqual(raw.info["bads"], [])
         np.testing.assert_array_equal(raw.get_data(), original)
@@ -230,7 +226,7 @@ class TestRobustAverageReference(unittest.TestCase):
         with patch.object(step2, "bad_ch_by_RANSAC", side_effect=AssertionError(
             "RANSAC must not run during robust average referencing."
         )) as ransac:
-            report, details = step2.robust_average_reference_inplace(
+            report, details = step2.bad_ch_under_robust_ref(
                 make_native_raw(noisy="O1"), return_details=True,
             )
         ransac.assert_not_called()
@@ -242,12 +238,12 @@ class TestRobustAverageReference(unittest.TestCase):
     def test_input_requirements(self):
         for max_iterations in (0, 1.5):
             with self.subTest(max_iterations=max_iterations), self.assertRaises(ValueError):
-                step2.robust_average_reference_inplace(make_native_raw(),
-                                                       max_iterations=max_iterations)
+                step2.bad_ch_under_robust_ref(make_native_raw(),
+                                              max_iterations=max_iterations)
         raw = make_native_raw()
         raw._data[0, 5] = np.nan
         with self.assertRaisesRegex(ValueError, "bad_ch_by_nan"):
-            step2.robust_average_reference_inplace(raw)
+            step2.bad_ch_under_robust_ref(raw)
 
 
 if __name__ == "__main__":

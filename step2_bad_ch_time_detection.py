@@ -10,8 +10,8 @@ global dropouts (more than 25% of the eligible channels flat at once) as
 BAD_by_flatline, and bridges each channel's local flat spans linearly so that
 later filters see no step. It returns a flatlines dictionary whose local
 intervals are widened by the reach of the later 0.3 Hz high-pass (5.5 s on each
-side). Every later detector and robust_average_reference_inplace takes
-that dictionary.
+side). Every later detector, bad_ch_under_robust_ref, and
+interpolate_local_flatline_inplace take that dictionary.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
@@ -36,7 +36,7 @@ bad_ch_by_pop counts individual electrode pops instead; its details include
 each channel's pop times and step sizes.
 
 bad_ch_by_small runs once on native-reference data, after bad_ch_by_pop and
-before robust_average_reference_inplace. It predicts each channel from all
+before bad_ch_under_robust_ref. It predicts each channel from all
 other valid EEG channels, including the known-zero reference, using cached
 spherical splines. Locally flat channels remain scored targets but are not
 donors. In each window, score log(observed MAD / predicted MAD) against the
@@ -53,7 +53,7 @@ The native reference is the one non-bad EEG channel whose samples are all
 exactly zero, or a channel named with reference_channel, which must be entirely
 zero (other all-zero channels are then ordinary, dead channels). bad_ch_by_nan,
 detect_flatline_inplace, bad_ch_by_flatline, bad_ch_by_small,
-pca_cleaning_inplace, and robust_average_reference_inplace require it;
+pca_cleaning_inplace, and bad_ch_under_robust_ref require it;
 bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
 require re-referenced data, with no entirely zero EEG channel, bad or not;
 bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
@@ -69,10 +69,13 @@ artifacts shared across channels. With return_removed=True,
 remove_pca_signal_inplace can subtract the same removed signals from a copy
 high-passed at a lower cutoff (filter first, then subtract).
 
-robust_average_reference_inplace then iterates bad-channel detection under a
-robust average reference (the mean with bad channels and local flat intervals
-interpolated), interpolates them, and subtracts the final robust mean.
-RANSAC remains available separately and is not used in this iteration.
+bad_ch_under_robust_ref then iterates bad-channel detection under a robust
+average reference (the mean with bad channels and local flat intervals
+interpolated) and adds the final flags to raw.info["bads"]; the data keep the
+native reference, and the robust mean is returned in its details. RANSAC
+remains available separately and is not used in this iteration. With the bad
+channels final, interpolate_local_flatline_inplace repairs the local flat
+intervals of the good channels from the other good channels.
 """
 
 from collections import defaultdict
@@ -161,7 +164,8 @@ def _reference_channel(raw, reference, reference_channel=None, known_zeros=None)
             raise ValueError(
                 f"EEG channels {zeros} are entirely zero, as the native "
                 "reference is; re-reference every EEG channel first, e.g., "
-                "with robust_average_reference_inplace."
+                "by subtracting the final_reference in the details of "
+                "bad_ch_under_robust_ref."
             )
         return None
     zeros = _zero_eeg_channels(raw, eeg_good, known_zeros)
@@ -386,9 +390,10 @@ def detect_flatline_inplace(
     an 11-s filter, so 5.5 s on each side at any sampling rate), to protect
     the span's edges too. These widened local intervals are
     the dictionary's segments, used everywhere downstream: bad_ch_by_flatline's
-    count, each detector's exclusions, RANSAC's flat-as-failure rule, and the
-    robust reference's repair. downstream_highpass_hz=None skips the widening
-    of both the local intervals and the annotation.
+    count, each detector's exclusions, RANSAC's flat-as-failure rule, the
+    robust mean's repair, and interpolate_local_flatline_inplace.
+    downstream_highpass_hz=None skips the widening of both the local intervals
+    and the annotation.
 
     Detect with the union of three kinds of block, each judged against
     tolerance_v volts:
@@ -1206,7 +1211,7 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     picks, window_samples, n_windows, and the band-limited data of picks. In
     a robust-reference pass, _pass["band_limited"] supplies that data
     instead, as the band-limited native channels minus the band-limited
-    robust mean (robust_average_reference_inplace).
+    robust mean (bad_ch_under_robust_ref).
     """
     sfreq = raw.info["sfreq"]
     if sfreq <= 100:
@@ -1401,11 +1406,9 @@ def plot_bad_ch_report(raw, bad_ch_report):
     channels flagged by multiple criteria. Omit categories without EEG
     detections from the legend. Non-EEG entries are not plotted. Unflagged
     sensors are gray. Also call plot_bad_ch_topo_traces for a random unmasked
-    10-s window. If raw.info["bads"] is empty and the report has detections,
-    the topoplot title states that bad channels have been interpolated. If
-    nonempty raw.info["bads"] differs from the report's detections, show those
-    existing bads as a separate gray raw.info["bads"] category on both plots.
-    raw and bad_ch_report are unchanged.
+    10-s window. If nonempty raw.info["bads"] differs from the report's
+    detections, show those existing bads as a separate gray raw.info["bads"]
+    category on both plots. raw and bad_ch_report are unchanged.
     """
     print(bad_ch_report)
 
@@ -1413,9 +1416,7 @@ def plot_bad_ch_report(raw, bad_ch_report):
     raw_bads = set(raw.info["bads"])
     title = "Bad channels by criterion"
     plot_report = bad_ch_report
-    if not raw_bads and reported_bads:
-        title += "\nBad channels have been interpolated"
-    elif raw_bads and raw_bads != reported_bads:
+    if raw_bads and raw_bads != reported_bads:
         plot_report = dict(bad_ch_report)
         plot_report['raw.info["bads"]'] = list(raw.info["bads"])
 
@@ -1905,38 +1906,6 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     return reference
 
 
-def _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines=None, geometry=None):
-    """Repair whole bad channels and local flat intervals
-    without changing metadata.
-
-    Apply the same configurations used by _robust_mean, before the
-    caller subtracts that mean. Previously repaired channels are never donors
-    for another repair in the same interval.
-    """
-    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-    sample_chunk = 8192
-    if not raw.preload:
-        raise ValueError("raw must be preloaded.")
-    _validate_flatlines(raw, flatlines)
-    if geometry is None:
-        geometry = _spline_geometry(raw)
-    bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in bads)
-    if bads:
-        donors, _ = _mean_configuration(geometry, bads)
-        weights = _spline_weights(geometry, donors, bads)
-        for start in range(0, raw.n_times, sample_chunk):
-            stop = min(start + sample_chunk, raw.n_times)
-            raw._data[list(bads), start:stop] = weights @ raw._data[donors, start:stop]
-    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
-        if flat:
-            invalid = np.union1d(np.asarray(bads, dtype=int), flat)
-            donors, _ = _mean_configuration(geometry, invalid)
-            weights = _spline_weights(geometry, donors, invalid)
-            for first in range(start, stop, sample_chunk):
-                last = min(first + sample_chunk, stop)
-                raw._data[invalid, first:last] = weights @ raw._data[donors, first:last]
-
-
 # Local, time-invariant criteria
 
 def bad_ch_by_impedance(
@@ -2116,7 +2085,7 @@ def bad_ch_by_voltage(
     samples beyond +/-voltage_threshold_uv (NaN without scorable samples).
 
     _pass is an internal cache of reference-check and voltage-mask inputs
-    shared by detectors within a robust_average_reference_inplace iteration.
+    shared by detectors within a bad_ch_under_robust_ref iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
@@ -2216,7 +2185,7 @@ def bad_ch_by_std(
     window waveforms in chronological order.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
-    shared by detectors within a robust_average_reference_inplace iteration.
+    shared by detectors within a bad_ch_under_robust_ref iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
@@ -2323,7 +2292,7 @@ def bad_ch_by_HFnoise(
     they are not widened again here.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
-    shared by detectors within a robust_average_reference_inplace iteration.
+    shared by detectors within a bad_ch_under_robust_ref iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
@@ -2462,7 +2431,7 @@ def bad_ch_by_BBnoise(
     denominator.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
-    shared by detectors within a robust_average_reference_inplace iteration.
+    shared by detectors within a bad_ch_under_robust_ref iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
     SPECTRAL_BANDS = ((0, 4), (4, 8), (8, 12), (12, 30), (30, 45))
@@ -2602,7 +2571,7 @@ def bad_ch_by_pop(
     before it, and its signed 10-60 ms level change in microvolts.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
-    shared by detectors within a robust_average_reference_inplace iteration.
+    shared by detectors within a bad_ch_under_robust_ref iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
     for name, value in (
@@ -2746,7 +2715,7 @@ def bad_ch_by_small(
     Require the native reference, as in bad_ch_by_flatline. Exclude existing
     bads and non-EEG channels from targets and donors; the known-zero native
     reference is always a donor, never a target. Run once after bad_ch_by_pop,
-    before robust_average_reference_inplace, on the supplied data without
+    before bad_ch_under_robust_ref, on the supplied data without
     further filtering. Use complete non-overlapping window_length-second
     windows from the Raw start (2 s by default). Ignore the trailing partial
     window, BAD annotations, and the temporary voltage mask.
@@ -2918,7 +2887,7 @@ def bad_ch_by_correlation(
     0.3 Hz high-pass reach (5.5 s), beyond this band-limit's 2.31-s reach, so
     they are not widened again here.
 
-    _pass is an internal cache shared within a robust_average_reference_inplace
+    _pass is an internal cache shared within a bad_ch_under_robust_ref
     iteration, reusing reference-check inputs, voltage-mask inputs, and
     band-limited data. Leave _pass=None for standalone calls to compute their
     own setup.
@@ -3064,7 +3033,7 @@ def bad_ch_by_RANSAC(
     complete windows: unlike the per-window metrics, it is not NaN in
     unretained windows.
 
-    _pass is an internal cache shared within a robust_average_reference_inplace
+    _pass is an internal cache shared within a bad_ch_under_robust_ref
     iteration, reusing reference-check inputs, voltage-mask inputs, and
     band-limited data. Leave _pass=None for standalone calls to compute their
     own setup.
@@ -3218,12 +3187,12 @@ def bad_ch_by_RANSAC(
     return report
 
 
-def robust_average_reference_inplace(
+def bad_ch_under_robust_ref(
     raw, reference_channel=None, max_iterations=10, *, flatlines=None,
     return_details=False,
 ):
-    """Robust-average-reference preloaded raw in place;
-    return its bad-channel report.
+    """Detect bad channels under a robust average reference, add them to
+    raw.info["bads"], and return their bad-channel report.
 
     Require the native reference, as in bad_ch_by_flatline. Existing bads stay
     bad and are never re-evaluated. Non-bad EEG data must be finite.
@@ -3250,38 +3219,36 @@ def robust_average_reference_inplace(
     recompute the robust mean with them interpolated. Raise if neither has
     happened within max_iterations passes.
 
-    Plot the final report and the original native-referenced traces before
-    interpolation, including existing bads as a gray category. Then
-    reconstruct whole-channel bads and local flat intervals in raw,
-    using the same cached geometry/configurations, and subtract the last robust
-    mean from every EEG channel, and remove the EEG channels from
-    raw.info["bads"], so all EEG channels average to zero. Non-EEG channels are
-    unchanged. Unless the reference channel was interpolated, verify that it
-    now holds exactly minus the robust mean.
+    Plot the final report and the native-referenced traces, including existing
+    bads as a gray category. Then add the channels flagged in the last pass
+    (after a cycle, every channel flagged within it) to raw.info["bads"],
+    preserving existing labels without duplicates. The data and annotations
+    are unchanged: raw keeps the native reference, and bad channels keep
+    their recorded traces. Run interpolate_local_flatline_inplace afterwards to
+    repair the local flat intervals of the channels that stay good.
 
     Return robust_bad_ch_report, the last pass's {criterion: names} (after a
     cycle, each criterion's channels across the cycling passes).
 
     With return_details=True, return (robust_bad_ch_report, details).
     details["initial_bads"] contains existing bad EEG channels in Raw order.
-    details["final_reference"] is the subtracted robust mean in volts, shape
-    (n_times,); adding it back to every EEG channel restores the reconstructed
-    signals before re-referencing. details["iterations"] is a list with one
-    dict per pass: interpolated (the channels interpolated for its robust
-    mean), flagged (the channels it flagged), and each criterion's details from
-    its detector with return_details=True. Each detector's details cover the
-    channels it evaluated, without the existing bads and the channels flagged
-    before it in that pass. Known local flat observations are excluded from the
-    applicable detectors; their final repaired traces differ from the invalid
-    inputs those detectors excluded. Pass the dictionary that
-    detect_flatline_inplace returned before filtering; its alignment is
-    validated, and global annotations are retained.
+    details["final_reference"] is the robust mean with every final bad channel
+    and the local flat intervals repaired, in volts, shape (n_times,);
+    subtracting it from every EEG channel gives the robust average reference.
+    details["iterations"] is a list with one dict per pass: interpolated (the
+    channels interpolated for its robust mean), flagged (the channels it
+    flagged), and each criterion's details from its detector with
+    return_details=True. Each detector's details cover the channels it
+    evaluated, without the existing bads and the channels flagged before it in
+    that pass. Known local flat observations are excluded from the applicable
+    detectors. Pass the dictionary that detect_flatline_inplace returned before
+    filtering; its alignment is validated, and global annotations are retained.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     if not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer.")
-    reference_channel = _reference_channel(raw, "native", reference_channel)
+    _reference_channel(raw, "native", reference_channel)
     _validate_flatlines(raw, flatlines)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
@@ -3378,19 +3345,9 @@ def robust_average_reference_inplace(
             f"{[p['flagged'] for p in iterations]}"
         )
 
-    bads = [name for name in eeg_names if name in initial or name in flagged]
-    plot_bad_ch_report(raw, robust_bad_ch_report)  # Plot before interpolation.
-    _interpolate_bads_and_flatlines_inplace(raw, bads, flatlines, geometry)
-    for i in eeg:
-        raw._data[i] -= reference
-    raw.info["bads"] = [name for name in orig_bads if name not in eeg_names]
-    if reference_channel not in bads and not np.array_equal(
-        raw._data[raw.ch_names.index(reference_channel)], -reference
-    ):
-        raise RuntimeError(
-            f"Reference channel {reference_channel} does not hold minus the "
-            "robust mean after re-referencing."
-        )
+    # Before listing the flags, so that only the existing bads are gray.
+    plot_bad_ch_report(raw, robust_bad_ch_report)
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + flagged))
     if return_details:
         details = {
             "initial_bads": initial,
@@ -3399,6 +3356,41 @@ def robust_average_reference_inplace(
         }
         return robust_bad_ch_report, details
     return robust_bad_ch_report
+
+
+def interpolate_local_flatline_inplace(raw, flatlines):
+    """Interpolate the local flat intervals of the good EEG channels in place
+    from the other good EEG channels; return None.
+
+    Run this once raw.info["bads"] lists the final bad channels (after
+    bad_ch_under_robust_ref), before ASR. flatlines is the dictionary from
+    detect_flatline_inplace, whose alignment is validated. Repair its local
+    intervals, widened by the reach of the 0.3 Hz high-pass, except inside the
+    global dropouts it saved, which stay as they are. Channels in
+    raw.info["bads"] are neither repaired nor donors. Each set of channels
+    flat at the same time is repaired by spherical splines from the good
+    channels not flat then, read from the input, so a repaired trace is never
+    a donor; on native data the all-zero reference is a donor unless it is
+    bad. The EEG data lose rank within the repaired intervals. Bad labels,
+    annotations, non-EEG channels, and all other samples are unchanged.
+    """
+    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
+    sample_chunk = 8192
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    _validate_flatlines(raw, flatlines)
+    geometry = _spline_geometry(raw)
+    bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
+    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
+        if flat:
+            invalid = np.union1d(np.asarray(bads, dtype=int), flat)
+            donors = geometry["picks"][~np.isin(geometry["picks"], invalid)]
+            weights = _spline_weights(geometry, donors, flat)
+            for first in range(start, stop, sample_chunk):
+                last = min(first + sample_chunk, stop)
+                raw._data[list(flat), first:last] = (
+                    weights @ raw._data[donors, first:last]
+                )
 
 
 # %% Part 2: Definitive bad-time detection (to be developed)
@@ -3439,23 +3431,23 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_small(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
-    # %% Robust average reference: interpolate all bad channels, which
-    # info["bads"] no longer lists; bad_ch_report keeps them by criterion.
-    robust_bad_ch_report = robust_average_reference_inplace(
-        raw_bads, flatlines=flatlines
-    )
+    # %% Bad channels under the robust average reference. raw_bads keeps the
+    # native reference and lists every bad channel in info["bads"];
+    # bad_ch_report keeps them by criterion.
+    robust_bad_ch_report = bad_ch_under_robust_ref(raw_bads, flatlines=flatlines)
     for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
 
-    # Band-power topomaps after robust average referencing (bads interpolated).
-    # The median Welch PSD shows persistent channel power; brief
-    # large events barely count.
-    psd_topomap_figure = raw_bads.compute_psd(
-        fmax=45.0, average="median", verbose=False, exclude="bads"
-    ).plot_topomap()
+    # %% Interpolate the good channels' local flat intervals before ASR
+    interpolate_local_flatline_inplace(raw_bads, flatlines)
 
-    # Average-referenced traces, excluding interpolated bad channels.
-    plot_voltage_traces(
-        raw_bads,
-        exclude=[name for names in bad_ch_report.values() for name in names],
-    )
+    # Band-power topomaps in dB under the native reference, without the bads
+    # and the all-zero reference. The median Welch PSD shows persistent
+    # channel power; brief large events barely count.
+    psd_topomap_figure = raw_bads.compute_psd(
+        fmax=45.0, average="median", verbose=False,
+        exclude=raw_bads.info["bads"] + [flatlines["reference_channel"]],
+    ).plot_topomap(dB=True)
+
+    # Native-referenced traces, without the bads.
+    plot_voltage_traces(raw_bads)

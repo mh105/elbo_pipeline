@@ -53,7 +53,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
                          for name, criteria in CRITERIA.items()}
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))
-            report = step2.robust_average_reference_inplace(raw, flatlines=flatlines)
+            report = step2.bad_ch_under_robust_ref(raw, flatlines=flatlines)
         self.assertEqual(geometry.call_count, 1)
         self.assertEqual(report, {criterion: [] for criteria in CRITERIA.values()
                                   for criterion in criteria})
@@ -63,7 +63,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
             self.assertIs(kwargs["flatlines"], flatlines)
             self.assertNotIn("_geometry", kwargs)
 
-    def test_multiple_passes_reconstruct_joint_invalid_sets_and_preserve_dropouts(self):
+    def test_multiple_passes_reference_joint_invalid_sets_without_changing_data(self):
         raw, flatlines = native_with_flatlines(global_dropout=True)
         original = raw.copy()
         expected = mne_reconstruction(original, ["T7", "F4"])
@@ -86,7 +86,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
             geometry = stack.enter_context(patch.object(step2, "_spline_geometry",
                                                          wraps=step2._spline_geometry))
             kernel = stack.enter_context(patch.object(step2, "_calc_g", wraps=step2._calc_g))
-            report, details = step2.robust_average_reference_inplace(
+            report, details = step2.bad_ch_under_robust_ref(
                 raw, flatlines=flatlines, return_details=True,
             )
         reference = details["final_reference"]
@@ -96,15 +96,11 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
         self.assertEqual(details["initial_bads"], ["T7"])
         self.assertEqual(report["HFnoise"], ["F4"])
         self.assertEqual(set().union(*report.values()), {"F4"})
-        self.assertEqual(raw.info["bads"], ["EOG"])
+        self.assertEqual(raw.info["bads"], ["T7", "EOG", "F4"])
         eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
-        mean = expected._data[eeg].mean(axis=0)
-        expected._data[eeg] -= mean
-        np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
-        np.testing.assert_allclose(raw._data[eeg], expected._data[eeg], rtol=0, atol=1e-15)
-        np.testing.assert_allclose(raw._data[eeg].mean(axis=0), 0, rtol=0, atol=1e-18)
-        np.testing.assert_array_equal(raw._data[NAMES.index("Cz")], -reference)
-        np.testing.assert_array_equal(raw._data[-1], original._data[-1])
+        np.testing.assert_allclose(reference, expected._data[eeg].mean(axis=0),
+                                   rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
         self.assertEqual(raw.annotations, original.annotations)
         # Detector copies contain measured flat traces under their reference;
         # their eligibility mask carries the invalidity, rather than repaired data.
