@@ -628,6 +628,29 @@ class TestWindowedNoiseDetection(unittest.TestCase):
         self.assertIn("E0", result["BBnoise"])
         self.assertEqual(raw.info["bads"], result["BBnoise"])
 
+    def test_bb_smooth_power_gradient_is_absorbed_but_an_isolated_excess_is_not(self):
+        # One sinusoid in each band; amplitude rises 7-fold from the top of the
+        # sphere to the equator, so a cross-channel z of band power would hide
+        # E10's excess below the gradient's spread.
+        rng = np.random.default_rng(3)
+        t = np.arange(4 * 500) / 250
+        data = sum(np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi, (30, 1)))
+                   for f in (2, 6, 10, 20, 40))
+        data *= np.exp(np.linspace(-1, 1, 30))[:, None] * 1e-6
+        self.assertEqual(step2.bad_ch_by_BBnoise(make_raw(data, average=True)),
+                         {"BBnoise": []})
+        data[10] *= 20
+        report, details = step2.bad_ch_by_BBnoise(make_raw(data, average=True),
+                                                  return_details=True)
+        self.assertEqual(report, {"BBnoise": ["E10", "M10"]})
+        names = details["ch_names"]
+        power = details["band_mean_psd_db"]
+        for i, name in enumerate(names):
+            rows = [names.index(n) for n in details["neighbours"][name]]
+            np.testing.assert_allclose(details["band_contrast_db"][i],
+                                       power[i] - np.median(power[rows], axis=0),
+                                       atol=1e-9)
+
     def test_fully_masked_recording_raises_without_input_changes(self):
         for detector in (step2.bad_ch_by_voltage,) + tuple(x[0] for x in WINDOW_DETECTORS):
             with self.subTest(detector=detector.__name__):

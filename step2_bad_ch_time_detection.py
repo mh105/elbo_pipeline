@@ -16,7 +16,8 @@ that dictionary.
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
 bad_ch_by_std reports standard deviation high relative to each channel's six
-nearest neighbours as std. Signal data and input annotations are unchanged.
+nearest neighbours as std; bad_ch_by_BBnoise compares band power with the same
+neighbours. Signal data and input annotations are unchanged.
 
 The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
 bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more than
@@ -944,6 +945,46 @@ def _robust_channel_z(values, scale_floor=np.finfo(float).eps):
     center = np.median(values, axis=0)
     scale = 1.4826 * _mad(values)
     return (values - center) / np.maximum(scale, scale_floor)
+
+
+def _nearest_channels(raw, picks, n_neighbours=6):
+    """Return each pick's other picks, nearest first on the fitted unit sphere
+    (_spline_geometry; ties keep Raw order), as rows of indices into picks,
+    and {channel: its n_neighbours nearest channels' names}.
+    """
+    geometry = _spline_geometry(raw)
+    positions = geometry["positions"][geometry["row_of"][picks]]
+    similarity = positions @ positions.T
+    np.fill_diagonal(similarity, -np.inf)
+    order = np.argsort(-similarity, axis=1, kind="stable")[:, :-1]
+    names = {
+        raw.ch_names[pick]: [raw.ch_names[picks[j]] for j in row[:n_neighbours]]
+        for pick, row in zip(picks, order)
+    }
+    return order, names
+
+
+def _neighbour_contrast(values, order, n_neighbours=6):
+    """Subtract from each row of values (channels, ...) the median over its
+    n_neighbours nearest scored rows, column by column, with order from
+    _nearest_channels. A row is scored where all its values are finite; an
+    unscored row passes its place as a neighbour to the next nearest scored
+    row. Unscored rows and rows with no scored neighbour give NaN.
+    """
+    rows = values.reshape(len(values), -1)
+    scored = np.isfinite(rows).all(axis=1)
+    candidates = scored[order]
+    nearest = candidates & (np.cumsum(candidates, axis=1) <= n_neighbours)
+    # Positions in order of the chosen neighbours, nearest first.
+    chosen = np.argsort(~nearest, axis=1, kind="stable")[:, :n_neighbours]
+    used = np.take_along_axis(nearest, chosen, axis=1)
+    neighbours = np.where(
+        used[..., None], rows[np.take_along_axis(order, chosen, axis=1)], np.nan
+    )
+    contrast = np.full(rows.shape, np.nan)
+    keep = scored & used.any(axis=1)
+    contrast[keep] = rows[keep] - np.nanmedian(neighbours[keep], axis=1)
+    return contrast.reshape(values.shape)
 
 
 def _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff):
@@ -2178,8 +2219,6 @@ def bad_ch_by_std(
     shared by detectors within a robust_average_reference_inplace iteration.
     Leave _pass=None for standalone calls to compute their own setup.
     """
-    N_NEIGHBOURS = 6
-
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
     shared = _mask_inputs(raw) if _pass is None else _pass
@@ -2187,12 +2226,7 @@ def bad_ch_by_std(
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
-    geometry = _spline_geometry(raw)
-    positions = geometry["positions"][geometry["row_of"][picks]]
-    similarity = positions @ positions.T
-    np.fill_diagonal(similarity, -np.inf)
-    # Each row: the other channels, nearest first.
-    order = np.argsort(-similarity, axis=1, kind="stable")[:, :-1]
+    order, neighbour_names = _nearest_channels(raw, picks)
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
@@ -2203,24 +2237,15 @@ def bad_ch_by_std(
             raw, picks, window_samples, n_windows,
             ("robust_std_uv", "log_ratio", "robust_z"),
         )
-        details["neighbours"] = {
-            raw.ch_names[pick]: [raw.ch_names[picks[j]] for j in row[:N_NEIGHBOURS]]
-            for pick, row in zip(picks, order)
-        }
+        details["neighbours"] = neighbour_names
     for start, data in _unmasked_windows(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        robust_std, log_std, log_ratio, z = np.full((4, len(picks)), np.nan)
+        robust_std, log_std, z = np.full((3, len(picks)), np.nan)
         robust_std[valid] = 1.4826 * _mad(data[valid], axis=1)
         np.log(robust_std, out=log_std, where=robust_std > 0)
-        candidates = log_std[order]
-        scored = np.isfinite(candidates)
-        nearest = scored & (np.cumsum(scored, axis=1) <= N_NEIGHBOURS)
-        has_neighbours = nearest.any(axis=1)
-        log_ratio[has_neighbours] = log_std[has_neighbours] - np.nanmedian(
-            np.where(nearest, candidates, np.nan)[has_neighbours], axis=1
-        )
+        log_ratio = _neighbour_contrast(log_std, order)
         scorable = np.isfinite(log_ratio)
         if scorable.any():
             z[scorable] = _robust_channel_z(log_ratio[scorable], scale_floor=1e-6)
@@ -2405,30 +2430,36 @@ def bad_ch_by_BBnoise(
     return_details=False,
     _pass=None,
 ):
-    """Return {"BBnoise": names} for persistently
-    broadband high-power EEG channels.
+    """Return {"BBnoise": names} for EEG channels whose power is persistently
+    high in several bands relative to their nearest neighbours.
 
     Per retained window, compute Welch PSD (one full-window Hamming segment, DC
     removed), average power inside each of SPECTRAL_BANDS' five open intervals,
-    and convert to dB. Compute median/MAD z-scores across channels separately
-    for each band. Flag every channel with z > robust_z_cutoff in at least
+    and convert to dB. In each band, subtract the median dB over the channel's
+    six nearest scored channels, chosen as in bad_ch_by_std, so that a smooth
+    spatial profile of power is absorbed. Compute median/MAD z-scores of this
+    contrast across channels separately for each band, with a 1e-6 dB floor
+    on the spread. Flag every channel with z > robust_z_cutoff in at least
     min_bad_bands, in a single pass with no iterative removal.
 
-    Require re-referenced data as in bad_ch_by_std. Selection, temporary
-    masking, and occurrence denominator follow bad_ch_by_std. Add detections to
-    raw.info["bads"], preserving existing labels without duplicates. Input data
-    and annotations are unchanged.
+    Require re-referenced data and sensor positions as in bad_ch_by_std.
+    Selection, neighbours, temporary masking, and occurrence denominator follow
+    bad_ch_by_std. Add detections to raw.info["bads"], preserving existing
+    labels without duplicates. Input data and annotations are unchanged.
 
     With return_details=True, return (report, details), with the common fields
-    described in bad_ch_by_HFnoise. bands_hz gives the five open intervals.
-    band_mean_psd_db (dB relative to 1 V^2/Hz), robust_z, and band_violates
-    (0/1) have shape (channels, complete windows, bands). n_bad_bands and
-    violates (0/1) have shape (channels, complete windows). Masked windows
-    contain NaN in all metric/flag arrays. flagged_data_uv stores original
-    waveforms only where the channel violates in at least min_bad_bands.
+    described in bad_ch_by_HFnoise and neighbours as in bad_ch_by_std.
+    bands_hz gives the five open intervals. band_mean_psd_db (dB relative to 1
+    V^2/Hz), band_contrast_db (its excess over the neighbours' median, dB),
+    robust_z, and band_violates (0/1) have shape (channels, complete windows,
+    bands). n_bad_bands and violates (0/1) have shape (channels, complete
+    windows). Masked windows contain NaN in all metric/flag arrays.
+    flagged_data_uv stores original waveforms only where the channel violates
+    in at least min_bad_bands.
 
-    With flatlines, omit local-flat observations from metrics, cross-channel
-    baselines, and each channel's occurrence denominator.
+    With flatlines, omit local-flat observations from metrics, neighbour
+    medians, cross-channel baselines, and each channel's occurrence
+    denominator.
 
     _pass is an internal cache of reference-check and voltage-mask inputs
     shared by detectors within a robust_average_reference_inplace iteration.
@@ -2449,6 +2480,7 @@ def bad_ch_by_BBnoise(
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
+    order, neighbour_names = _nearest_channels(raw, picks)
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
@@ -2459,7 +2491,9 @@ def bad_ch_by_BBnoise(
             raw, picks, window_samples, n_windows, ("n_bad_bands",)
         )
         details["bands_hz"] = SPECTRAL_BANDS
-        for metric in ("band_mean_psd_db", "robust_z", "band_violates"):
+        details["neighbours"] = neighbour_names
+        for metric in ("band_mean_psd_db", "band_contrast_db", "robust_z",
+                       "band_violates"):
             details[metric] = np.full(
                 (len(picks), n_windows, len(SPECTRAL_BANDS)), np.nan
             )
@@ -2485,24 +2519,28 @@ def bad_ch_by_BBnoise(
         z = power_db.copy()
         if valid.any():
             power_db[valid] = 10 * np.log10(np.maximum(power, np.finfo(float).tiny))
-            z[valid] = _robust_channel_z(power_db[valid])
+        contrast_db = _neighbour_contrast(power_db, order)
+        scorable = np.isfinite(contrast_db).all(axis=1)
+        if scorable.any():
+            z[scorable] = _robust_channel_z(contrast_db[scorable], scale_floor=1e-6)
         band_violates = z > robust_z_cutoff
         n_bad_bands = band_violates.sum(axis=1)
         violates = n_bad_bands >= min_bad_bands
         counts += violates
-        n_scorable += valid
+        n_scorable += scorable
         n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~valid, index] = np.nan
+            details["violates"][~scorable, index] = np.nan
             details["band_mean_psd_db"][:, index] = power_db
+            details["band_contrast_db"][:, index] = contrast_db
             details["robust_z"][:, index] = z
             details["band_violates"][:, index] = band_violates
-            details["band_violates"][~valid, index] = np.nan
+            details["band_violates"][~scorable, index] = np.nan
             details["n_bad_bands"][:, index] = n_bad_bands
-            details["n_bad_bands"][~valid, index] = np.nan
+            details["n_bad_bands"][~scorable, index] = np.nan
     _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
