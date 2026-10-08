@@ -149,10 +149,10 @@ def bad_ch_by_impedance(
         readings[name] = values
 
     if reject_by == "both":
-        bad = (readings["initial"] > imp_cutoff) | (readings["end"] > imp_cutoff)
+        violates = (readings["initial"] > imp_cutoff) | (readings["end"] > imp_cutoff)
     else:
-        bad = readings[reject_by] > imp_cutoff
-    bad_names = [name for name, flagged in zip(raw.ch_names, bad) if flagged]
+        violates = readings[reject_by] > imp_cutoff
+    bad_names = [name for name, flagged in zip(raw.ch_names, violates) if flagged]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"impedance": bad_names}
     return report
@@ -168,8 +168,8 @@ def bad_ch_by_nan(raw, reference_channel=None):
     """
     _reference_channel(raw, "native", reference_channel)
     bad_names = []
-    for i, name in enumerate(raw.ch_names):
-        data = raw.get_data(picks=[i], reject_by_annotation=None)
+    for pick, name in enumerate(raw.ch_names):
+        data = raw.get_data(picks=[pick], reject_by_annotation=None)
         if not np.isfinite(data).all():
             bad_names.append(name)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
@@ -285,7 +285,7 @@ def _prepare_channel_windows(
 
 def _init_window_details(raw, picks, window_samples, n_windows, metric_names):
     """Allocate complete-window diagnostics without closing annotation gaps."""
-    names = [raw.ch_names[i] for i in picks]
+    names = [raw.ch_names[pick] for pick in picks]
     details = {
         "ch_names": names,
         "start_s": np.arange(n_windows) * window_samples / raw.info["sfreq"],
@@ -300,20 +300,22 @@ def _init_window_details(raw, picks, window_samples, n_windows, metric_names):
 
 def _record_window_details(details, start, window_samples, data, violates):
     """Store this window's flags and violating waveforms; return its index."""
-    window = start // window_samples
-    details["retained"][window] = True
-    details["violates"][:, window] = violates
-    for i in np.flatnonzero(violates):
-        details["flagged_data_uv"][details["ch_names"][i]].append(data[i] * 1e6)
-    return window
+    index = start // window_samples
+    details["retained"][index] = True
+    details["violates"][:, index] = violates
+    for row in np.flatnonzero(violates):
+        details["flagged_data_uv"][details["ch_names"][row]].append(data[row] * 1e6)
+    return index
 
 
 def _finish_window_details(details, window_samples):
     """Convert waveform lists to (violating windows, samples) arrays."""
-    details["flagged_data_uv"] = {
-        name: np.asarray(windows).reshape(-1, window_samples)
-        for name, windows in details["flagged_data_uv"].items()
-    }
+    for field in ("flagged_data_uv", "flagged_filtered_uv", "flagged_predicted_uv"):
+        if field in details:
+            details[field] = {
+                name: np.asarray(waveforms).reshape(-1, window_samples)
+                for name, waveforms in details[field].items()
+            }
     return details
 
 
@@ -754,7 +756,8 @@ def bad_ch_by_flatline(
     flatlines,
     return_details=False,
 ):
-    """Flag channels with flat segments in more than occurrence_cutoff windows.
+    """Return {"flatline": names} for channels flat in more than
+    occurrence_cutoff of retained windows.
 
     Require native-reference data and exclude existing bads/reference/non-EEG
     channels. flatlines is required: the dictionary from
@@ -791,10 +794,10 @@ def bad_ch_by_flatline(
             raw, picks, window_samples, n_windows, rejected, return_start=True
         ):
             violates = flat[:, start // window_samples]
-            window = _record_window_details(
+            index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["flat"][:, window] = violates
+            details["flat"][:, index] = violates
     bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"flatline": bad_names}
@@ -1067,13 +1070,13 @@ def _robust_channel_z(values, scale_floor=np.finfo(float).eps):
     return (values - center) / np.maximum(scale, scale_floor)
 
 
-def _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff):
+def _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff):
     """Accept shared or per-channel denominators; no evidence gives no flag."""
-    if np.ndim(n_retained) == 0:
-        _require_retained_windows(n_retained)
-    fraction = np.divide(counts, n_retained, out=np.zeros(len(picks)),
-                         where=np.asarray(n_retained) > 0)
-    return [raw.ch_names[i] for i in picks[fraction > occurrence_cutoff]]
+    if np.ndim(n_scorable) == 0:
+        _require_retained_windows(n_scorable)
+    fraction = np.divide(counts, n_scorable, out=np.zeros(len(picks)),
+                         where=np.asarray(n_scorable) > 0)
+    return [raw.ch_names[pick] for pick in picks[fraction > occurrence_cutoff]]
 
 
 def _require_retained_windows(n_retained):
@@ -1135,26 +1138,26 @@ def bad_ch_by_voltage(
     retained = ~_rejected_samples(raw, spans)
     if not retained.any():
         raise ValueError("No unmasked samples remain for channel detection.")
-    fractions = np.empty(len(picks))
-    for row, i in enumerate(picks):
+    exceed_fraction = np.empty(len(picks))
+    if return_details:
+        details = {
+            "ch_names": [raw.ch_names[pick] for pick in picks],
+            "exceed_fraction": exceed_fraction,
+        }
+    for row, pick in enumerate(picks):
         scorable = retained.copy()
-        for start, stop in local_flat.get(raw.ch_names[i], []):
+        for start, stop in local_flat.get(raw.ch_names[pick], []):
             scorable[start:stop] = False
         n_scorable = np.count_nonzero(scorable)
-        data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
+        data = raw.get_data(picks=[pick], reject_by_annotation=None)[0]
         # A channel flat throughout has no scorable samples and no evidence.
-        fractions[row] = (
+        exceed_fraction[row] = (
             np.count_nonzero(np.abs(data[scorable]) > voltage_threshold_uv / 1e6)
             / n_scorable if n_scorable else np.nan
         )
-    bad_names = [raw.ch_names[i] for i in picks[fractions > occurrence_cutoff]]
+    bad_names = [raw.ch_names[pick] for pick in picks[exceed_fraction > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"voltage": bad_names}
-    if return_details:
-        details = {
-            "ch_names": [raw.ch_names[i] for i in picks],
-            "exceed_fraction": fractions,
-        }
     if plot:
         plot_voltage_traces(
             raw, voltage_threshold_uv, bad_names=bad_names, exclude=bads_before,
@@ -1303,7 +1306,7 @@ def bad_ch_by_std(
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
+    n_scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(
@@ -1313,23 +1316,23 @@ def bad_ch_by_std(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        deviation, z = np.full((2, len(picks)), np.nan)
+        robust_std, z = np.full((2, len(picks)), np.nan)
         if valid.any():
-            deviation[valid] = 1.4826 * _mad(data[valid], axis=1)
-            z[valid] = _robust_channel_z(deviation[valid])
+            robust_std[valid] = 1.4826 * _mad(data[valid], axis=1)
+            z[valid] = _robust_channel_z(robust_std[valid])
         violates = z > robust_z_cutoff
         counts += violates
-        scorable += valid
+        n_scorable += valid
         n_retained += 1
         if return_details:
-            window = _record_window_details(
+            index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~valid, window] = np.nan
-            details["robust_std_uv"][:, window] = deviation * 1e6
-            details["robust_z"][:, window] = z
+            details["violates"][~valid, index] = np.nan
+            details["robust_std_uv"][:, index] = robust_std * 1e6
+            details["robust_z"][:, index] = z
     _require_retained_windows(n_retained)
-    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"std": bad_names}
     if return_details:
@@ -1470,7 +1473,7 @@ def bad_ch_by_HFnoise(
     rejected = _rejected_samples(raw, spans, len(_lowpass_kernel(sfreq)) - 1)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
+    n_scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     hf_mads, lf_mads, window_violations = [], [], []
     if return_details:
@@ -1482,55 +1485,55 @@ def bad_ch_by_HFnoise(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        ratios, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
+        ratio, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
         if valid.any():
-            ratios[valid], hf_mad[valid], lf_mad[valid] = _prep_hf_ratio(
+            ratio[valid], hf_mad[valid], lf_mad[valid] = _prep_hf_ratio(
                 data[valid], lowpass[valid, start:start + window_samples],
                 return_mads=True,
             )
-            z[valid] = _robust_channel_z(ratios[valid])
+            z[valid] = _robust_channel_z(ratio[valid])
         violates = z > robust_z_cutoff
         counts += violates
-        scorable += valid
+        n_scorable += valid
         n_retained += 1
         hf_mads.append(hf_mad)
         lf_mads.append(lf_mad)
         window_violations.append(violates)
         if return_details:
-            window = _record_window_details(
+            index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~valid, window] = np.nan
-            details["ratio"][:, window] = ratios
-            details["robust_z"][:, window] = z
-            details["hf_mad_uv"][:, window] = hf_mad * 1e6
-            details["lf_mad_uv"][:, window] = lf_mad * 1e6
+            details["violates"][~valid, index] = np.nan
+            details["ratio"][:, index] = ratio
+            details["robust_z"][:, index] = z
+            details["hf_mad_uv"][:, index] = hf_mad * 1e6
+            details["lf_mad_uv"][:, index] = lf_mad * 1e6
     _require_retained_windows(n_retained)
-    candidates = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    candidates = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     hf_mads = np.asarray(hf_mads).T
     lf_mads = np.asarray(lf_mads).T
     window_violations = np.asarray(window_violations).T
     bad_names = []
     eps = np.finfo(float).eps
-    for i, pick in enumerate(picks):
+    for row, pick in enumerate(picks):
         name = raw.ch_names[pick]
         if name not in candidates:
             continue
-        flagged = window_violations[i]
-        baseline = np.isfinite(hf_mads[i]) & ~flagged
+        flagged = window_violations[row]
+        baseline = np.isfinite(hf_mads[row]) & ~flagged
         if not baseline.any():
             bad_names.append(name)
             continue
-        hf_flagged = np.median(hf_mads[i, flagged])
-        peer_medians = [np.median(row[np.isfinite(row)])
-                        for row in hf_mads[:, flagged] if np.isfinite(row).any()]
+        hf_flagged = np.median(hf_mads[row, flagged])
+        peer_medians = [np.median(peer[np.isfinite(peer)])
+                        for peer in hf_mads[:, flagged] if np.isfinite(peer).any()]
         hf_channel_median = np.median(peer_medians)
         if hf_flagged >= hf_channel_median:
             bad_names.append(name)
             continue
-        hf_baseline = np.median(hf_mads[i, baseline])
-        lf_flagged = np.median(lf_mads[i, flagged])
-        lf_baseline = np.median(lf_mads[i, baseline])
+        hf_baseline = np.median(hf_mads[row, baseline])
+        lf_flagged = np.median(lf_mads[row, flagged])
+        lf_baseline = np.median(lf_mads[row, baseline])
         hf_log_change = np.log(max(hf_flagged, eps) / max(hf_baseline, eps))
         lf_log_change = np.log(max(lf_flagged, eps) / max(lf_baseline, eps))
         required_increase = max(0.0, -lf_log_change)
@@ -1601,7 +1604,7 @@ def bad_ch_by_BBnoise(
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
+    n_scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(
@@ -1639,21 +1642,21 @@ def bad_ch_by_BBnoise(
         n_bad_bands = band_violates.sum(axis=1)
         violates = n_bad_bands >= min_bad_bands
         counts += violates
-        scorable += valid
+        n_scorable += valid
         n_retained += 1
         if return_details:
-            window = _record_window_details(
+            index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~valid, window] = np.nan
-            details["band_mean_psd_db"][:, window] = power_db
-            details["robust_z"][:, window] = z
-            details["band_violates"][:, window] = band_violates
-            details["band_violates"][~valid, window] = np.nan
-            details["n_bad_bands"][:, window] = n_bad_bands
-            details["n_bad_bands"][~valid, window] = np.nan
+            details["violates"][~valid, index] = np.nan
+            details["band_mean_psd_db"][:, index] = power_db
+            details["robust_z"][:, index] = z
+            details["band_violates"][:, index] = band_violates
+            details["band_violates"][~valid, index] = np.nan
+            details["n_bad_bands"][:, index] = n_bad_bands
+            details["n_bad_bands"][~valid, index] = np.nan
     _require_retained_windows(n_retained)
-    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"BBnoise": bad_names}
     if return_details:
@@ -1770,7 +1773,7 @@ def bad_ch_by_pop(
         zip(flatlines["ch_names"], flatlines["segments"])
     )
 
-    names = [raw.ch_names[i] for i in picks]
+    names = [raw.ch_names[pick] for pick in picks]
     # Samples each channel does not score: unretained, or in its local
     # flat intervals.
     unretained = ~retained
@@ -1817,9 +1820,9 @@ def bad_ch_by_pop(
         samples = (jumps[:, None] + 1 - gap - width + np.arange(span)).ravel()
         around = np.empty((7, len(samples)))
         around[0] = target[samples]
-        for k, channel in enumerate(picks[neighbors[row]], start=1):
-            around[k] = np.where(excluded[raw.ch_names[channel]][samples], np.nan,
-                                 source[channel, samples])
+        for k, neighbor_pick in enumerate(picks[neighbors[row]], start=1):
+            around[k] = np.where(excluded[raw.ch_names[neighbor_pick]][samples], np.nan,
+                                 source[neighbor_pick, samples])
         step = _level_change(
             around, np.arange(len(jumps)) * span + gap + width - 1, gap, width
         )
@@ -1945,17 +1948,17 @@ def bad_ch_by_small(
             configurations[key] = len(configurations), weights
             if return_details:
                 details["configurations"].append({
-                    "ch_names": [raw.ch_names[i] for i in key],
+                    "ch_names": [raw.ch_names[pick] for pick in key],
                 })
         configuration, weights = configurations[key]
         start = index * window_samples
         data = raw.get_data(picks=donor_picks, start=start, stop=start + window_samples,
                             reject_by_annotation=None)
-        observed = _mad(data[target_rows], axis=1)
-        predicted = _mad(weights @ data, axis=1)
-        valid = predicted > np.finfo(float).eps
+        observed_mad = _mad(data[target_rows], axis=1)
+        predicted_mad = _mad(weights @ data, axis=1)
+        valid = predicted_mad > np.finfo(float).eps
         ratio, z = np.full((2, len(picks)), np.nan)
-        ratio[valid] = observed[valid] / predicted[valid]
+        ratio[valid] = observed_mad[valid] / predicted_mad[valid]
         if valid.sum() >= 2:
             z[valid] = _robust_channel_z(
                 np.log(np.maximum(ratio[valid], np.finfo(float).tiny)),
@@ -1966,11 +1969,12 @@ def bad_ch_by_small(
         counts += violates
         n_scorable += scorable
         if return_details:
-            _record_window_details(details, start, window_samples, data[target_rows],
-                                   violates)
+            _record_window_details(
+                details, start, window_samples, data[target_rows], violates
+            )
             details["violates"][~scorable, index] = np.nan
-            details["observed_mad_uv"][:, index] = observed * 1e6
-            details["predicted_mad_uv"][:, index] = predicted * 1e6
+            details["observed_mad_uv"][:, index] = observed_mad * 1e6
+            details["predicted_mad_uv"][:, index] = predicted_mad * 1e6
             details["ratio"][:, index] = ratio
             details["robust_z"][:, index] = z
             details["configuration_index"][index] = configuration
@@ -2126,7 +2130,7 @@ def bad_ch_by_correlation(
     names = np.array([raw.ch_names[i] for i in picks], dtype=object)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
-    scorable = np.zeros(len(picks), dtype=int)
+    n_scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
         details = _init_window_details(
@@ -2136,30 +2140,31 @@ def bad_ch_by_correlation(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        window = filtered[valid, start:start + window_samples]
+        filtered_window = filtered[valid, start:start + window_samples]
         _require_variance(
             data[valid], names[valid], "The input", start, raw.info["sfreq"]
         )
         _require_variance(
-            window, names[valid], "The band-limited signal", start, raw.info["sfreq"]
+            filtered_window, names[valid], "The band-limited signal", start, raw.info["sfreq"]
         )
         score = np.full(len(picks), np.nan)
         if valid.sum() >= 2:
             others = ~np.eye(valid.sum(), dtype=bool)
-            r = np.corrcoef(window)[others].reshape(valid.sum(), -1)
+            r = np.corrcoef(filtered_window)[others].reshape(valid.sum(), -1)
             score[valid] = np.quantile(r, quantile, axis=1)
+        scorable = np.isfinite(score)
         violates = score < correlation_cutoff
         counts += violates
-        scorable += np.isfinite(score)
+        n_scorable += scorable
         n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
             )
-            details["violates"][~np.isfinite(score), index] = np.nan
+            details["violates"][~scorable, index] = np.nan
             details["score"][:, index] = score
     _require_retained_windows(n_retained)
-    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"correlation": bad_names}
     if return_details:
@@ -2306,8 +2311,8 @@ def bad_ch_by_RANSAC(
     subset_fraction=0.25,
     random_state=435656,
     *,
-    return_details=False,
     flatlines=None,
+    return_details=False,
     _geometry=None,
     _pass=None,
 ):
@@ -2410,12 +2415,12 @@ def bad_ch_by_RANSAC(
             f"RANSAC needs {n_predictors} predictors besides each channel, so at "
             f"least {n_predictors + 1} non-bad EEG channels; found {len(picks)}."
         )
-    names = [raw.ch_names[i] for i in picks]
+    names = [raw.ch_names[pick] for pick in picks]
     sfreq = raw.info["sfreq"]
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     retained = _retained_windows(rejected, window_samples, n_windows)
-    if not retained.any():
-        raise ValueError("No complete unmasked windows remain for channel detection.")
+    n_retained = int(retained.sum())
+    _require_retained_windows(n_retained)
     geometry = _spline_geometry(raw) if _geometry is None else _geometry
     patterns = [np.ones(len(picks), dtype=bool)]
     pattern_of = {patterns[0].tobytes(): 0}
@@ -2450,7 +2455,7 @@ def bad_ch_by_RANSAC(
             "noise_gain": np.median(np.linalg.norm(weights, axis=2), axis=1),
         })
     r = np.full((len(picks), n_windows), np.nan)
-    kept = {}
+    kept_predictions = {}
     for index in np.flatnonzero(retained):
         start = index * window_samples
         configuration = configurations[configuration_index[index]]
@@ -2462,17 +2467,17 @@ def bad_ch_by_RANSAC(
             stop=start + window_samples,
             reject_by_annotation=None,
         )
-        window = filtered[:, start:start + window_samples]
+        filtered_window = filtered[:, start:start + window_samples]
         _require_variance(data, active_names, "The input", start, sfreq)
         _require_variance(
-            window[rows], active_names, "The band-limited signal", start, sfreq
+            filtered_window[rows], active_names, "The band-limited signal", start, sfreq
         )
-        median = _ransac_median(configuration["columns"], window, n_subsets)
-        _require_variance(median, active_names, "The median prediction", start, sfreq)
-        r[rows, index] = _row_pearson(window[rows], median)
+        predicted = _ransac_median(configuration["columns"], filtered_window, n_subsets)
+        _require_variance(predicted, active_names, "The median prediction", start, sfreq)
+        r[rows, index] = _row_pearson(filtered_window[rows], predicted)
         if return_details and method == "threshold":
             # Keep the violating targets' medians for the details.
-            kept[index] = median[r[rows, index] < correlation_cutoff]
+            kept_predictions[index] = predicted[r[rows, index] < correlation_cutoff]
     pooled = r[np.isfinite(r)]
     z = (np.median(pooled) - r) / max(
         1.4826 * _mad(pooled, axis=None), np.finfo(float).eps
@@ -2481,61 +2486,55 @@ def bad_ch_by_RANSAC(
         (r < correlation_cutoff if method == "threshold" else z > robust_z_cutoff)
         | flat
     ) & retained
-    bad_names = _noisy_window_bads(raw, picks, violates.sum(axis=1), retained.sum(),
-                                   occurrence_cutoff)
+    counts = violates.sum(axis=1)
+    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"RANSAC": bad_names}
-    if not return_details:
-        return report
-
-    details = _init_window_details(
-        raw, picks, window_samples, n_windows, ("r", "robust_z")
-    )
-    details["r"], details["robust_z"] = r, z
-    details["subsets"] = np.array(names)[configurations[0]["subsets"]]
-    details["noise_gain"] = configurations[0]["noise_gain"]
-    details["flat"] = flat
-    details["configuration_index"] = configuration_index
-    details["configurations"] = [
-        {"ch_names": [names[row] for row in configuration["rows"]],
-         "subsets": np.array(names)[configuration["subsets"]],
-         "noise_gain": configuration["noise_gain"]}
-        for configuration in configurations
-    ]
-    details["noise_gain_by_window"] = np.full(r.shape, np.nan)
-    predicted = {"flagged_filtered_uv": {name: [] for name in names},
-                 "flagged_predicted_uv": {name: [] for name in names}}
-    for index in np.flatnonzero(retained):
-        start = index * window_samples
-        data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
-                            reject_by_annotation=None)
-        _record_window_details(details, start, window_samples, data, violates[:, index])
-        configuration = configurations[configuration_index[index]]
-        details["noise_gain_by_window"][configuration["rows"], index] = configuration[
-            "noise_gain"
+    if return_details:
+        details = _init_window_details(raw, picks, window_samples, n_windows, ())
+        details["r"], details["robust_z"] = r, z
+        details["subsets"] = np.array(names)[configurations[0]["subsets"]]
+        details["noise_gain"] = configurations[0]["noise_gain"]
+        details["flat"] = flat
+        details["configuration_index"] = configuration_index
+        details["configurations"] = [
+            {"ch_names": [names[row] for row in configuration["rows"]],
+             "subsets": np.array(names)[configuration["subsets"]],
+             "noise_gain": configuration["noise_gain"]}
+            for configuration in configurations
         ]
-        rows = np.flatnonzero(violates[:, index])
-        if len(rows):
-            window = filtered[:, start:start + window_samples]
-            scored = rows[~flat[rows, index]]
-            median = np.full((len(rows), window_samples), np.nan)
-            if len(scored) and method == "threshold":
-                median[~flat[rows, index]] = kept[index]
-            elif len(scored):
-                # robust_z violations are known only after pooling, so
-                # recompute the violating targets' medians.
-                active = np.searchsorted(configuration["rows"], scored)
-                columns = configuration["columns"].reshape(len(picks), -1, n_subsets)
-                median[~flat[rows, index]] = _ransac_median(
-                    columns[:, active].reshape(len(picks), -1), window, n_subsets
-                )
-            for prediction, i in zip(median, rows):
-                predicted["flagged_filtered_uv"][names[i]].append(window[i] * 1e6)
-                predicted["flagged_predicted_uv"][names[i]].append(prediction * 1e6)
-    for field, waveforms in predicted.items():
-        details[field] = {name: np.asarray(windows).reshape(-1, window_samples)
-                          for name, windows in waveforms.items()}
-    return report, _finish_window_details(details, window_samples)
+        details["noise_gain_by_window"] = np.full(r.shape, np.nan)
+        for field in ("flagged_filtered_uv", "flagged_predicted_uv"):
+            details[field] = {name: [] for name in names}
+        for index in np.flatnonzero(retained):
+            start = index * window_samples
+            data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
+                                reject_by_annotation=None)
+            _record_window_details(details, start, window_samples, data, violates[:, index])
+            configuration = configurations[configuration_index[index]]
+            details["noise_gain_by_window"][configuration["rows"], index] = configuration[
+                "noise_gain"
+            ]
+            rows = np.flatnonzero(violates[:, index])
+            if len(rows):
+                filtered_window = filtered[:, start:start + window_samples]
+                scored = rows[~flat[rows, index]]
+                predicted = np.full((len(rows), window_samples), np.nan)
+                if len(scored) and method == "threshold":
+                    predicted[~flat[rows, index]] = kept_predictions[index]
+                elif len(scored):
+                    # robust_z violations are known only after pooling, so
+                    # recompute the violating targets' medians.
+                    active = np.searchsorted(configuration["rows"], scored)
+                    columns = configuration["columns"].reshape(len(picks), -1, n_subsets)
+                    predicted[~flat[rows, index]] = _ransac_median(
+                        columns[:, active].reshape(len(picks), -1), filtered_window, n_subsets
+                    )
+                for prediction, row in zip(predicted, rows):
+                    details["flagged_filtered_uv"][names[row]].append(filtered_window[row] * 1e6)
+                    details["flagged_predicted_uv"][names[row]].append(prediction * 1e6)
+        return report, _finish_window_details(details, window_samples)
+    return report
 
 
 def plot_bad_ch_report(raw, bad_ch_report):
