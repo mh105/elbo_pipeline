@@ -3521,7 +3521,7 @@ def _asr_filter_channels(data, b, a, zi=None):
 
 
 def apply_asr_inplace(
-    raw, reference_channel=None, *, flatlines=None, return_details=False,
+    raw, reference_channel=None, flatlines=None, *, return_details=False,
 ):
     """Correct good EEG channels with automatic-calibration ASR in place.
 
@@ -3680,7 +3680,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_small(raw_bads, flatlines=flatlines))
-    plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
+    plot_bad_ch_report(raw_bads, bad_ch_report)
 
     # %% Bad channels under the robust average reference. raw_bads keeps the
     # native reference and lists every bad channel in info["bads"];
@@ -3696,6 +3696,4 @@ if __name__ == "__main__":
     reference_channel = validate_reference_inplace(raw_bads, flatlines)
 
     # %% Correct transient artifacts, then reconstruct local flat spans again
-    asr_report = apply_asr_inplace(
-        raw_bads, reference_channel, flatlines=flatlines
-    )
+    asr_report = apply_asr_inplace(raw_bads, reference_channel, flatlines)
