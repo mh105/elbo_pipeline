@@ -53,7 +53,8 @@ The native reference is the one non-bad EEG channel whose samples are all
 exactly zero, or a channel named with reference_channel, which must be entirely
 zero (other all-zero channels are then ordinary, dead channels). bad_ch_by_nan,
 detect_flatline_inplace, bad_ch_by_flatline, bad_ch_by_small,
-pca_cleaning_inplace, and bad_ch_under_robust_ref require it;
+pca_cleaning_inplace, bad_ch_under_robust_ref, and
+validate_reference_inplace require it;
 bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
 require re-referenced data, with no entirely zero EEG channel, bad or not;
 bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
@@ -75,7 +76,10 @@ interpolated) and adds the final flags to raw.info["bads"]; the data keep the
 native reference, and the robust mean is returned in its details. RANSAC
 remains available separately and is not used in this iteration. With the bad
 channels final, interpolate_local_flatline_inplace repairs the local flat
-intervals of the good channels from the other good channels.
+intervals of the good channels from the other good channels. If the native
+reference is itself bad, validate_reference_inplace then re-references the
+data to the nearest good one of its five nearest electrodes, or raises if all
+five are bad.
 """
 
 from collections import defaultdict
@@ -3403,6 +3407,52 @@ def interpolate_local_flatline_inplace(raw, flatlines):
                 )
 
 
+def validate_reference_inplace(raw, flatlines):
+    """Keep a good native reference; re-reference a bad one in place to the
+    nearest good electrode among its five nearest. Return the reference
+    channel name in effect.
+
+    Run this after interpolate_local_flatline_inplace, once raw.info["bads"]
+    lists the final bad channels. The native reference is the one that
+    detect_flatline_inplace resolved, flatlines["reference_channel"], and must
+    still be entirely zero. A bad reference puts its artifacts into every
+    native-referenced channel; subtracting a good electrode's trace from every
+    EEG channel, bads included, cancels them and makes that electrode the
+    all-zero reference. The candidates are the five EEG channels, bad or not,
+    nearest the reference on the fitted unit sphere (_spline_geometry; ties
+    keep Raw order). Re-reference to the nearest good one and warn, or raise
+    without changing raw if all five are bad. Bad labels, annotations,
+    non-EEG channels, and flatlines are unchanged, so
+    flatlines["reference_channel"] keeps the original reference.
+    """
+    if not raw.preload:
+        raise ValueError("raw must be preloaded.")
+    _validate_flatlines(raw, flatlines)
+    reference_channel = _reference_channel(
+        raw, "native", flatlines["reference_channel"]
+    )
+    if reference_channel not in raw.info["bads"]:
+        return reference_channel
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    candidates = _nearest_channels(raw, eeg, n_neighbours=5)[1][reference_channel]
+    good = [name for name in candidates if name not in raw.info["bads"]]
+    if not good:
+        raise ValueError(
+            f"No valid native reference: {reference_channel} is bad, and so are "
+            f"its five nearest electrodes {candidates}."
+        )
+    new_reference = raw._data[raw.ch_names.index(good[0])].copy()
+    # Row by row, so that no full EEG temporary is made.
+    for i in eeg:
+        raw._data[i] -= new_reference
+    warnings.warn(
+        f"The native reference {reference_channel} is bad; re-referenced every "
+        f"EEG channel to {good[0]}, the nearest good electrode of {candidates}.",
+        stacklevel=2,
+    )
+    return good[0]
+
+
 # %% Part 2: Definitive bad-time detection (to be developed)
 
 
@@ -3450,3 +3500,6 @@ if __name__ == "__main__":
 
     # %% Interpolate the good channels' local flat intervals before ASR
     interpolate_local_flatline_inplace(raw_bads, flatlines)
+
+    # %% Move a bad native reference to its nearest good electrode
+    reference_channel = validate_reference_inplace(raw_bads, flatlines)
