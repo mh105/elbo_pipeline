@@ -320,19 +320,28 @@ def _subtract_segments(segments, removed):
     return kept
 
 
-def _bridge_flat_spans_inplace(data, spans):
+def _bridge_flat_spans_inplace(data, spans, global_segments=()):
     """Replace each span of a channel's data by the straight line joining the
     samples on either side, or by the one neighbour at a recording edge.
+
+    A global dropout counts as a recording edge: its samples are never
+    neighbours, and a span with no neighbour is left unchanged. The spans lie
+    outside the global segments, so only a span touching a dropout loses that
+    side's neighbour.
     """
     n_times = len(data)
+    dropout_starts = {start for start, _ in global_segments}
+    dropout_stops = {stop for _, stop in global_segments}
     for start, stop in spans:
-        if start > 0 and stop < n_times:
+        has_left = start > 0 and start not in dropout_stops
+        has_right = stop < n_times and stop not in dropout_starts
+        if has_left and has_right:
             fraction = np.arange(1, stop - start + 1) / (stop - start + 1)
             left, right = data[start - 1], data[stop]
             data[start:stop] = left + (right - left) * fraction
-        elif stop < n_times:
+        elif has_right:
             data[start:stop] = data[stop]
-        elif start > 0:
+        elif has_left:
             data[start:stop] = data[start - 1]
 
 
@@ -367,10 +376,14 @@ def detect_flatline_inplace(
     dropouts. Bridge each span in raw by the straight line joining the
     samples on either side (or the one neighbour at a recording edge), so
     later filters never see a level step; global dropouts are left as they
-    are. Then widen each span on both sides by the reach of MNE's default FIR
-    high-pass at downstream_highpass_hz, the high-pass applied before
-    detection (0.3 Hz: an 11-s filter, so 5.5 s on each side at any sampling
-    rate), to protect the span's edges too. These widened local intervals are
+    are. A global dropout counts as a recording edge, so its samples are
+    never neighbours. A span with no neighbour is left unchanged, e.g. a dead
+    channel flat from the recording start up to a final dropout; bridging it
+    to the dropout's zeros would leave a second all-zero channel. Then widen
+    each span on both sides by the reach of MNE's default FIR high-pass at
+    downstream_highpass_hz, the high-pass applied before detection (0.3 Hz:
+    an 11-s filter, so 5.5 s on each side at any sampling rate), to protect
+    the span's edges too. These widened local intervals are
     the dictionary's segments, used everywhere downstream: bad_ch_by_flatline's
     count, each detector's exclusions, RANSAC's flat-as-failure rule, and the
     robust reference's repair. downstream_highpass_hz=None skips the widening
@@ -494,7 +507,9 @@ def detect_flatline_inplace(
     )
     for row, name in enumerate(result["ch_names"]):
         local = _subtract_segments(result["segments"][row], result["global_segments"])
-        _bridge_flat_spans_inplace(raw._data[raw.ch_names.index(name)], local)
+        _bridge_flat_spans_inplace(
+            raw._data[raw.ch_names.index(name)], local, result["global_segments"]
+        )
         result["segments"][row] = _widen_segments(local, reach, raw.n_times)
     return result
 

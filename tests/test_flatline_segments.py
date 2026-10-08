@@ -308,12 +308,31 @@ class TestFlatlineBridgingAndWidening(unittest.TestCase):
         np.testing.assert_array_equal(x[1, :100], original[1, 100])
         np.testing.assert_array_equal(x[2, 2900:], original[2, 2899])
         np.testing.assert_array_equal(x[3:7, 2000:2200], original[3:7, 2000:2200])
-        tail = original[3, 2199] + (original[3, 2300] - original[3, 2199]) * np.arange(1, 101) / 101
-        np.testing.assert_allclose(x[3, 2200:2300], tail, rtol=0, atol=1e-18)
+        # The dropout counts as an edge, so the tail takes its one live neighbour.
+        np.testing.assert_array_equal(x[3, 2200:2300], original[3, 2300])
         changed = (x != original).any(axis=0)
         np.testing.assert_array_equal(np.flatnonzero(changed), np.r_[0:100, 1000:1100, 2200:2300, 2900:3000])
         self.assertEqual(result["global_segments"], [[2000, 2200]])
         self.assertEqual(result["segments_on_subtypes"]["segments_on_raw"][3], [[2000, 2300]])
+
+    def test_spans_touching_a_final_dropout_never_bridge_to_its_samples(self):
+        # sub-10/-17 E119: a dead channel stuck at an offset until the
+        # recording's final all-zero dropout.
+        raw = make_raw(n_times=3000, n_eeg=13, sfreq=100)
+        data = raw._data
+        data[:12, 2800:] = 0  # Final dropout on every eligible channel.
+        data[0, :2800] = 12.5e-6  # Flat from the start: no live neighbour.
+        data[1, 2000:2800] = 12.5e-6  # Flat from 20 s: one live neighbour.
+        original = raw._data.copy()
+        with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
+            result = step2.detect_flatline_inplace(raw, "Cz")
+        self.assertEqual(result["global_segments"], [[2800, 3000]])
+        np.testing.assert_array_equal(raw._data[0], original[0])
+        np.testing.assert_array_equal(raw._data[1, 2000:2800], original[1, 1999])
+        np.testing.assert_array_equal(raw._data[[0, *range(2, 13)]],
+                                      original[[0, *range(2, 13)]])
+        # E0 is not entirely zero, so Cz is still the only native reference.
+        self.assertEqual(step2._reference_channel(raw, "native"), "Cz")
 
     def test_local_intervals_and_annotation_are_widened_by_the_highpass_reach(self):
         result = self.detect()
