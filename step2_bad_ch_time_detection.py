@@ -3222,10 +3222,13 @@ def bad_ch_under_robust_ref(
     Plot the final report and the native-referenced traces, including existing
     bads as a gray category. Then add the channels flagged in the last pass
     (after a cycle, every channel flagged within it) to raw.info["bads"],
-    preserving existing labels without duplicates. The data and annotations
-    are unchanged: raw keeps the native reference, and bad channels keep
-    their recorded traces. Run interpolate_local_flatline_inplace afterwards to
-    repair the local flat intervals of the channels that stay good.
+    preserving existing labels without duplicates, and show the native data
+    without the bads: band-power topomaps in dB of the median Welch PSD up to
+    45 Hz, also without the all-zero reference, and plot_voltage_traces. The
+    data and annotations are unchanged: raw keeps the native reference, and
+    bad channels keep their recorded traces. Run
+    interpolate_local_flatline_inplace afterwards to repair the local flat
+    intervals of the channels that stay good.
 
     Return robust_bad_ch_report, the last pass's {criterion: names} (after a
     cycle, each criterion's channels across the cycling passes).
@@ -3248,7 +3251,7 @@ def bad_ch_under_robust_ref(
         raise ValueError("raw must be preloaded.")
     if not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer.")
-    _reference_channel(raw, "native", reference_channel)
+    reference_channel = _reference_channel(raw, "native", reference_channel)
     _validate_flatlines(raw, flatlines)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_names = [raw.ch_names[i] for i in eeg]
@@ -3348,6 +3351,13 @@ def bad_ch_under_robust_ref(
     # Before listing the flags, so that only the existing bads are gray.
     plot_bad_ch_report(raw, robust_bad_ch_report)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + flagged))
+    # The median Welch PSD shows persistent channel power; brief large
+    # events barely count.
+    raw.compute_psd(
+        fmax=45.0, average="median", verbose=False,
+        exclude=raw.info["bads"] + [reference_channel],
+    ).plot_topomap(dB=True)
+    plot_voltage_traces(raw)
     if return_details:
         details = {
             "initial_bads": initial,
@@ -3440,14 +3450,3 @@ if __name__ == "__main__":
 
     # %% Interpolate the good channels' local flat intervals before ASR
     interpolate_local_flatline_inplace(raw_bads, flatlines)
-
-    # Band-power topomaps in dB under the native reference, without the bads
-    # and the all-zero reference. The median Welch PSD shows persistent
-    # channel power; brief large events barely count.
-    psd_topomap_figure = raw_bads.compute_psd(
-        fmax=45.0, average="median", verbose=False,
-        exclude=raw_bads.info["bads"] + [flatlines["reference_channel"]],
-    ).plot_topomap(dB=True)
-
-    # Native-referenced traces, without the bads.
-    plot_voltage_traces(raw_bads)

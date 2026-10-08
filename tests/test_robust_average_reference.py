@@ -76,6 +76,12 @@ class TestRobustAverageReference(unittest.TestCase):
         plot_report = patch.object(step2, "plot_bad_ch_report")
         self.plot_report = plot_report.start()
         self.addCleanup(plot_report.stop)
+        traces = patch.object(step2, "plot_voltage_traces")
+        self.traces = traces.start()
+        self.addCleanup(traces.stop)
+        topomap = patch.object(mne.time_frequency.Spectrum, "plot_topomap", autospec=True)
+        self.topomap = topomap.start()
+        self.addCleanup(topomap.stop)
 
     def test_lists_new_bads_and_leaves_the_data_native(self):
         raw = make_native_raw(noisy="O1")
@@ -103,6 +109,25 @@ class TestRobustAverageReference(unittest.TestCase):
         np.testing.assert_allclose(reference, mean, rtol=0, atol=1e-15)
         np.testing.assert_array_equal(raw.get_data(), native.get_data())
         self.assertEqual(step2._reference_channel(raw, "native"), "Cz")
+
+    def test_plots_native_band_power_and_traces_without_the_bads(self):
+        raw = make_native_raw(noisy="O1")
+        raw.info["bads"] = ["T7", "EOG"]
+        native = raw.copy()
+
+        def check_listed(plotted_raw):
+            self.assertIs(plotted_raw, raw)
+            self.assertEqual(plotted_raw.info["bads"], ["T7", "EOG", "O1"])
+            np.testing.assert_array_equal(plotted_raw.get_data(), native.get_data())
+
+        self.traces.side_effect = check_listed
+        step2.bad_ch_under_robust_ref(raw)
+        self.traces.assert_called_once_with(raw)
+        self.topomap.assert_called_once()
+        (spectrum,), kwargs = self.topomap.call_args
+        self.assertEqual(kwargs, {"dB": True})
+        self.assertEqual(spectrum.ch_names,
+                         [name for name in NAMES if name not in ("T7", "O1", "Cz")])
 
     def test_details_describe_each_pass_without_changing_the_result(self):
         raw = make_native_raw(noisy="O1")
