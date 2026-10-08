@@ -30,8 +30,17 @@ scorable minute.
 
 The 2-second window detectors accept return_details=True to return (report,
 details), including window metrics and original flagged waveforms.
+bad_ch_by_small returns observed/predicted MAD ratios and their robust z-scores;
 bad_ch_by_pop counts individual electrode pops instead; its details include
 each channel's pop times and step sizes.
+
+bad_ch_by_small runs once on native-reference data, after bad_ch_by_pop and
+before robust_average_reference_inplace. It predicts each channel from all
+other valid EEG channels, including the known-zero reference, using cached
+spherical splines. Locally flat channels remain scored targets but are not
+donors. In each window, score log(observed MAD / predicted MAD) against the
+cross-channel median and MAD. Robust z below -5 in more than 25% of a channel's
+scorable windows flags smallness.
 
 bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
 on a copy band-limited to 1-45 Hz. The first flags channels that frequently
@@ -42,11 +51,12 @@ others, through spherical splines, persistently fail to predict (RANSAC).
 The native reference is the one non-bad EEG channel whose samples are all
 exactly zero, or a channel named with reference_channel, which must be entirely
 zero (other all-zero channels are then ordinary, dead channels). bad_ch_by_nan,
-detect_flatline_inplace, bad_ch_by_flatline, pca_cleaning_inplace, and
-robust_average_reference_inplace require it; bad_ch_by_std, bad_ch_by_BBnoise,
-bad_ch_by_correlation, and bad_ch_by_RANSAC require re-referenced data, with no
-entirely zero EEG channel, bad or not; bad_ch_by_voltage, bad_ch_by_HFnoise,
-and bad_ch_by_pop accept either and exclude the native reference if present.
+detect_flatline_inplace, bad_ch_by_flatline, bad_ch_by_small,
+pca_cleaning_inplace, and robust_average_reference_inplace require it;
+bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
+require re-referenced data, with no entirely zero EEG channel, bad or not;
+bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
+exclude the native reference if present.
 mask_segment_by_voltage accepts either by default, requires re-referenced data
 with require_average=True, and takes a named native reference.
 
@@ -1464,16 +1474,10 @@ def bad_ch_by_HFnoise(
     n_retained = 0
     hf_mads, lf_mads, window_violations = [], [], []
     if return_details:
-        names = [raw.ch_names[i] for i in picks]
-        details = {
-            "ch_names": names,
-            "start_s": np.arange(n_windows) * window_samples / raw.info["sfreq"],
-            "stop_s": np.arange(1, n_windows + 1) * window_samples / raw.info["sfreq"],
-            "retained": np.zeros(n_windows, dtype=bool),
-            "flagged_data_uv": {name: [] for name in names},
-        }
-        for metric in ("ratio", "robust_z", "hf_mad_uv", "lf_mad_uv", "violates"):
-            details[metric] = np.full((len(picks), n_windows), np.nan)
+        details = _init_window_details(
+            raw, picks, window_samples, n_windows,
+            ("ratio", "robust_z", "hf_mad_uv", "lf_mad_uv"),
+        )
     for start, data in _unmasked_windows(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
@@ -1493,17 +1497,14 @@ def bad_ch_by_HFnoise(
         lf_mads.append(lf_mad)
         window_violations.append(violates)
         if return_details:
-            window = start // window_samples
-            details["retained"][window] = True
-            for metric, values in (("ratio", ratios),
-                                   ("robust_z", z),
-                                   ("hf_mad_uv", hf_mad * 1e6),
-                                   ("lf_mad_uv", lf_mad * 1e6),
-                                   ("violates", violates)):
-                details[metric][:, window] = values
+            window = _record_window_details(
+                details, start, window_samples, data, violates
+            )
             details["violates"][~valid, window] = np.nan
-            for i in np.flatnonzero(violates):
-                details["flagged_data_uv"][names[i]].append(data[i] * 1e6)
+            details["ratio"][:, window] = ratios
+            details["robust_z"][:, window] = z
+            details["hf_mad_uv"][:, window] = hf_mad * 1e6
+            details["lf_mad_uv"][:, window] = lf_mad * 1e6
     _require_retained_windows(n_retained)
     candidates = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
     hf_mads = np.asarray(hf_mads).T
@@ -1542,11 +1543,7 @@ def bad_ch_by_HFnoise(
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"HFnoise": bad_names}
     if return_details:
-        details["flagged_data_uv"] = {
-            name: np.asarray(windows).reshape(-1, window_samples)
-            for name, windows in details["flagged_data_uv"].items()
-        }
-        return report, details
+        return report, _finish_window_details(details, window_samples)
     return report
 
 
@@ -1787,20 +1784,30 @@ def bad_ch_by_pop(
     # Neighbours are read only around the candidate jumps.
     source = raw._data if raw.preload else raw.get_data(reject_by_annotation=None)
     span = 2 * (gap + width)
-    scorable_min = np.empty(len(picks))
-    jump_sd = np.empty(len(picks))
-    n_pops = np.zeros(len(picks), dtype=int)
-    pop_times, pop_steps = {}, {}
+    pops_per_min = np.zeros(len(picks))
+    if return_details:
+        details = {
+            "ch_names": names,
+            "neighbors": {name: [names[j] for j in neighbors[row]]
+                          for row, name in enumerate(names)},
+            "retained_min": retained_min,
+            "scorable_min": np.empty(len(picks)),
+            "jump_sd_uv": np.empty(len(picks)),
+            "n_pops": np.zeros(len(picks), dtype=int),
+            "pops_per_min": pops_per_min,
+            "pop_times_s": {},
+            "pop_steps_uv": {},
+        }
     for row, pick in enumerate(picks):
         target = raw.get_data(picks=[pick], reject_by_annotation=None)[0]
         target[excluded[names[row]]] = np.nan
-        scorable_min[row] = np.isfinite(target).sum() / sfreq / 60
+        scorable_min = np.isfinite(target).sum() / sfreq / 60
         diffs = np.diff(target)
-        jump_sd[row] = max(
+        jump_sd = max(
             1.4826 * _mad(diffs[np.isfinite(diffs)]), np.finfo(float).eps
         )
         jumps = np.flatnonzero(
-            (np.abs(diffs) > jump_sd_cutoff * jump_sd[row]) & (np.abs(diffs) > 20e-6)
+            (np.abs(diffs) > jump_sd_cutoff * jump_sd) & (np.abs(diffs) > 20e-6)
         )
         jumps = jumps[
             (jumps + 1 >= gap + width) & (jumps + 1 + gap + width <= raw.n_times)
@@ -1828,28 +1835,152 @@ def bad_ch_by_pop(
                 & (sharp_step / step[0] >= sharpness_cutoff)
             )
         first = np.diff(jumps[confirmed], prepend=-np.inf) > merge
-        n_pops[row] = first.sum()
-        pop_times[names[row]] = jumps[confirmed][first] / sfreq
-        pop_steps[names[row]] = step[0, confirmed][first] * 1e6
-    # A channel flat throughout has no retained minutes and no evidence.
-    pops_per_min = np.divide(n_pops, scorable_min, out=np.zeros(len(picks)),
-                             where=scorable_min > 0)
+        n_pops = first.sum()
+        # A channel flat throughout has no retained minutes and no evidence.
+        pops_per_min[row] = n_pops / scorable_min if scorable_min > 0 else 0
+        if return_details:
+            details["scorable_min"][row] = scorable_min
+            details["jump_sd_uv"][row] = jump_sd * 1e6
+            details["n_pops"][row] = n_pops
+            details["pop_times_s"][names[row]] = jumps[confirmed][first] / sfreq
+            details["pop_steps_uv"][names[row]] = step[0, confirmed][first] * 1e6
     bad_names = [name for name, rate in zip(names, pops_per_min) if rate > rate_cutoff]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"pop": bad_names}
     if return_details:
-        return report, {
-            "ch_names": names,
-            "neighbors": {name: [names[j] for j in neighbors[row]]
-                          for row, name in enumerate(names)},
-            "retained_min": retained_min,
-            "scorable_min": scorable_min,
-            "jump_sd_uv": jump_sd * 1e6,
-            "n_pops": n_pops,
-            "pops_per_min": pops_per_min,
-            "pop_times_s": pop_times,
-            "pop_steps_uv": pop_steps,
-        }
+        return report, details
+    return report
+
+
+def bad_ch_by_small(
+    raw,
+    window_length=2.0,
+    robust_z_cutoff=5.0,
+    occurrence_cutoff=0.25,
+    reference_channel=None,
+    *,
+    flatlines=None,
+    return_details=False,
+):
+    """Return {"small": names} for persistently attenuated channels.
+
+    Require the native reference, as in bad_ch_by_flatline. Exclude existing
+    bads and non-EEG channels from targets and donors; the known-zero native
+    reference is always a donor, never a target. Run once after bad_ch_by_pop,
+    before robust_average_reference_inplace, on the supplied data without
+    further filtering. Use complete non-overlapping window_length-second
+    windows from the Raw start (2 s by default). Ignore the trailing partial
+    window, BAD annotations, and the temporary voltage mask.
+
+    Predict each target from all other eligible EEG channels with spherical
+    splines. Exclude donors whose window overlaps their local flat intervals,
+    but retain flat targets and compute their actual input MAD, even if it is
+    zero. The supplied flatlines are the original detect_flatline_inplace
+    result, already widened by the downstream high-pass reach. Cache geometry
+    and each donor/target set's weights; assemble each observed flatline
+    configuration once and reuse its prediction matrix across windows.
+
+    Within each retained window, form r = observed MAD / predicted MAD for
+    each target. Score log(r) across channels as (log(r) - median(log(r))) /
+    (1.4826 * MAD(log(r))), with a 1e-6 floor on the log-ratio spread. Clamp
+    zero ratios to the smallest positive normal float only for taking the
+    log: zero observed MAD remains attenuation evidence. Predicted MAD at or
+    below machine epsilon (volts) is unscorable and leaves the baseline and
+    that channel's occurrence denominator. A window needs at least two
+    scorable ratios. Flag z < -robust_z_cutoff in strictly more than
+    occurrence_cutoff of a channel's scorable windows (defaults -5 and 25%).
+    Add detections to raw.info["bads"] without duplicates; signal data and
+    annotations are unchanged.
+
+    With return_details=True, return (report, details): ch_names, start_s,
+    stop_s, retained, observed_mad_uv and predicted_mad_uv (channels by complete
+    windows, NaN in masked windows), ratio, robust_z, violates (0/1 or NaN
+    when unscorable), n_scorable per channel, flat, configuration_index (-1
+    in masked windows), and configurations with their available donor
+    ch_names (each prediction excludes its own target).
+    flagged_data_uv stores original violating-window waveforms in microvolts,
+    in chronological order, with shape (violating windows, window samples).
+    """
+    if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
+        raise ValueError("robust_z_cutoff must be finite and greater than 0.")
+    shared = _mask_inputs(raw)
+    reference_channel = _reference_channel(
+        raw, "native", reference_channel, known_zeros=shared["zeros"]
+    )
+    spans, _ = _temporary_voltage_mask(
+        raw, reference_channel=reference_channel, shared=shared
+    )
+    picks, window_samples, n_windows = _prepare_channel_windows(
+        raw, window_length, occurrence_cutoff, "native", reference_channel, shared["zeros"]
+    )
+    retained = _retained_windows(_rejected_samples(raw, spans), window_samples, n_windows)
+    _require_retained_windows(retained.sum())
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
+    donor_picks = np.sort(np.r_[picks, raw.ch_names.index(reference_channel)])
+    target_rows = np.searchsorted(donor_picks, picks)
+    geometry = _spline_geometry(raw)
+    configurations = {}
+    counts = np.zeros(len(picks), dtype=int)
+    n_scorable = np.zeros(len(picks), dtype=int)
+    if return_details:
+        details = _init_window_details(
+            raw, picks, window_samples, n_windows,
+            ("observed_mad_uv", "predicted_mad_uv", "ratio", "robust_z"),
+        )
+        details["n_scorable"] = n_scorable
+        details["flat"] = flat
+        details["configuration_index"] = np.full(n_windows, -1, dtype=int)
+        details["configurations"] = []
+    for index in np.flatnonzero(retained):
+        eligible = np.ones(len(donor_picks), dtype=bool)
+        eligible[target_rows] = ~flat[:, index]
+        key = tuple(donor_picks[eligible])
+        if key not in configurations:
+            weights = np.zeros((len(picks), len(donor_picks)))
+            for row, target in enumerate(picks):
+                donors = np.flatnonzero(eligible & (donor_picks != target))
+                weights[row, donors] = _spline_weights(
+                    geometry, donor_picks[donors], [target]
+                )[0]
+            configurations[key] = len(configurations), weights
+            if return_details:
+                details["configurations"].append({
+                    "ch_names": [raw.ch_names[i] for i in key],
+                })
+        configuration, weights = configurations[key]
+        start = index * window_samples
+        data = raw.get_data(picks=donor_picks, start=start, stop=start + window_samples,
+                            reject_by_annotation=None)
+        observed = _mad(data[target_rows], axis=1)
+        predicted = _mad(weights @ data, axis=1)
+        valid = predicted > np.finfo(float).eps
+        ratio, z = np.full((2, len(picks)), np.nan)
+        ratio[valid] = observed[valid] / predicted[valid]
+        if valid.sum() >= 2:
+            z[valid] = _robust_channel_z(
+                np.log(np.maximum(ratio[valid], np.finfo(float).tiny)),
+                scale_floor=1e-6,
+            )
+        scorable = np.isfinite(z)
+        violates = z < -robust_z_cutoff
+        counts += violates
+        n_scorable += scorable
+        if return_details:
+            _record_window_details(details, start, window_samples, data[target_rows],
+                                   violates)
+            details["violates"][~scorable, index] = np.nan
+            details["observed_mad_uv"][:, index] = observed * 1e6
+            details["predicted_mad_uv"][:, index] = predicted * 1e6
+            details["ratio"][:, index] = ratio
+            details["robust_z"][:, index] = z
+            details["configuration_index"][index] = configuration
+    bad_names = _noisy_window_bads(
+        raw, picks, counts, n_scorable, occurrence_cutoff
+    )
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"small": bad_names}
+    if return_details:
+        return report, _finish_window_details(details, window_samples)
     return report
 
 
@@ -3149,10 +3280,11 @@ if __name__ == "__main__":
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
-    # %% Bad channels by voltage, high-frequency noise, and electrode pops
+    # %% Bad channels by voltage, HF noise, electrode pops, and smallness
     bad_ch_report.update(bad_ch_by_voltage(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
+    bad_ch_report.update(bad_ch_by_small(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)  # Before PCA cleaning
 
     # %% Robust average reference: interpolate all bad channels, which

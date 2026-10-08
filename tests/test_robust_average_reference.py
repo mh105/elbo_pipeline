@@ -125,6 +125,19 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual(len(voltage["exceed_fraction"]), len(voltage["ch_names"]))
         self.assertTrue((voltage["exceed_fraction"] <= 0.25).all())
 
+    def test_small_is_not_run_in_any_pass(self):
+        with patch.object(step2, "bad_ch_by_small", side_effect=AssertionError(
+            "Smallness must only be checked before robust average referencing."
+        )) as small:
+            report, details = step2.robust_average_reference_inplace(
+                make_native_raw(noisy="O1"), return_details=True,
+            )
+        small.assert_not_called()
+        self.assertEqual(len(details["iterations"]), 2)
+        self.assertNotIn("small", report)
+        for iteration in details["iterations"]:
+            self.assertNotIn("small", iteration)
+
     def test_stops_when_a_pass_repeats_and_drops_unflagged_channels(self):
         # F4 is flagged once, then not again: no union, so it is not interpolated.
         for schedule, passes, final in (([[]], 1, []),
