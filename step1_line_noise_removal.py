@@ -8,7 +8,7 @@ from step0_data_quality_check import load_raw_data
 
 
 def ZapLine_notch(raw_prep, line_freq):
-    """Return a cleaned Raw copy for line_freq (in Hz).
+    """Return a Raw copy cleaned at line_freq (Hz) on good EEG channels.
 
     Fit standard ZapLine on its usual moving-average residual, with its default
     harmonic bias. Apply the learned artifact projection only to the difference
@@ -17,7 +17,7 @@ def ZapLine_notch(raw_prep, line_freq):
     """
     sfreq = float(raw_prep.info["sfreq"])
     model = ZapLine(sfreq=sfreq, line_freq=line_freq, n_select="auto")
-    model.fit(raw_prep)
+    model.fit(raw_prep.copy().pick("eeg", exclude="bads"))
 
     clean = raw_prep.copy().load_data()
     if model.n_removed_ == 0:
