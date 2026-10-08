@@ -15,15 +15,14 @@ that dictionary.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
-bad_ch_by_std returns two criteria, std_high and std_low. Signal data and
-input annotations are unchanged.
+bad_ch_by_std reports high standard deviation as std. Signal data and input
+annotations are unchanged.
 
 The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
 bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more than
 25% of its scorable 2-s windows: the windows clear of BAD annotations
 (BAD_by_flatline included) and of the temporary BAD_voltage_mask, without the
-channel's local flat intervals (and, for std_low, without the windows where the
-channel violates std_high). Three rules differ by design. bad_ch_by_RANSAC
+channel's local flat intervals. Three rules differ by design. bad_ch_by_RANSAC
 counts local flat windows as failures to predict within the shared denominator;
 bad_ch_by_voltage counts scorable samples, not windows, since every sample
 beyond its threshold matters; and bad_ch_by_pop counts pops per
@@ -1257,8 +1256,8 @@ def bad_ch_by_std(
     return_details=False,
     _pass=None,
 ):
-    """Return {"std_high": names, "std_low": names} for EEG channels whose
-    robust standard deviation is persistently high or low across channels.
+    """Return {"std": names} for EEG channels whose robust standard deviation
+    is persistently high across channels.
 
     Require re-referenced data: raise if any EEG channel, bad or not, is
     entirely zero, as the native reference is. Exclude existing bads and
@@ -1271,27 +1270,17 @@ def bad_ch_by_std(
 
     In each window, compute each channel's robust standard deviation, d =
     1.4826 * MAD over time, and its robust z across channels, (d - median) /
-    (1.4826 * MAD); the channel violates std_high where z > robust_z_cutoff.
-    The channels that do not violate std_high form the window's low
-    baseline. d is right-skewed across channels, so a median - z * MAD cutoff
-    on d itself is usually below zero and cannot flag any channel; std_low
-    therefore uses the robust z of log(d) across the low baseline, flooring a
-    zero scale at 1e-6, far below any real spread, so that rounding cannot
-    split identical values, and the channel violates std_low where z <
-    -robust_z_cutoff. Return, for each criterion, the channels violating in
-    strictly more than occurrence_cutoff of their scorable windows; a
-    channel's scorable windows for std_low leave out those where it violates
-    std_high. A channel can be flagged by both. Add the detections to
-    raw.info["bads"], preserving existing labels without duplicates. Input
-    data and annotations are unchanged.
+    (1.4826 * MAD); the channel violates where z > robust_z_cutoff. Return
+    the channels violating in strictly more than occurrence_cutoff of their
+    scorable windows. Add the detections to raw.info["bads"], preserving
+    existing labels without duplicates. Input data and annotations are
+    unchanged.
 
-    With return_details=True, return (report, details), where details holds
-    one dictionary per criterion with the common fields described in
-    bad_ch_by_HFnoise, plus robust_std_uv (d in microvolts) and robust_z (the
-    robust z of d for std_high and of log(d) for std_low), each of shape
+    With return_details=True, return (report, details), with the common fields
+    described in bad_ch_by_HFnoise, plus robust_std_uv (d in microvolts) and
+    robust_z (the robust z of d across channels), each of shape
     (channels, complete windows). Observations a criterion does not score
-    contain NaN: masked and local-flat windows, and for std_low the channel's
-    std_high windows. flagged_data_uv stores each criterion's original
+    contain NaN: masked and local-flat windows. flagged_data_uv stores original
     violating window waveforms in chronological order.
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
@@ -1303,62 +1292,38 @@ def bad_ch_by_std(
     )
     rejected = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    criteria = ("std_high", "std_low")
-    counts = {criterion: np.zeros(len(picks), dtype=int) for criterion in criteria}
-    scorable = {criterion: np.zeros(len(picks), dtype=int) for criterion in criteria}
+    counts = np.zeros(len(picks), dtype=int)
+    scorable = np.zeros(len(picks), dtype=int)
     n_retained = 0
     if return_details:
-        details = {
-            criterion: _init_window_details(
-                raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
-            )
-            for criterion in criteria
-        }
+        details = _init_window_details(
+            raw, picks, window_samples, n_windows, ("robust_std_uv", "robust_z")
+        )
     for start, data in _unmasked_windows(
         raw, picks, window_samples, n_windows, rejected, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        deviation, high_z, low_z = np.full((3, len(picks)), np.nan)
+        deviation, z = np.full((2, len(picks)), np.nan)
         if valid.any():
             deviation[valid] = 1.4826 * _mad(data[valid], axis=1)
-            high_z[valid] = _robust_channel_z(deviation[valid])
-        high = high_z > robust_z_cutoff
-        baseline = valid & ~high
-        if baseline.any():
-            low_z[baseline] = _robust_channel_z(
-                np.log(np.maximum(deviation[baseline], np.finfo(float).tiny)),
-                scale_floor=1e-6,
-            )
-        low = low_z < -robust_z_cutoff
+            z[valid] = _robust_channel_z(deviation[valid])
+        violates = z > robust_z_cutoff
+        counts += violates
+        scorable += valid
         n_retained += 1
-        for criterion, violates, scored, z in (
-            ("std_high", high, valid, high_z), ("std_low", low, baseline, low_z),
-        ):
-            counts[criterion] += violates
-            scorable[criterion] += scored
-            if return_details:
-                tail = details[criterion]
-                window = _record_window_details(
-                    tail, start, window_samples, data, violates
-                )
-                tail["violates"][~scored, window] = np.nan
-                tail["robust_std_uv"][:, window] = deviation * 1e6
-                tail["robust_z"][:, window] = z
+        if return_details:
+            window = _record_window_details(
+                details, start, window_samples, data, violates
+            )
+            details["violates"][~valid, window] = np.nan
+            details["robust_std_uv"][:, window] = deviation * 1e6
+            details["robust_z"][:, window] = z
     _require_retained_windows(n_retained)
-    report = {
-        criterion: _noisy_window_bads(
-            raw, picks, counts[criterion], scorable[criterion], occurrence_cutoff
-        )
-        for criterion in criteria
-    }
-    raw.info["bads"] = list(dict.fromkeys(
-        raw.info["bads"] + report["std_high"] + report["std_low"]
-    ))
+    bad_names = _noisy_window_bads(raw, picks, counts, scorable, occurrence_cutoff)
+    raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
+    report = {"std": bad_names}
     if return_details:
-        return report, {
-            criterion: _finish_window_details(tail, window_samples)
-            for criterion, tail in details.items()
-        }
+        return report, _finish_window_details(details, window_samples)
     return report
 
 
@@ -3084,9 +3049,7 @@ def robust_average_reference_inplace(
             result = detector(referenced, return_details=return_details, _pass=shared)
             if return_details:
                 result, detector_details = result
-                # bad_ch_by_std nests its two criteria's details by criterion.
-                pass_details.update(detector_details if len(result) > 1
-                                    else {next(iter(result)): detector_details})
+                pass_details.update({next(iter(result)): detector_details})
             robust_bad_ch_report.update(result)
         new = [name for name in eeg_names
                if name in referenced.info["bads"] and name not in initial]

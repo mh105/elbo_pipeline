@@ -23,7 +23,7 @@ class TestBadChannelReport(unittest.TestCase):
         raw._data[:12, 12 * sfreq:] += 800e-6
         raw.info["bads"] = ["O1"]
         raw.set_annotations(mne.Annotations([1], [0], ["event"]))
-        report = {"empty": [], "std_high": ["O1", "EOG"],
+        report = {"empty": [], "std": ["O1", "EOG"],
                   "correlation": ["F3", "O1"]}
         original = raw.copy()
         with patch.object(step2, "_temporary_voltage_mask",
@@ -51,11 +51,11 @@ class TestBadChannelReport(unittest.TestCase):
         self.assertEqual(axes["O1"].lines[1].get_marker(), "o")
         self.assertEqual(to_rgba(axes["O1"].lines[1].get_color()), palette(2))
         self.assertEqual([text.get_text() for text in fig.legends[0].get_texts()],
-                         ["Unflagged", "std_high", "correlation"])
+                         ["Unflagged", "std", "correlation"])
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         self.assertEqual(raw.info["bads"], original.info["bads"])
         self.assertEqual(raw.annotations, original.annotations)
-        self.assertEqual(report, {"empty": [], "std_high": ["O1", "EOG"],
+        self.assertEqual(report, {"empty": [], "std": ["O1", "EOG"],
                                   "correlation": ["F3", "O1"]})
 
     def test_random_selection_covers_all_eligible_starts_and_avoids_annotations(self):
@@ -82,7 +82,7 @@ class TestBadChannelReport(unittest.TestCase):
 
     def test_report_adds_the_companion_and_returns_the_original_topoplot(self):
         raw = make_native_raw(seconds=12)
-        report = {"empty": [], "std_high": ["O1"], "correlation": ["F3"]}
+        report = {"empty": [], "std": ["O1"], "correlation": ["F3"]}
         topoplot = step2.plot_bad_ch_report(raw, report)
         figures = [plt.figure(number) for number in plt.get_fignums()]
         self.assertEqual(len(figures), 2)
@@ -99,7 +99,7 @@ class TestBadChannelReport(unittest.TestCase):
         short = mne.io.RawArray(np.zeros((len(raw.ch_names), 2)), raw.info,
                                 verbose=False)
         with self.assertWarnsRegex(UserWarning, "No unmasked 10-s window"):
-            fig = step2.plot_bad_ch_report(short, {"std_high": ["O1"]})
+            fig = step2.plot_bad_ch_report(short, {"std": ["O1"]})
         self.assertEqual(plt.get_fignums(), [fig.number])
 
 

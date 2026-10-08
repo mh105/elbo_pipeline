@@ -126,9 +126,7 @@ class TestReferenceRequirements(unittest.TestCase):
                     data = raw.get_data().copy()
                     annotations = raw.annotations.copy()
                     result = detector(raw)
-                    criteria = (["std_high", "std_low"] if detector is step2.bad_ch_by_std
-                                else [criterion(detector)])
-                    self.assertEqual(list(result), criteria)
+                    self.assertEqual(list(result), [criterion(detector)])
                     flagged = list(dict.fromkeys(sum(result.values(), [])))
                     self.assertEqual(raw.info["bads"], ["E0"] + flagged)
                     self.assertNotIn("E0", flagged)

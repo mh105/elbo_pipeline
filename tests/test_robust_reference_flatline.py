@@ -18,7 +18,7 @@ from test_robust_average_reference import NAMES, make_native_raw
 
 
 CRITERIA = {"bad_ch_by_voltage": ("voltage",), "bad_ch_by_HFnoise": ("HFnoise",),
-            "bad_ch_by_pop": ("pop",), "bad_ch_by_std": ("std_high", "std_low"),
+            "bad_ch_by_pop": ("pop",), "bad_ch_by_std": ("std",),
             "bad_ch_by_BBnoise": ("BBnoise",), "bad_ch_by_correlation": ("correlation",)}
 
 

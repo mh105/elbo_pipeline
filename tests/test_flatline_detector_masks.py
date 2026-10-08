@@ -54,17 +54,11 @@ def average(raw):
 
 
 DETECTORS = (
-    ("std_high", step2.bad_ch_by_std, "robust_z"),
-    ("std_low", step2.bad_ch_by_std, "robust_z"),
+    ("std", step2.bad_ch_by_std, "robust_z"),
     ("HFnoise", step2.bad_ch_by_HFnoise, "robust_z"),
     ("BBnoise", step2.bad_ch_by_BBnoise, "robust_z"),
     ("correlation", step2.bad_ch_by_correlation, "score"),
 )
-
-
-def criterion_details(details, criterion):
-    """bad_ch_by_std nests its details by criterion."""
-    return details[criterion] if criterion.startswith("std_") else details
 
 
 class TestPublicFlatlineStages(unittest.TestCase):
@@ -277,11 +271,9 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
                 local = referenced.copy()
                 original = local.copy()
                 _, masked = detector(local, flatlines=flatlines, return_details=True)
-                masked = criterion_details(masked, criterion)
                 control = referenced.copy()
                 control.info["bads"] = ["E0"]
                 _, omitted = detector(control, return_details=True)
-                omitted = criterion_details(omitted, criterion)
                 invalid_row = masked["ch_names"].index("E0")
                 self.assertTrue(np.isnan(masked[metric][invalid_row, 1]).all())
                 self.assertTrue(np.isnan(masked["violates"][invalid_row, 1]))
@@ -301,7 +293,6 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
         for criterion, detector, metric in DETECTORS:
             with self.subTest(criterion=criterion):
                 report, details = detector(referenced.copy(), flatlines=flatlines, return_details=True)
-                details = criterion_details(details, criterion)
                 row = details["ch_names"].index("E0")
                 self.assertNotIn("E0", report[criterion])
                 self.assertTrue(np.isnan(details[metric][row]).all())
@@ -312,9 +303,7 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
         for criterion, detector, _ in DETECTORS:
             with self.subTest(criterion=criterion):
                 native = native_raw()
-                if criterion == "std_low":
-                    native._data[0, :WINDOW] = 3e-6
-                elif criterion in ("std_high", "BBnoise"):
+                if criterion in ("std", "BBnoise"):
                     native._data[0, :WINDOW] *= 12
                 elif criterion == "HFnoise":
                     t = np.arange(WINDOW) / SFREQ
@@ -326,7 +315,6 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
                     kwargs["correlation_cutoff"] = 0.9
                 report, details = detector(referenced, flatlines=flatlines,
                                            return_details=True, **kwargs)
-                details = criterion_details(details, criterion)
                 self.assertIn("E0", report[criterion])
                 row = details["ch_names"].index("E0")
                 self.assertEqual(details["violates"][row, 0], 1)
@@ -337,9 +325,8 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
         raw._data[:5, :WINDOW] += 600e-6
         raw._data[5:10, :WINDOW] -= 600e-6
         _, details = step2.bad_ch_by_std(raw, return_details=True)
-        for tail in details.values():
-            np.testing.assert_array_equal(tail["retained"], [False, True, True, True])
-            self.assertTrue(np.isnan(tail["robust_std_uv"][:, 0]).all())
+        np.testing.assert_array_equal(details["retained"], [False, True, True, True])
+        self.assertTrue(np.isnan(details["robust_std_uv"][:, 0]).all())
         self.assertEqual(len(raw.annotations), 0)
 
     def test_correlation_skips_global_dropout_after_filter_reach_widening(self):

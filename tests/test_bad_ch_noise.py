@@ -82,9 +82,6 @@ WINDOW_DETECTORS = (
 
 
 def expected_report(detector, flagged):
-    """flagged is std_high for std, whose std_low always has std_raw's 0.01x E0/M0."""
-    if detector is step2.bad_ch_by_std:
-        return {"std_high": flagged, "std_low": ["E0", "M0"]}
     return {detector.__name__.removeprefix("bad_ch_by_"): flagged}
 
 
@@ -481,16 +478,13 @@ class TestRobustMetrics(unittest.TestCase):
             self.assertEqual(step2.bad_ch_by_HFnoise(raw), {"HFnoise": ["E2"]})
         self.assertEqual(raw.info["bads"], ["E2"])
 
-    def test_std_tails_use_strict_z_thresholds(self):
+    def test_std_uses_strict_positive_z_threshold(self):
         raw = std_raw()
-        high_z = np.zeros(18)
-        high_z[:3] = [-10, 5, 5.001]  # Only E2 is high; a very low z is not.
-        low_z = np.zeros(17)  # The low baseline leaves out E2.
-        low_z[:3] = [-5.001, -5, 10]  # E0 is low; E1, at -5, and E3 are not.
-        with patch.object(step2, "_robust_channel_z",
-                          side_effect=lambda values, **kwargs: high_z if len(values) == 18 else low_z):
-            self.assertEqual(step2.bad_ch_by_std(raw), {"std_high": ["E2"], "std_low": ["E0"]})
-        self.assertEqual(raw.info["bads"], ["E2", "E0"])
+        z = np.zeros(18)
+        z[:3] = [-10, 5, 5.001]  # Only E2 is high; a very low z is not.
+        with patch.object(step2, "_robust_channel_z", return_value=z):
+            self.assertEqual(step2.bad_ch_by_std(raw), {"std": ["E2"]})
+        self.assertEqual(raw.info["bads"], ["E2"])
 
     def test_std_flags_only_by_occurrence_above_its_z_cutoff(self):
         raw = std_raw(n_bad=0)
@@ -498,8 +492,8 @@ class TestRobustMetrics(unittest.TestCase):
         z[3:5] = [2.5, 4.999]  # Moderately high in every window, but never above 5.
         with patch.object(step2, "_robust_channel_z", return_value=z):
             report, details = step2.bad_ch_by_std(raw, return_details=True)
-        self.assertEqual(report, {"std_high": [], "std_low": []})
-        self.assertNotIn("median_robust_z", details["std_high"])
+        self.assertEqual(report, {"std": []})
+        self.assertNotIn("median_robust_z", details)
         with self.assertRaises(TypeError):
             step2.bad_ch_by_std(std_raw(), median_z_cutoff=2.0)
 
@@ -549,14 +543,11 @@ class TestWindowedNoiseDetection(unittest.TestCase):
         report.update(step2.bad_ch_by_nan(raw))  # Needs the native reference, Cz.
         raw.set_eeg_reference("average", projection=False, verbose=False)
         report.update(step2.bad_ch_by_std(raw))
-        # The mirrored pairs cancel in the average, so Cz keeps only a small
-        # share of E1 and is low, like E0/M0.
-        self.assertEqual(report, {"nan": ["E1"], "std_high": ["E8", "M8"],
-                                  "std_low": ["E0", "M0", "Cz"]})
-        bads = ["E1", "E8", "M8", "E0", "M0", "Cz"]
+        self.assertEqual(report, {"nan": ["E1"], "std": ["E8", "M8"]})
+        bads = ["E1", "E8", "M8"]
         self.assertEqual(raw.info["bads"], bads)
         # Report lists are independent of the accumulated labels on Raw.
-        report["std_high"].append("E2")
+        report["std"].append("E2")
         self.assertEqual(raw.info["bads"], bads)
 
     def test_actual_metrics_strict_occurrence_and_multiple_bb_outliers(self):
