@@ -81,7 +81,7 @@ reference is itself bad, validate_reference_inplace then re-references the
 data to the nearest good one of its five nearest electrodes, or raises if all
 five are bad.
 
-apply_asr_inplace refreshes the voltage mask and calibrates standard ASR on
+apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
 annotations and widened local flat intervals, then uses automatic selection;
 at least 60 seconds must remain. Its statistics use a four-second minimum-phase
@@ -91,6 +91,8 @@ local flat spans are reconstructed again from corrected donors. Return the
 component-rejection and applied-correction intervals on the original sample
 timeline; return_details=True also returns calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
+plot_asr_calibration shows accepted support, a channel trace and spectrogram,
+and the calibrated covariance before correction.
 """
 
 from collections import defaultdict
@@ -112,6 +114,7 @@ from mne_denoise.asr import calibrate_asr, process_asr, _calibration, _reconstru
 from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin, firwin2, minimum_phase, oaconvolve
+from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (  # noqa: F401
     ZapLine_notch,
@@ -3482,6 +3485,113 @@ def validate_reference_inplace(raw, flatlines):
 
 # %% Part 2: Bad-time correction with ASR
 
+def plot_asr_calibration(raw, data, ch_names, state, calibration_indices):
+    """Show calibration support and statistics before correction; return figure.
+
+    data contains original ASR input voltages in volts, with rows matching
+    ch_names. calibration_indices maps the final automatic clean sample mask
+    to this Raw's original sample indices. Show that support in a thin green
+    bar below the highest-power channel's trace at +/-200 microvolts, and show
+    its unshaped-input spectrogram through 100 Hz using Step 1's SOMATA
+    multitaper settings. The lower panels
+    show the ASR-filtered robust covariance in microvolts squared and its
+    diagonal power in dB re 1 microvolt squared at the recorded EEG locations.
+    Raw data, labels, annotations, and calibration state are unchanged.
+    """
+    sfreq = float(raw.info["sfreq"])
+    covariance_uv2 = state.cov * 1e12
+    diagonal_uv2 = np.diag(covariance_uv2)
+    row = int(np.argmax(diagonal_uv2))
+    channel = ch_names[row]
+    voltage_uv = data[row] * 1e6
+    accepted = np.zeros(raw.n_times, dtype=bool)
+    accepted[calibration_indices] = True
+    spans = np.flatnonzero(np.diff(np.r_[False, accepted, False])).reshape(-1, 2)
+
+    fig = plt.figure(figsize=(14, 11), layout="constrained")
+    grid = fig.add_gridspec(4, 2, height_ratios=[1, 0.08, 1.2, 2])
+    trace_ax = fig.add_subplot(grid[0, :])
+    support_ax = fig.add_subplot(grid[1, :], sharex=trace_ax)
+    spectrum_ax = fig.add_subplot(grid[2, :], sharex=trace_ax)
+    covariance_ax = fig.add_subplot(grid[3, 0])
+    topomap_ax = fig.add_subplot(grid[3, 1])
+    for start, stop in spans:
+        support_ax.axvspan(start / sfreq, stop / sfreq, color="green", alpha=0.5)
+    support_ax.set(ylim=(0, 1), yticks=[], ylabel="Accepted")
+    support_ax.yaxis.label.set(rotation=0, horizontalalignment="right",
+                               verticalalignment="center")
+    support_ax.tick_params(axis="x", bottom=False, labelbottom=False)
+    bin_samples = max(int(round(0.02 * sfreq)), 1)
+    bin_starts = np.arange(0, raw.n_times, bin_samples)
+    envelope = np.column_stack([
+        np.minimum.reduceat(voltage_uv, bin_starts),
+        np.maximum.reduceat(voltage_uv, bin_starts),
+    ]).ravel()
+    trace_ax.plot(np.repeat(bin_starts / sfreq, 2), envelope, linewidth=0.5)
+    trace_ax.set(ylim=(-200, 200), ylabel="Voltage (µV)",
+                 title=f"{channel}: highest calibrated channel power; ASR input "
+                       f"in {1000 * bin_samples / sfreq:.3g}-ms min/max bins")
+
+    max_frequency = min(100, sfreq / 2)
+    power, times, freqs = multitaper_spectrogram(
+        voltage_uv, sfreq, frequency_range=[1, max_frequency],
+        time_bandwidth=2, num_tapers=3, window_params=[2, 1],
+        min_nfft=int(2 ** np.ceil(np.log2(sfreq / 0.05))),
+        detrend_opt="constant", plot_on=False, verbose=False,
+    )
+    power_db = 10 * np.log10(np.where(power > 0, power, np.nan))
+    vmin, vmax = np.nanpercentile(power_db, [5, 98])
+    mesh = spectrum_ax.pcolormesh(times, freqs, power_db, shading="auto",
+                                  vmin=vmin, vmax=vmax, cmap="cet_rainbow4")
+    spectrum_ax.set(xlim=(0, raw.times[-1]), ylim=(1, max_frequency), xlabel="Time (s)",
+                    ylabel="Frequency (Hz)", title=f"{channel}: multitaper spectrogram")
+    fig.colorbar(mesh, ax=spectrum_ax, label=r"PSD (dB re 1 $\mu V^2$/Hz)")
+
+    limit = np.max(np.abs(covariance_uv2))
+    image = covariance_ax.imshow(covariance_uv2, cmap="RdBu_r",
+                                 vmin=-limit, vmax=limit)
+    ticks = np.arange(0, len(ch_names), max(1, len(ch_names) // 10))
+    covariance_ax.set(xticks=ticks, yticks=ticks,
+                      xticklabels=[ch_names[i] for i in ticks],
+                      yticklabels=[ch_names[i] for i in ticks],
+                      xlabel="Channel", ylabel="Channel",
+                      title="ASR-filtered robust calibration covariance")
+    covariance_ax.tick_params(axis="x", labelrotation=45)
+    colorbar_ax = covariance_ax.inset_axes([1.04, 0.1, 0.04, 0.8])
+    fig.colorbar(image, cax=colorbar_ax, label="Covariance (µV²)")
+
+    picks = [raw.ch_names.index(name) for name in ch_names]
+    info = mne.pick_info(raw.info, picks)
+    sphere = _check_sphere("auto", raw.info)
+    diagonal_db = 10 * np.log10(diagonal_uv2)
+    top = np.argsort(diagonal_uv2)[-3:]
+    labels = [name if index in top else "" for index, name in enumerate(ch_names)]
+    image, _ = mne.viz.plot_topomap(
+        diagonal_db, info, sphere=sphere, axes=topomap_ax, show=False,
+        names=labels, sensors="k.", cmap="YlOrRd", contours=0,
+        image_interp="linear", extrapolate="local",
+        vlim=(diagonal_db.min(), diagonal_db.max()),
+    )
+    topomap_ax.set_title("ASR-filtered diagonal calibration power")
+    topomap_colorbar = fig.colorbar(image, ax=topomap_ax, shrink=0.8,
+                                    label=r"Power (dB re 1 $\mu V^2$)")
+    fig.suptitle(f"ASR calibration: {len(calibration_indices) / sfreq:.3f} s accepted")
+    fig.canvas.draw()
+    fig.set_layout_engine("none")
+    plot_area = trace_ax.get_position()
+    for ax, fraction in ((covariance_ax, 0.25), (topomap_ax, 0.75)):
+        center = plot_area.x0 + fraction * plot_area.width
+        position = ax.get_position()
+        offset = center - (position.x0 + position.width / 2)
+        ax.set_position(position.translated(offset, 0))
+        ax.set_anchor("C")
+        if ax is topomap_ax:
+            colorbar_ax = topomap_colorbar.ax
+            colorbar_ax.set_position(colorbar_ax.get_position().translated(offset, 0))
+    plt.show()
+    return fig
+
+
 def plot_asr_effect(raw, before, ch_names):
     """Show before/after ASR voltage envelopes; return the figure.
 
@@ -3587,11 +3697,11 @@ def apply_asr_inplace(
 
     Run after local flatline interpolation and validate_reference_inplace;
     pass its returned reference_channel if it switched electrodes. Exclude
-    raw.info["bads"] and the effective zero reference from ASR. Refresh only
-    BAD_voltage_mask annotations using this final pool. Calibration omits
-    every case-insensitive BAD* period and widened local flat intervals of
-    the included channels and effective reference. Concatenate this support
-    for native automatic selection, requiring at least 60 retained seconds.
+    raw.info["bads"] and the effective zero reference from ASR. Append voltage
+    mask annotations using this final pool, preserving existing annotations.
+    Calibration omits every case-insensitive BAD* period and widened local flat
+    intervals of the included channels and effective reference. Concatenate this
+    support for native automatic selection, requiring at least 60 retained seconds.
 
     Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
     and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
@@ -3612,7 +3722,8 @@ def apply_asr_inplace(
     With return_details=True, return (report, details), including original
     calibration sample indices, filter coefficients, settings, and native
     calibration and processing diagnostics. Insufficient calibration raises
-    before any corrected voltages are written back.
+    before any corrected voltages are written back. Show plot_asr_calibration
+    after calibration and before correction.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3626,7 +3737,6 @@ def apply_asr_inplace(
     sfreq = float(raw.info["sfreq"])
     names = [raw.ch_names[pick] for pick in picks]
 
-    raw.annotations.delete(np.flatnonzero(raw.annotations.description == "BAD_voltage_mask"))
     mask_segment_by_voltage(raw, reference_channel=reference_channel)
     excluded = _rejected_samples(raw)
     calibration_channels = set(names) | {reference_channel}
@@ -3665,6 +3775,7 @@ def apply_asr_inplace(
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
     require_calibration(len(calibration_indices))
+    plot_asr_calibration(raw, data, names, state, calibration_indices)
     history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
     _, initial_state = _asr_filter_channels(
         history, b, a, np.zeros((len(picks), len(b) - 1))

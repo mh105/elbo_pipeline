@@ -151,10 +151,10 @@ class TestASRWrapper(unittest.TestCase):
             self.assertTrue(all(type(start) is int and type(stop) is int
                                 for start, stop in segments))
 
-    def test_voltage_mask_refresh_uses_final_good_channels(self):
+    def test_voltage_mask_preserves_existing_annotations_and_uses_final_good_channels(self):
         raw = make_raw()
         raw.info["bads"] = ["F7"]
-        # A newly excluded channel cannot contribute to the refreshed denominator.
+        # A newly excluded channel cannot contribute to the final denominator.
         raw._data[raw.ch_names.index("F7"), 2500:2525] = 1e-3
         rows = [raw.ch_names.index(name) for name in ["Fp1", "Fp2", "F3"]]
         raw._data[rows, 5000:5025] = 1e-3
@@ -165,15 +165,16 @@ class TestASRWrapper(unittest.TestCase):
         fake = FakeASR()
         _, details = self.run_fake(raw, fake, reference_channel="Cz", return_details=True)
         descriptions = list(raw.annotations.description)
-        self.assertEqual(descriptions.count("BAD_voltage_mask"), 1)
+        self.assertEqual(descriptions.count("BAD_voltage_mask"), 2)
         self.assertIn("bad_voltage_mask", descriptions)
         self.assertIn("BAD_manual", descriptions)
         annotation = next(index for index, name in enumerate(descriptions)
-                          if name == "BAD_voltage_mask")
+                          if name == "BAD_voltage_mask"
+                          and np.isclose(raw.annotations.onset[index] - raw.first_time, 20))
         self.assertAlmostEqual(raw.annotations.onset[annotation] - raw.first_time, 20)
         self.assertAlmostEqual(raw.annotations.duration[annotation], 0.1)
         indices = details["calibration_input_sample_indices"]
-        self.assertIn(2500, indices)  # Old exact-name mask was replaced.
+        self.assertNotIn(2500, indices)  # Existing exact-name mask remains excluded.
         self.assertNotIn(3000, indices)  # Existing lowercase BAD* remains excluded.
         self.assertFalse(np.isin(np.arange(5000, 5025), indices).any())
 
