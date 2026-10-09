@@ -1,0 +1,376 @@
+import sys
+import unittest
+import warnings
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import mne
+import numpy as np
+
+
+pipeline_dir = Path(__file__).resolve().parents[1]
+if str(pipeline_dir) not in sys.path:
+    sys.path.insert(0, str(pipeline_dir))
+
+import step3_ica_cleaning as step3
+
+
+NAMES = ["E14", "E126", "E21", "E127", "F3", "C3", "Cz", "BAD", "EOG"]
+DEFAULT_EOG_PAIRS = (("VEOG-R", "E14", "E126"), ("VEOG-L", "E21", "E127"))
+
+
+def make_raw(seconds=12, sfreq=1000, first_samp=5500):
+    data = np.random.default_rng(518).normal(scale=10e-6,
+                                            size=(len(NAMES), int(seconds * sfreq)))
+    data[NAMES.index("Cz")] = 0
+    data[NAMES.index("BAD")] = np.nan
+    raw = mne.io.RawArray(
+        data, mne.create_info(NAMES, sfreq, ["eeg"] * 8 + ["eog"]),
+        first_samp=first_samp, verbose=False,
+    )
+    raw.info["bads"] = ["BAD"]
+    positions = {name: position for name, position in zip(NAMES[:8], [
+        [-0.04, 0.07, 0.04], [0.04, 0.07, 0.04], [-0.06, 0.02, 0.06],
+        [0.06, 0.02, 0.06], [-0.04, 0.03, 0.075], [-0.045, 0, 0.075],
+        [0, 0, 0.09], [0.04, -0.03, 0.075],
+    ])}
+    raw.set_montage(mne.channels.make_dig_montage(positions, coord_frame="head"))
+    return raw
+
+
+def prepare(raw, reference_channel=None):
+    with warnings.catch_warnings(), mne.use_log_level("ERROR"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return step3.prepare_ica_epochs(raw, reference_channel)
+
+
+class FakeICA:
+    def __init__(self, n_components):
+        self.n_components_ = n_components
+        self.n_iter_ = 9
+        self.ch_names = ["E14", "E126", "F3"]
+        self.exclude = [99]
+        self.maps = np.eye(3, n_components)
+        self.fit = Mock(return_value=self)
+
+    def get_components(self):
+        return self.maps
+
+
+class TestICAPreparation(unittest.TestCase):
+    def test_masks_and_decimation_preserve_original_native_data(self):
+        raw = make_raw()
+        raw.set_annotations(mne.Annotations(
+            [2.1, 4.1, 8.1], [0.2, 0.2, 0.2],
+            ["BAD_voltage_mask", "BAD_by_flatline", "local_repaired"],
+        ))
+        original = raw.copy()
+        filter_calls = []
+        original_filter = mne.io.BaseRaw.filter
+
+        def record_filter(instance, *args, **kwargs):
+            filter_calls.append(kwargs.copy())
+            return original_filter(instance, *args, **kwargs)
+
+        with patch.object(mne.io.BaseRaw, "filter", record_filter):
+            raw_ica, epochs, reference = prepare(raw)
+
+        self.assertEqual(reference, "Cz")
+        self.assertIsNot(raw_ica, raw)
+        self.assertEqual(raw_ica.ch_names, NAMES[:7])
+        self.assertEqual(epochs.ch_names, NAMES[:6])
+        self.assertEqual(epochs.get_data().shape, (4, 6, 500))
+        self.assertEqual(epochs.info["sfreq"], 250)
+        self.assertIsNone(epochs.baseline)
+        self.assertFalse(epochs.proj)
+        np.testing.assert_array_equal(epochs.events[:, 0], raw.first_samp +
+                                      np.array([0, 6, 8, 10]) * 1000)
+        np.testing.assert_array_equal(raw_ica.get_data(picks=["Cz"]), 0)
+        self.assertTrue(np.isfinite(epochs.get_data()).all())
+        self.assertEqual([(call["l_freq"], call["h_freq"]) for call in filter_calls],
+                         [(1.0, None), (None, 100.0)])
+        self.assertEqual(filter_calls[1]["h_trans_bandwidth"], 25)
+        for call in filter_calls:
+            self.assertEqual(call["skip_by_annotation"], ("edge", "bad_acq_skip", "BAD"))
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
+        self.assertEqual(raw.ch_names, original.ch_names)
+        self.assertEqual(raw.info["bads"], original.info["bads"])
+        self.assertEqual(raw.annotations, original.annotations)
+        self.assertEqual(raw.first_samp, original.first_samp)
+        for key in ("highpass", "lowpass", "sfreq", "custom_ref_applied", "projs"):
+            self.assertEqual(raw.info[key], original.info[key])
+
+    def test_shifted_effective_reference_is_selected(self):
+        raw = make_raw()
+        eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+        raw._data[eeg] -= raw._data[NAMES.index("C3")].copy()
+        raw.info["bads"].append("Cz")
+        for supplied_reference in (None, "C3"):
+            with self.subTest(reference=supplied_reference):
+                raw_ica, epochs, reference = prepare(raw, supplied_reference)
+                self.assertEqual(reference, "C3")
+                self.assertIn("C3", raw_ica.ch_names)
+                self.assertNotIn("C3", epochs.ch_names)
+                self.assertNotIn("Cz", raw_ica.ch_names)
+
+    def test_requires_the_native_rate_and_zero_reference(self):
+        with self.assertRaisesRegex(ValueError, "1000"):
+            prepare(make_raw(sfreq=500))
+        with self.assertRaisesRegex(ValueError, "zero"):
+            prepare(make_raw(), "F3")
+        raw = make_raw()
+        raw._data[NAMES.index("C3")] = 0
+        with self.assertRaisesRegex(ValueError, "reference"):
+            prepare(raw)
+
+    def test_rejects_training_when_no_clean_two_second_epoch_remains(self):
+        raw = make_raw()
+        raw.set_annotations(mne.Annotations(np.arange(0, 12, 2) + 0.5,
+                                            [0.1] * 6, ["BAD_voltage_mask"] * 6))
+        with self.assertRaisesRegex(ValueError, "No clean 2-second epochs"):
+            prepare(raw)
+
+
+class TestEOGCandidates(unittest.TestCase):
+    def test_adds_bipolar_eog_without_changing_eeg(self):
+        raw = make_raw().pick("eeg", exclude="bads")
+        original = raw.get_data().copy()
+        scores = [np.array([0.2, 0.8]), np.array([0.3, 0.7])]
+        ica = Mock()
+        ica.find_bads_eog.return_value = ([np.int64(1)], scores)
+        with mne.use_log_level("ERROR"):
+            indices, returned_scores = step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS)
+        self.assertEqual(indices, [1])
+        self.assertIs(type(indices[0]), int)
+        self.assertIs(returned_scores, scores)
+        np.testing.assert_array_equal(raw.get_data(picks=NAMES[:7]), original)
+        for name, anode, cathode in DEFAULT_EOG_PAIRS:
+            np.testing.assert_array_equal(raw.get_data(picks=[name])[0],
+                                          original[NAMES.index(anode)] -
+                                          original[NAMES.index(cathode)])
+        self.assertEqual(raw.get_channel_types()[-2:], ["eog", "eog"])
+        ica.find_bads_eog.assert_called_once_with(
+            raw, ch_name=["VEOG-R", "VEOG-L"], reject_by_annotation=True,
+        )
+
+    def test_skips_bad_and_missing_sources(self):
+        for unavailable in ("bad", "missing"):
+            with self.subTest(unavailable=unavailable):
+                raw = make_raw().pick("eeg", exclude="bads")
+                if unavailable == "bad":
+                    raw.info["bads"] = ["E126"]
+                else:
+                    raw.drop_channels(["E126"])
+                ica = Mock()
+                ica.find_bads_eog.return_value = ([], np.zeros(3))
+                with mne.use_log_level("ERROR"):
+                    step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS)
+                self.assertNotIn("VEOG-R", raw.ch_names)
+                self.assertIn("VEOG-L", raw.ch_names)
+                self.assertEqual(ica.find_bads_eog.call_args.kwargs["ch_name"], ["VEOG-L"])
+        raw = make_raw().pick(["F3", "C3", "Cz"])
+        ica = Mock()
+        self.assertEqual(step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS), ([], None))
+        ica.find_bads_eog.assert_not_called()
+
+    def test_custom_pairs_create_only_requested_bipolar_channels(self):
+        raw = make_raw().pick("eeg", exclude="bads")
+        original = raw.get_data().copy()
+        ica = Mock()
+        ica.find_bads_eog.return_value = ([0], np.array([0.8]))
+        with mne.use_log_level("ERROR"):
+            indices, _ = step3.find_eog_components(
+                raw, ica, eog_pairs=(("CUSTOM-EOG", "F3", "C3"),),
+            )
+        self.assertEqual(indices, [0])
+        self.assertEqual(raw.ch_names, NAMES[:7] + ["CUSTOM-EOG"])
+        self.assertEqual(raw.get_channel_types()[-1], "eog")
+        np.testing.assert_array_equal(raw.get_data(picks=NAMES[:7]), original)
+        np.testing.assert_array_equal(raw.get_data(picks=["CUSTOM-EOG"])[0],
+                                      original[NAMES.index("F3")] - original[NAMES.index("C3")])
+        ica.find_bads_eog.assert_called_once_with(
+            raw, ch_name=["CUSTOM-EOG"], reject_by_annotation=True,
+        )
+
+
+class TestICLabelMaps(unittest.TestCase):
+    def test_restores_reference_before_centering_and_preserves_time_features(self):
+        raw = make_raw().pick(["E14", "E126", "F3", "Cz"])
+        epochs = mne.make_fixed_length_epochs(raw.copy().drop_channels(["Cz"]),
+                                             duration=2, preload=True, verbose=False)
+        ica = FakeICA(3)
+        original_maps = ica.maps.copy()
+        original_data = epochs.get_data().copy()
+        old_topo = np.full((32, 32, 1, 3), -0.2, dtype=np.float32)
+        psd = np.full((1, 100, 1, 3), 0.1, dtype=np.float32)
+        autocorr = np.full((1, 100, 1, 3), 0.2, dtype=np.float32)
+        psd_original, autocorr_original = psd.copy(), autocorr.copy()
+        new_topo = np.full_like(old_topo, 0.5)
+        probabilities = np.zeros((3, 7))
+        probabilities[:, 0] = 1
+        with patch.object(step3, "get_iclabel_features", return_value=(old_topo, psd, autocorr)) as features, \
+                patch.object(step3, "_eeg_topoplot", return_value=new_topo) as topoplot, \
+                patch.object(step3, "run_iclabel", return_value=probabilities) as infer:
+            result = step3.label_ica_components(raw, epochs, ica, "Cz")
+
+        self.assertIs(result, probabilities)
+        features.assert_called_once_with(epochs, ica)
+        map_raw, maps, names = topoplot.call_args.args
+        self.assertEqual(names, ica.ch_names + ["Cz"])
+        expected = np.vstack([original_maps, np.zeros((1, 3))])
+        expected -= expected.mean(axis=0, keepdims=True)
+        np.testing.assert_array_equal(maps, expected)
+        np.testing.assert_allclose(maps.sum(axis=0), 0, atol=1e-15)
+        self.assertEqual(np.linalg.matrix_rank(maps), 3)
+        for name in names:
+            np.testing.assert_array_equal(
+                map_raw.info["chs"][map_raw.ch_names.index(name)]["loc"],
+                raw.info["chs"][raw.ch_names.index(name)]["loc"],
+            )
+        np.testing.assert_allclose(infer.call_args.args[0], new_topo * 0.99)
+        self.assertIs(infer.call_args.args[1], psd)
+        self.assertIs(infer.call_args.args[2], autocorr)
+        self.assertEqual(infer.call_args.kwargs, {"backend": None})
+        np.testing.assert_array_equal(psd, psd_original)
+        np.testing.assert_array_equal(autocorr, autocorr_original)
+        np.testing.assert_array_equal(ica.maps, original_maps)
+        np.testing.assert_array_equal(epochs.get_data(), original_data)
+        self.assertEqual(ica.exclude, [99])
+
+
+class TestICASelection(unittest.TestCase):
+    def test_exclusion_helper_returns_sorted_unique_indices_and_unrounded_table(self):
+        probabilities = np.zeros((4, 7))
+        probabilities[0, [0, 1]] = [0.85, 0.15]
+        probabilities[1, [0, 1]] = [0.24999, 0.75001]
+        probabilities[2, [0, 6]] = [0.6, 0.4]
+        probabilities[3, [0, 2]] = [0.2, 0.8]
+        original = probabilities.copy()
+        eog_indices = [3, 2, 3]
+        with patch.object(step3, "display") as display:
+            exclusions, table = step3.exclude_ica_components(eog_indices, probabilities, 0.75)
+
+        self.assertEqual(exclusions, [1, 2, 3])
+        self.assertEqual(eog_indices, [3, 2, 3])
+        np.testing.assert_array_equal(probabilities, original)
+        class_names = ["brain", "muscle artifact", "eye blink", "heart beat", "line noise",
+                       "channel noise", "other"]
+        np.testing.assert_array_equal(table[class_names].to_numpy(), original)
+        self.assertEqual(table["component"].tolist(), [0, 1, 2, 3])
+        self.assertEqual(table["excluded"].tolist(), [False, True, True, True])
+        self.assertEqual(table.loc[1, "winning_probability"], 0.75001)
+        display.assert_called_once()
+        self.assertEqual(display.call_args.args[0].loc[1, "winning_probability"], 0.75)
+
+    def fit_with_probabilities(self, probabilities, eog_indices):
+        raw = make_raw()
+        raw_ica = raw.copy().pick("eeg", exclude="bads")
+        epochs = mne.make_fixed_length_epochs(raw_ica, duration=2, preload=True, verbose=False)
+        ica = FakeICA(len(probabilities))
+        patches = (
+            patch.object(step3, "prepare_ica_epochs", return_value=(raw_ica, epochs, "Cz")),
+            patch.object(step3.mne.preprocessing, "ICA", return_value=ica),
+            patch.object(step3, "find_eog_components", return_value=(eog_indices, None)),
+            patch.object(step3, "label_ica_components", return_value=probabilities),
+            patch.object(step3, "display"),
+        )
+        return raw, epochs, ica, patches
+
+    def test_union_strict_threshold_and_full_precision_table(self):
+        probabilities = np.zeros((7, 7))
+        probabilities[0, [0, 1]] = [0.9, 0.1]
+        probabilities[1, [0, 1]] = [0.24999, 0.75001]
+        probabilities[2, [0, 2]] = [0.25, 0.75]
+        probabilities[3, [0, 6]] = [0.25, 0.75]
+        probabilities[4, [0, 4]] = [0.2, 0.8]
+        probabilities[5, [0, 6]] = [0.1, 0.9]
+        probabilities[6, [0, 1, 2]] = [0.2, 0.4, 0.4]
+        raw, epochs, ica, patches = self.fit_with_probabilities(probabilities, [3])
+        original = raw.copy()
+        with patches[0] as prep, patches[1] as constructor, patches[2] as eog, patches[3], patches[4] as display:
+            returned_ica, table = step3.fit_ica(raw, "Cz", return_details=True)
+        self.assertIs(returned_ica, ica)
+        self.assertEqual(ica.exclude, [1, 3, 4])
+        prep.assert_called_once_with(raw, "Cz")
+        constructor.assert_called_once_with(
+            n_components=None, method="infomax", fit_params={"extended": True},
+            max_iter="auto", random_state=518,
+        )
+        ica.fit.assert_called_once_with(epochs, picks="eeg")
+        eog.assert_called_once_with(prep.return_value[0], ica, eog_pairs=DEFAULT_EOG_PAIRS)
+        class_names = ["brain", "muscle artifact", "eye blink", "heart beat", "line noise",
+                       "channel noise", "other"]
+        np.testing.assert_array_equal(table[class_names].to_numpy(), probabilities)
+        self.assertEqual(table["winning_label"].tolist(),
+                         ["brain", "muscle artifact", "eye blink", "other", "line noise", "other",
+                          "muscle artifact"])
+        self.assertEqual(table["iclabel_auto_exclude"].tolist(),
+                         [False, True, False, False, True, False, False])
+        self.assertEqual(table["find_bads_eog"].tolist(),
+                         [False, False, False, True, False, False, False])
+        self.assertEqual(table["excluded"].tolist(),
+                         [False, True, False, True, True, False, False])
+        self.assertEqual(display.call_args.args[0].loc[1, "muscle artifact"], 0.75)
+        self.assertEqual(table.loc[1, "muscle artifact"], 0.75001)
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
+        self.assertEqual(raw.info["bads"], original.info["bads"])
+
+    def test_eog_conflict_raises_before_changing_exclusions(self):
+        for column, category in ((0, "brain"), (6, "other")):
+            with self.subTest(category=category):
+                probabilities = np.zeros((1, 7))
+                probabilities[0, column] = 0.75001
+                probabilities[0, 2] = 0.24999
+                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
+                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
+                    with self.assertRaisesRegex(ValueError, "brain/other.*0"):
+                        step3.fit_ica(raw)
+                self.assertEqual(ica.exclude, [99])
+                display.assert_not_called()
+
+    def test_eog_brain_and_other_exact_threshold_do_not_conflict(self):
+        for column, category in ((0, "brain"), (6, "other")):
+            with self.subTest(category=category):
+                probabilities = np.zeros((1, 7))
+                probabilities[0, column] = 0.75
+                probabilities[0, 2] = 0.25
+                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
+                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
+                    returned_ica = step3.fit_ica(raw)
+                self.assertIs(returned_ica, ica)
+                display.assert_called_once()
+                self.assertEqual(ica.exclude, [0])
+
+    def test_custom_threshold_and_pairs_reach_exclusion_decisions(self):
+        probabilities = np.zeros((3, 7))
+        probabilities[0, [0, 1]] = [0.35, 0.65]
+        probabilities[1, [0, 2]] = [0.4, 0.6]
+        probabilities[2, [0, 6]] = [0.6, 0.4]
+        custom_pairs = (("CUSTOM-EOG", "F3", "C3"),)
+        raw, _, ica, patches = self.fit_with_probabilities(probabilities, [2])
+        with patches[0] as prep, patches[1], patches[2] as eog, patches[3], patches[4]:
+            returned_ica, table = step3.fit_ica(
+                raw, iclabel_threshold=0.6, eog_pairs=custom_pairs, return_details=True,
+            )
+        self.assertIs(returned_ica, ica)
+        self.assertEqual(ica.exclude, [0, 2])
+        self.assertEqual(table["iclabel_auto_exclude"].tolist(), [True, False, False])
+        self.assertEqual(table["find_bads_eog"].tolist(), [False, False, True])
+        eog.assert_called_once_with(prep.return_value[0], ica, eog_pairs=custom_pairs)
+
+    def test_eog_conflict_uses_custom_threshold(self):
+        for column, category in ((0, "brain"), (6, "other")):
+            with self.subTest(category=category):
+                probabilities = np.zeros((1, 7))
+                probabilities[0, column] = 0.65
+                probabilities[0, 2] = 0.35
+                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
+                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
+                    with self.assertRaisesRegex(ValueError, "brain/other >0.6"):
+                        step3.fit_ica(raw, iclabel_threshold=0.6)
+                self.assertEqual(ica.exclude, [99])
+                display.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
