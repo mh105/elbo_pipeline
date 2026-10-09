@@ -3909,6 +3909,44 @@ def apply_asr_inplace(
     return details
 
 
+def bad_ch_time_detection_inplace(raw, bad_ch_report=None, flatlines=None):
+    """Detect bad channels and apply ASR in place; return report, ASR details,
+    and the effective reference channel.
+
+    Supply preloaded native-reference data. Line-noise removal and filtering
+    remain the caller's responsibility. Reuse the initial report and flatlines
+    detected before filtering when available. If either is missing, run the
+    NaN and flatline criteria, detecting flat spans only when flatlines is None.
+    A supplied report is updated in place. Retain the detectors' existing plots.
+    """
+    if bad_ch_report is None or flatlines is None:
+        if bad_ch_report is None:
+            bad_ch_report = {}
+        bad_ch_report.update(bad_ch_by_nan(raw))
+        if flatlines is None:
+            flatlines = detect_flatline_inplace(raw)
+        flatline_names = bad_ch_by_flatline(raw, flatlines=flatlines)["flatline"]
+        bad_ch_report["flatline"] = list(dict.fromkeys(
+            bad_ch_report.get("flatline", []) + flatline_names
+        ))
+
+    bad_ch_report.update(bad_ch_by_voltage(raw, flatlines=flatlines))
+    bad_ch_report.update(bad_ch_by_HFnoise(raw, flatlines=flatlines))
+    bad_ch_report.update(bad_ch_by_pop(raw, flatlines=flatlines))
+    bad_ch_report.update(bad_ch_by_small(raw, flatlines=flatlines))
+    plot_bad_ch_report(raw, bad_ch_report)
+
+    robust_bad_ch_report = bad_ch_under_robust_ref(raw, flatlines=flatlines)
+    for criterion, names in robust_bad_ch_report.items():
+        bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
+
+    interpolate_local_flatline_inplace(raw, flatlines)
+    reference_channel = validate_reference_inplace(raw, flatlines)
+    asr_details = apply_asr_inplace(raw, reference_channel, flatlines)
+
+    return bad_ch_report, asr_details, reference_channel
+
+
 if __name__ == "__main__":
     # %% Load example data
     raw = load_raw_data("sub-03")
@@ -3935,21 +3973,7 @@ if __name__ == "__main__":
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
-    # %% Bad channels by voltage, HF noise, electrode pops, and smallness
-    bad_ch_report.update(bad_ch_by_voltage(raw_bads, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_HFnoise(raw_bads, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_pop(raw_bads, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_small(raw_bads, flatlines=flatlines))
-    plot_bad_ch_report(raw_bads, bad_ch_report)
-
-    # Bad channels under the robust average reference. raw_bads keeps the
-    # native reference and lists every bad channel in info["bads"];
-    # bad_ch_report keeps them by criterion.
-    robust_bad_ch_report = bad_ch_under_robust_ref(raw_bads, flatlines=flatlines)
-    for criterion, names in robust_bad_ch_report.items():
-        bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
-
-    # %% Bad time segment ASR correction in validated native reference
-    interpolate_local_flatline_inplace(raw_bads, flatlines)
-    reference_channel = validate_reference_inplace(raw_bads, flatlines)
-    asr_details = apply_asr_inplace(raw_bads, reference_channel, flatlines)
+    # %% Bad-channel detection and ASR correction in validated native reference
+    bad_ch_report, asr_details, reference_channel = bad_ch_time_detection_inplace(
+        raw_bads, bad_ch_report=bad_ch_report, flatlines=flatlines,
+    )
