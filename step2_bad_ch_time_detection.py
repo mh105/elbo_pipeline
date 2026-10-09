@@ -3931,7 +3931,7 @@ if __name__ == "__main__":
     remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
     del raw_prep, clean  # Free two full-recording copies.
 
-    # %% High-pass filter at 0.3 Hz
+    # %% High-pass filter at 0.3 Hz for bad-channel detection
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
@@ -3942,18 +3942,14 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_small(raw_bads, flatlines=flatlines))
     plot_bad_ch_report(raw_bads, bad_ch_report)
 
-    # %% Bad channels under the robust average reference. raw_bads keeps the
+    # Bad channels under the robust average reference. raw_bads keeps the
     # native reference and lists every bad channel in info["bads"];
     # bad_ch_report keeps them by criterion.
     robust_bad_ch_report = bad_ch_under_robust_ref(raw_bads, flatlines=flatlines)
     for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
 
-    # %% Interpolate the good channels' local flat intervals before ASR
+    # %% Bad time segment ASR correction in validated native reference
     interpolate_local_flatline_inplace(raw_bads, flatlines)
-
-    # %% Move a bad native reference to its nearest good electrode
     reference_channel = validate_reference_inplace(raw_bads, flatlines)
-
-    # %% Correct transient artifacts, then reconstruct local flat spans again
     asr_details = apply_asr_inplace(raw_bads, reference_channel, flatlines)
