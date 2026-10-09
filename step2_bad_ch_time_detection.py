@@ -3627,6 +3627,7 @@ def apply_asr_inplace(
     }
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
+    plot_voltage_traces(raw)
     if return_details:
         details = {
             "sfreq": sfreq,
