@@ -125,8 +125,8 @@ class TestASRWrapper(unittest.TestCase):
         selected = [i for i, name in enumerate(raw.ch_names)
                     if name in NAMES and name not in ["F7", "Cz", "F3"]]
         fake = FakeASR()
-        report, details = self.run_fake(
-            raw, fake, reference_channel="F3", flatlines=flatlines, return_details=True,
+        details = self.run_fake(
+            raw, fake, reference_channel="F3", flatlines=flatlines,
         )
 
         np.testing.assert_array_equal(fake.calibration_data,
@@ -151,9 +151,12 @@ class TestASRWrapper(unittest.TestCase):
             np.testing.assert_array_equal(raw._data[row], original[row])
         self.assertEqual(raw.annotations, annotations)
         self.assertEqual(raw.info["bads"], ["F7", "Cz"])
-        self.assertEqual(report["component_segments"], [(100, 200), (300, 400)])
-        self.assertEqual(report["corrected_segments"], [(100, 250), (300, 450)])
-        for segments in report.values():
+        self.assertEqual(details["component_segments"], [(100, 200), (300, 400)])
+        self.assertEqual(details["corrected_segments"], [(100, 250), (300, 450)])
+        self.assertEqual(details["duration_s"], 75.)
+        self.assertEqual(details["corrected_duration_s"], 1.2)
+        self.assertEqual(details["corrected_percent"], 1.6)
+        for segments in [details["corrected_segments"], details["component_segments"]]:
             self.assertTrue(all(type(start) is int and type(stop) is int
                                 for start, stop in segments))
 
@@ -169,7 +172,7 @@ class TestASRWrapper(unittest.TestCase):
             ["BAD_voltage_mask", "bad_voltage_mask", "BAD_manual"],
         ))
         fake = FakeASR()
-        _, details = self.run_fake(raw, fake, reference_channel="Cz", return_details=True)
+        details = self.run_fake(raw, fake, reference_channel="Cz")
         descriptions = list(raw.annotations.description)
         self.assertEqual(descriptions.count("BAD_voltage_mask"), 2)
         self.assertIn("bad_voltage_mask", descriptions)
@@ -242,15 +245,49 @@ class TestASRWrapper(unittest.TestCase):
         self.assertIs(_calibration._lfilter_channels, native_filter)
         self.assertIs(_calibration._design_statistics_filter, native_designer)
 
-    def test_default_return_is_report_and_blocksize_tracks_sampling_rate(self):
+    def test_returns_details_and_blocksize_tracks_sampling_rate(self):
         for sfreq in [100, 250, 1000]:
             with self.subTest(sfreq=sfreq):
                 raw = make_raw(sfreq=sfreq)
                 fake = FakeASR()
                 result = self.run_fake(raw, fake, reference_channel="Cz")
                 self.assertIsInstance(result, dict)
-                self.assertEqual(set(result), {"component_segments", "corrected_segments"})
+                self.assertEqual(set(result), {
+                    "duration_s", "corrected_duration_s", "corrected_percent",
+                    "corrected_segments", "component_segments", "sfreq", "first_samp",
+                    "ch_names", "reference_channel", "calibration_input_sample_indices",
+                    "calibration_sample_indices", "filter_b", "filter_a", "settings",
+                    "calibration", "processing",
+                })
+                self.assertEqual(result["duration_s"], 75.)
+                self.assertEqual(result["corrected_duration_s"], 300 / sfreq)
+                self.assertEqual(result["corrected_percent"], 100 * 300 / raw.n_times)
+                for name in ["duration_s", "corrected_duration_s", "corrected_percent"]:
+                    self.assertIs(type(result[name]), float)
                 self.assertEqual(fake.calibration_kwargs["blocksize"], int(0.1 * sfreq))
+
+    def test_no_correction_reports_zero_duration_and_percentage(self):
+        for normalized in [False, True]:
+            with self.subTest(normalized=normalized):
+                raw = make_raw()
+                fake = FakeASR()
+                process = fake.process
+
+                def identity_process(X, sfreq, state, **kwargs):
+                    _, diagnostics = process(X, sfreq, state, **kwargs)
+                    diagnostics["n_components_reconstructed"][:] = 0
+                    diagnostics["sample_mask"][:] = False
+                    return X.copy(), diagnostics
+
+                fake.process = identity_process
+                details = self.run_fake(
+                    raw, fake, reference_channel="Cz", normalized=normalized,
+                )
+                self.assertEqual(details["duration_s"], 75.)
+                self.assertEqual(details["corrected_duration_s"], 0.)
+                self.assertEqual(details["corrected_percent"], 0.)
+                self.assertEqual(details["corrected_segments"], [])
+                self.assertEqual(details["component_segments"], [])
 
     def test_sqrt_eigenvalue_cutoffs_follow_amplitude_and_reach_processing(self):
         raw = make_raw()
@@ -274,7 +311,7 @@ class TestASRWrapper(unittest.TestCase):
         fake.calibrate = calibrate_with_spectrum
         with patch.object(step2, "plot_asr_calibration") as plotting, \
                 patch.object(step2, "plot_asr_effect"):
-            _, details = self.run_fake(raw, fake, reference_channel="Cz", return_details=True)
+            details = self.run_fake(raw, fake, reference_channel="Cz")
         n_channels = len(details["ch_names"])
         expected_cutoffs = np.array([20.] + [15.] * (n_channels - 2) + [5.])
         expected_thresholds = np.array([1.] + [0.8] * (n_channels - 2) + [0.4])
@@ -319,8 +356,8 @@ class TestASRWrapper(unittest.TestCase):
         fake.calibrate = calibrate_with_spectrum
         with patch.object(step2, "plot_asr_calibration") as plotting, \
                 patch.object(step2, "plot_asr_effect"):
-            report, details = self.run_fake(
-                raw, fake, reference_channel="Cz", normalized=True, return_details=True,
+            details = self.run_fake(
+                raw, fake, reference_channel="Cz", normalized=True,
             )
         state = plotting.call_args.args[3]
         thresholds = np.linspace(0.2, 0.4, len(selected)) + 20 * 0.04
@@ -342,8 +379,10 @@ class TestASRWrapper(unittest.TestCase):
         for name in ["F7", "Cz", "EOG"]:
             row = raw.ch_names.index(name)
             np.testing.assert_array_equal(raw._data[row], original[row])
-        self.assertEqual(report["component_segments"], [(100, 200), (300, 400)])
-        self.assertEqual(report["corrected_segments"], [(100, 250), (300, 450)])
+        self.assertEqual(details["component_segments"], [(100, 200), (300, 400)])
+        self.assertEqual(details["corrected_segments"], [(100, 250), (300, 450)])
+        self.assertEqual(details["corrected_duration_s"], 1.2)
+        self.assertEqual(details["corrected_percent"], 1.6)
         self.assertEqual(details["settings"]["cutoff_min"], 20.)
         self.assertEqual(details["settings"]["cutoff_scaling"], "fixed")
         self.assertTrue(details["settings"]["normalized"])
@@ -354,7 +393,7 @@ class TestASRWrapper(unittest.TestCase):
         fake = FakeASR()
         with patch.object(step2, "plot_asr_calibration"), \
                 patch.object(step2, "plot_asr_effect"):
-            _, details = self.run_fake(raw, fake, reference_channel="Cz", return_details=True)
+            details = self.run_fake(raw, fake, reference_channel="Cz")
         np.testing.assert_array_equal(details["calibration"]["component_cutoffs"], 20.0)
         np.testing.assert_array_equal(fake.processing_state.thresholds, 1.0)
         np.testing.assert_array_equal(fake.processing_state.T, np.eye(len(details["ch_names"])))
@@ -410,9 +449,9 @@ class TestASRWrapper(unittest.TestCase):
         raw.set_annotations(mne.Annotations([5], [1], ["bad_acquisition"]))
         original = raw.get_data()
         designer = _calibration._design_statistics_filter
-        report, details = step2.apply_asr_inplace(
+        details = step2.apply_asr_inplace(
             raw, "Cz", flatlines=flatlines_for(raw, {}),
-            normalized=normalized, return_details=True,
+            normalized=normalized,
         )
 
         self.assertEqual(raw.get_data().shape, original.shape)
@@ -427,7 +466,7 @@ class TestASRWrapper(unittest.TestCase):
         self.assertEqual(len(details["filter_a"]), 1)
         self.assertFalse(np.isin(np.arange(5 * 250, 6 * 250),
                                 details["calibration_input_sample_indices"]).any())
-        self.assertTrue(report["corrected_segments"])
+        self.assertTrue(details["corrected_segments"])
         self.assertLess(np.max(np.abs(raw._data[artifact_rows, start:stop])),
                         np.max(np.abs(original[artifact_rows, start:stop])))
         self.assertIs(_calibration._design_statistics_filter, designer)

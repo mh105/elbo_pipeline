@@ -91,9 +91,9 @@ following their square roots. normalized=True instead uses fixed cutoff 20 and
 decomposes threshold-normalized covariance, substantially changing which spatial
 directions ASR can reject. Correction processes the full timeline, including
 masked periods. Afterwards, local flat spans are reconstructed again from
-corrected donors. Return the component-rejection and applied-correction
-intervals on the original sample timeline; return_details=True also returns
-calibration and window diagnostics.
+corrected donors. Return one details dictionary with correction duration and
+percentage, component-rejection and applied-correction intervals on the original
+sample timeline, and calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 plot_asr_calibration shows accepted support, a channel trace and spectrogram,
 and the calibrated covariance before correction.
@@ -3733,9 +3733,8 @@ def _process_normalized_asr(data, sfreq, state):
 
 def apply_asr_inplace(
     raw, reference_channel=None, flatlines=None, *, normalized=False,
-    return_details=False,
 ):
-    """Correct good EEG channels with automatic-calibration ASR in place.
+    """Correct good EEG channels with ASR in place; return details.
 
     Run after local flatline interpolation and validate_reference_inplace;
     pass its returned reference_channel if it switched electrodes. Exclude
@@ -3756,7 +3755,7 @@ def apply_asr_inplace(
     directions with excessive variance relative to their calibrated allowance,
     which can combine several ordinary empirical covariance eigenvectors.
     Reject normalized eigenvalues at or above one, subject to the native
-    dimension limit. Retain the calibration reconstruction prior and return
+    dimension limit. Retain the calibration reconstruction prior and restore
     electrode voltages after reversing the coordinate transform.
 
     Use a four-second minimum-phase statistics FIR and 100-ms covariance blocks
@@ -3770,15 +3769,19 @@ def apply_asr_inplace(
     with the final output on shared full-range axes, then show a median Welch
     PSD topomap through 45 Hz in dB, excluding bads and the effective reference.
 
-    Return report with component_segments (updates rejecting components) and
-    corrected_segments (full applied support, including blending). Both are
-    lists of half-open (start, stop) Python-int sample bounds relative to this
-    Raw's beginning, including any annotated periods processed by ASR. They
-    describe the ASR stage; flatlines retains local interpolation provenance.
+    Return one details dictionary with duration_s, corrected_duration_s,
+    corrected_percent, and corrected_segments (full applied support, including
+    blending). Duration and percentage use the whole original timeline, including
+    annotated periods processed by ASR. Correction support records where reconstruction is applied,
+    rather than exact samplewise voltage changes or later flatline repair.
+    corrected_segments contains half-open (start, stop) Python-int sample bounds
+    relative to this Raw's beginning; flatlines retains interpolation provenance.
     No ASR annotations are added. Bads, reference, and non-EEG data are unchanged.
-    With return_details=True, return (report, details), including original
-    calibration sample indices, filter coefficients, settings, and native
-    calibration and processing diagnostics. Calibration diagnostics also hold
+    Details also include component_segments (output intervals whose current
+    update rejects components), original calibration sample indices, filter
+    coefficients, settings, and native calibration and processing diagnostics.
+    component_segments uses the same sample-bound convention as corrected_segments.
+    Calibration diagnostics hold
     eigenvalues and component_cutoffs in calibration-component order, with
     thresholds updated to the values used for correction. With normalized=True,
     processing component_variances and component_thresholds are dimensionless
@@ -3860,20 +3863,10 @@ def apply_asr_inplace(
         else:
             corrected, processing = process_asr(data, sfreq, state)
 
-    component_segments = _merge_segments([
-        [int(start), int(stop)]
-        for start, stop, count in zip(
-            processing["window_starts"], processing["window_stops"],
-            processing["n_components_reconstructed"],
-        ) if count > 0
-    ])
     corrected_segments = np.flatnonzero(
         np.diff(np.r_[False, processing["sample_mask"], False])
     ).reshape(-1, 2)
-    report = {
-        "component_segments": [tuple(bounds) for bounds in component_segments],
-        "corrected_segments": [tuple(map(int, bounds)) for bounds in corrected_segments],
-    }
+    n_corrected = int(np.count_nonzero(processing["sample_mask"]))
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
     plot_asr_effect(raw, data, names)
@@ -3884,26 +3877,36 @@ def apply_asr_inplace(
         exclude=raw.info["bads"] + [reference_channel],
     ).plot_topomap(dB=True)
 
-    if return_details:
-        details = {
-            "sfreq": sfreq,
-            "first_samp": int(raw.first_samp),
-            "ch_names": names,
-            "reference_channel": reference_channel,
-            "calibration_input_sample_indices": calibration_input,
-            "calibration_sample_indices": calibration_indices,
-            "filter_b": b,
-            "filter_a": a,
-            "settings": {"cutoff": 20.0, "cutoff_min": 20.0 if normalized else 5.0,
-                         "cutoff_scaling": "fixed" if normalized else "sqrt_eigenvalue",
-                         "normalized": bool(normalized), "blocksize": blocksize,
-                         "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
-                         "method": "standard", "mne_denoise_version": mne_denoise.__version__},
-            "calibration": calibration,
-            "processing": processing,
-        }
-        return report, details
-    return report
+    component_segments = _merge_segments([
+        [int(start), int(stop)]
+        for start, stop, count in zip(
+            processing["window_starts"], processing["window_stops"],
+            processing["n_components_reconstructed"],
+        ) if count > 0
+    ])
+    details = {
+        "duration_s": float(raw.n_times / sfreq),
+        "corrected_duration_s": float(n_corrected / sfreq),
+        "corrected_percent": float(100 * n_corrected / raw.n_times),
+        "corrected_segments": [tuple(map(int, bounds)) for bounds in corrected_segments],
+        "component_segments": [tuple(bounds) for bounds in component_segments],
+        "sfreq": sfreq,
+        "first_samp": int(raw.first_samp),
+        "ch_names": names,
+        "reference_channel": reference_channel,
+        "calibration_input_sample_indices": calibration_input,
+        "calibration_sample_indices": calibration_indices,
+        "filter_b": b,
+        "filter_a": a,
+        "settings": {"cutoff": 20.0, "cutoff_min": 20.0 if normalized else 5.0,
+                     "cutoff_scaling": "fixed" if normalized else "sqrt_eigenvalue",
+                     "normalized": bool(normalized), "blocksize": blocksize,
+                     "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
+                     "method": "standard", "mne_denoise_version": mne_denoise.__version__},
+        "calibration": calibration,
+        "processing": processing,
+    }
+    return details
 
 
 if __name__ == "__main__":
@@ -3955,4 +3958,4 @@ if __name__ == "__main__":
     reference_channel = validate_reference_inplace(raw_bads, flatlines)
 
     # %% Correct transient artifacts, then reconstruct local flat spans again
-    asr_report = apply_asr_inplace(raw_bads, reference_channel, flatlines)
+    asr_details = apply_asr_inplace(raw_bads, reference_channel, flatlines)
