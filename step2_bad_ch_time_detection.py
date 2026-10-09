@@ -85,11 +85,13 @@ apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
 annotations and widened local flat intervals, then uses automatic selection;
 at least 60 seconds must remain. Its statistics use a four-second minimum-phase
-FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Correction
-processes the full timeline, including masked periods, at cutoff 20. Afterwards,
-local flat spans are reconstructed again from corrected donors. Return the
-component-rejection and applied-correction intervals on the original sample
-timeline; return_details=True also returns calibration and window diagnostics.
+FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Component
+cutoffs run from 5 for the largest covariance eigenvalue to 20 for the smallest,
+following their square roots. Correction processes the full timeline, including
+masked periods. Afterwards, local flat spans are reconstructed again from
+corrected donors. Return the component-rejection and applied-correction
+intervals on the original sample timeline; return_details=True also returns
+calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 plot_asr_calibration shows accepted support, a channel trace and spectrogram,
 and the calibrated covariance before correction.
@@ -3703,10 +3705,14 @@ def apply_asr_inplace(
     intervals of the included channels and effective reference. Concatenate this
     support for native automatic selection, requiring at least 60 retained seconds.
 
-    Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
-    and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
-    their native defaults. Initialize the statistics filter from reflected
-    sequence starts rather than calibration-ending history. Correction sees
+    Use standard ASR with component RMS thresholds mu + cutoff * sigma. Set
+    cutoff to 5 at the largest calibration covariance eigenvalue and 20 at the
+    smallest, interpolating linearly in their square roots. Equal eigenvalues
+    keep cutoff 20. Reuse native calibration's covariance and fitted mu/sigma.
+    Use a four-second minimum-phase statistics FIR and 100-ms covariance blocks
+    rounded to samples. Other ASR parameters keep their native defaults.
+    Initialize the statistics filter from reflected sequence starts rather than
+    calibration-ending history. Correction sees
     the full original timeline, including global BAD periods; their existing
     annotations remain for later rejection. Re-interpolate local flat spans
     from corrected good, nonflat donors, protecting the effective reference.
@@ -3721,9 +3727,11 @@ def apply_asr_inplace(
     No ASR annotations are added. Bads, reference, and non-EEG data are unchanged.
     With return_details=True, return (report, details), including original
     calibration sample indices, filter coefficients, settings, and native
-    calibration and processing diagnostics. Insufficient calibration raises
-    before any corrected voltages are written back. Show plot_asr_calibration
-    after calibration and before correction.
+    calibration and processing diagnostics. Calibration diagnostics also hold
+    eigenvalues and component_cutoffs in calibration-component order, with
+    thresholds updated to the values used for correction. Insufficient
+    calibration raises before any corrected voltages are written back. Show
+    plot_asr_calibration after calibration and before correction.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3775,6 +3783,18 @@ def apply_asr_inplace(
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
     require_calibration(len(calibration_indices))
+    patterns = state.calibration_patterns
+    eigenvalues = np.diag(patterns.T @ state.cov @ patterns)
+    amplitudes = np.sqrt(eigenvalues)
+    cutoffs = np.full(len(amplitudes), 20.0)
+    amplitude_range = np.ptp(amplitudes)
+    if amplitude_range > 0:
+        cutoffs -= 15.0 * (amplitudes - amplitudes.min()) / amplitude_range
+    thresholds = calibration["threshold_mu"] + cutoffs * calibration["threshold_sigma"]
+    state = replace(state, thresholds=thresholds, T=thresholds[:, None] * patterns.T)
+    calibration["eigenvalues"] = eigenvalues
+    calibration["component_cutoffs"] = cutoffs
+    calibration["thresholds"] = thresholds.copy()
     plot_asr_calibration(raw, data, names, state, calibration_indices)
     history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
     _, initial_state = _asr_filter_channels(
@@ -3811,7 +3831,8 @@ def apply_asr_inplace(
             "calibration_sample_indices": calibration_indices,
             "filter_b": b,
             "filter_a": a,
-            "settings": {"cutoff": 20.0, "blocksize": blocksize,
+            "settings": {"cutoff": 20.0, "cutoff_min": 5.0,
+                         "cutoff_scaling": "sqrt_eigenvalue", "blocksize": blocksize,
                          "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
                          "method": "standard", "mne_denoise_version": mne_denoise.__version__},
             "calibration": calibration,
