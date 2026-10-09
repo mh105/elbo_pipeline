@@ -90,6 +90,7 @@ processes the full timeline, including masked periods, at cutoff 20. Afterwards,
 local flat spans are reconstructed again from corrected donors. Return the
 component-rejection and applied-correction intervals on the original sample
 timeline; return_details=True also returns calibration and window diagnostics.
+plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 """
 
 from collections import defaultdict
@@ -3481,6 +3482,65 @@ def validate_reference_inplace(raw, flatlines):
 
 # %% Part 2: Bad-time correction with ASR
 
+def plot_asr_effect(raw, before, ch_names):
+    """Show before/after ASR voltage envelopes; return the figure.
+
+    before contains pre-ASR voltages in volts, with rows matching ch_names
+    and samples matching raw, whose data contain the final corrected voltages.
+    Select channels whose peak before or after correction exceeds the pooled
+    pre-ASR 99.9th percentile. Plot the same channels and colors in both panels,
+    with exact min/max envelopes in 20-ms bins and shared, unclipped axes.
+    Include the full timeline and final partial bin; times are Raw-relative.
+    Input arrays, Raw data, labels, and annotations are unchanged.
+    """
+    pooled_abs = np.abs(before)
+    cutoff_uv = np.percentile(pooled_abs, 99.9, overwrite_input=True) * 1e6
+    del pooled_abs
+    sfreq = raw.info["sfreq"]
+    bin_samples = max(int(round(0.02 * sfreq)), 1)
+    bin_starts = np.arange(0, raw.n_times, bin_samples)
+    envelope_times = np.repeat(bin_starts / sfreq, 2)
+    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
+    colors = dict(zip(
+        [raw.ch_names[i] for i in eeg],
+        plt.get_cmap("turbo")(np.linspace(0, 1, len(eeg))),
+    ))
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True, sharey=True,
+                             layout="constrained")
+    selected = []
+    for row, name in enumerate(ch_names):
+        before_uv = before[row] * 1e6
+        after_uv = raw.get_data(picks=[name], reject_by_annotation=None)[0] * 1e6
+        if max(np.max(np.abs(before_uv)), np.max(np.abs(after_uv))) <= cutoff_uv:
+            continue
+        selected.append(name)
+        for ax, data_uv in zip(axes, (before_uv, after_uv)):
+            envelope = np.column_stack([
+                np.minimum.reduceat(data_uv, bin_starts),
+                np.maximum.reduceat(data_uv, bin_starts),
+            ]).ravel()
+            ax.plot(envelope_times, envelope, color=colors[name], linewidth=0.5,
+                    alpha=0.7, label=name, zorder=1)
+    for ax, stage in zip(axes, ("Before ASR", "After ASR")):
+        for cutoff in (-200, 200):
+            ax.axhline(cutoff, color="black", linestyle=":", linewidth=1, zorder=3)
+        ax.set(ylabel="Voltage (µV)",
+               title=f"{stage}; min/max envelope in "
+                     f"{1000 * bin_samples / sfreq:.3g}-ms bins")
+        if not selected:
+            ax.text(0.5, 0.5, "No channels exceed the pre-ASR 99.9th percentile.",
+                    ha="center", va="center", transform=ax.transAxes)
+    axes[1].set(xlabel="Time (s)", xlim=(0, raw.times[-1]))
+    fig.suptitle(f"ASR effect: {len(selected)} channels exceeding the pre-ASR "
+                 f"99.9th percentile before or after cleaning (|Voltage| > {cutoff_uv:.3g} µV)")
+    if selected:
+        axes[1].legend(title="Selected channels", loc="upper left",
+                       bbox_to_anchor=(1.01, 1), fontsize=8,
+                       ncols=max(1, (len(selected) + 19) // 20))
+    plt.show()
+    return fig
+
+
 def _asr_statistics_filter(sfreq):
     """Four-second minimum-phase FIR for ASR's statistics-only amplitude curve."""
     nyquist = sfreq / 2
@@ -3540,6 +3600,8 @@ def apply_asr_inplace(
     the full original timeline, including global BAD periods; their existing
     annotations remain for later rejection. Re-interpolate local flat spans
     from corrected good, nonflat donors, protecting the effective reference.
+    Show plot_asr_effect after this repair, comparing the original ASR input
+    with the final output on shared full-range axes.
 
     Return report with component_segments (updates rejecting components) and
     corrected_segments (full applied support, including blending). Both are
@@ -3627,6 +3689,7 @@ def apply_asr_inplace(
     }
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
+    plot_asr_effect(raw, data, names)
     if return_details:
         details = {
             "sfreq": sfreq,
