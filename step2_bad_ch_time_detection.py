@@ -3928,9 +3928,7 @@ if __name__ == "__main__":
     clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
     # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
     # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
-    # Remove the estimated noise from the original data
-    # without high-pass filtering it
-    remove_line_noise_inplace(raw, raw_prep, clean)
+    remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
     del raw_prep, clean  # Free two full-recording copies.
 
     # %% High-pass filter at 0.3 Hz
