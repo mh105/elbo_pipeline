@@ -3863,10 +3863,6 @@ def apply_asr_inplace(
         else:
             corrected, processing = process_asr(data, sfreq, state)
 
-    corrected_segments = np.flatnonzero(
-        np.diff(np.r_[False, processing["sample_mask"], False])
-    ).reshape(-1, 2)
-    n_corrected = int(np.count_nonzero(processing["sample_mask"]))
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
     plot_asr_effect(raw, data, names)
@@ -3877,6 +3873,10 @@ def apply_asr_inplace(
         exclude=raw.info["bads"] + [reference_channel],
     ).plot_topomap(dB=True)
 
+    corrected_segments = np.flatnonzero(
+        np.diff(np.r_[False, processing["sample_mask"], False])
+    ).reshape(-1, 2)
+    n_corrected = int(np.count_nonzero(processing["sample_mask"]))
     component_segments = _merge_segments([
         [int(start), int(stop)]
         for start, stop, count in zip(
