@@ -213,8 +213,8 @@ def fit_ica(
     raw,
     reference_channel=None,
     *,
-    iclabel_threshold=0.75,
     eog_pairs=(("VEOG-R", "E14", "E126"), ("VEOG-L", "E21", "E127")),
+    iclabel_threshold=0.75,
     return_details=False,
 ):
     """Return ICA without modifying or applying to raw.
