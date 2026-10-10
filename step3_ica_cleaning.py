@@ -130,7 +130,7 @@ def find_eog_components(raw_ica, ica, *, eog_pairs):
     )
     raw_ica.set_channel_types({name: "eog" for name in eog_names})
     indices, scores = ica.find_bads_eog(
-        raw_ica, ch_name=eog_names, reject_by_annotation=True,
+        raw_ica, ch_name=eog_names, reject_by_annotation=True, verbose=False,
     )
     indices = [int(index) for index in indices]
     print(f"Candidate EOG components: {indices}")
