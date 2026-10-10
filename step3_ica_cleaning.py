@@ -103,48 +103,6 @@ def prepare_ica_epochs(raw, reference_channel=None):
     return raw_ica, fit_epochs, reference_channel
 
 
-def find_eog_components(raw_ica, ica, *, eog_pairs):
-    """Add usable virtual EOG pairs to the private Raw; return indices and scores.
-
-    Use MNE's 1-10 Hz correlation scoring and iterative z-score threshold 3.
-    Each EOG pair contains (name, anode, cathode).
-    Skip a pair when either source is missing or bad. EEG traces are unchanged.
-    """
-    usable_pairs = []
-    for name, anode, cathode in eog_pairs:
-        unusable = [channel for channel in (anode, cathode)
-                    if channel not in raw_ica.ch_names or channel in raw_ica.info["bads"]]
-        if unusable:
-            print(f"Skipping {name}; source channel(s) missing or bad: {', '.join(unusable)}")
-        else:
-            usable_pairs.append((name, anode, cathode))
-    if not usable_pairs:
-        print("Skipping find_bads_eog(); no usable virtual EOG channels remain.")
-        return [], None
-
-    eog_names = [name for name, _, _ in usable_pairs]
-    mne.set_bipolar_reference(
-        raw_ica,
-        anode=[anode for _, anode, _ in usable_pairs],
-        cathode=[cathode for _, _, cathode in usable_pairs],
-        ch_name=eog_names,
-        drop_refs=False,
-        copy=False,
-        on_bad="raise",
-        verbose=False,
-    )
-    raw_ica.set_channel_types({name: "eog" for name in eog_names}, verbose=False)
-    indices, scores = ica.find_bads_eog(
-        raw_ica,
-        ch_name=eog_names,
-        reject_by_annotation=True,
-        verbose=False,
-    )
-    indices = sorted(int(index) for index in indices)
-    print(f"Candidate EOG components by find_bads_eog(): {indices}")
-    return indices, scores
-
-
 def label_ica_components(raw_ica, fit_epochs, ica, reference_channel):
     """Return seven ICLabel probabilities using CAR maps and native time features.
 
@@ -171,30 +129,18 @@ def label_ica_components(raw_ica, fit_epochs, ica, reference_channel):
     return run_iclabel(topo, psd, autocorr, backend=None)
 
 
-def exclude_ica_components(eog_indices, probabilities, iclabel_threshold=0.75):
+def exclude_ica_components(probabilities, iclabel_threshold=0.75):
     """Return exclusion indices and the unrounded table; display a rounded copy.
 
-    Raise if an EOG candidate has brain/other probability above the threshold.
+    Use a strict threshold on each of the five ICLabel artifact probabilities.
     """
     ICLABEL_CLASSES = (
         "brain", "muscle artifact", "eye blink", "heart beat", "line noise",
         "channel noise", "other",
     )
-    conflicts = [index for index in eog_indices
-                 if np.any(probabilities[index, [0, 6]] > iclabel_threshold)]
-    if conflicts:
-        scores = "; ".join(
-            f"{index}: brain={probabilities[index, 0]:.6f}, other={probabilities[index, 6]:.6f}"
-            for index in conflicts
-        )
-        raise ValueError(
-            f"EOG candidates conflict with ICLabel brain/other >{iclabel_threshold}: {scores}"
-        )
-
-    iclabel_indices = np.flatnonzero(
+    exclude_indices = np.flatnonzero(
         np.any(probabilities[:, 1:6] > iclabel_threshold, axis=1)
     ).tolist()
-    exclude_indices = sorted(set(eog_indices + iclabel_indices))
     winners = np.argmax(probabilities, axis=1)
     components = np.arange(probabilities.shape[0])
     component_table = pd.DataFrame(probabilities, columns=ICLABEL_CLASSES)
@@ -202,8 +148,7 @@ def exclude_ica_components(eog_indices, probabilities, iclabel_threshold=0.75):
     component_table.insert(1, "winning_label", [ICLABEL_CLASSES[index] for index in winners])
     component_table.insert(2, "winning_probability",
                            probabilities[components, winners])
-    component_table["find_bads_eog"] = component_table["component"].isin(eog_indices)
-    component_table["iclabel_auto_exclude"] = component_table["component"].isin(iclabel_indices)
+    component_table["iclabel_auto_exclude"] = component_table["component"].isin(exclude_indices)
     component_table["excluded"] = component_table["component"].isin(exclude_indices)
     display(component_table.round(3))
     return exclude_indices, component_table
@@ -213,16 +158,13 @@ def fit_ica(
     raw,
     reference_channel=None,
     *,
-    eog_pairs=(("VEOG-R", "E14", "E126"), ("VEOG-L", "E21", "E127")),
     iclabel_threshold=0.75,
     return_details=False,
 ):
     """Return ICA without modifying or applying to raw.
 
-    Exclude EOG candidates OR any of the five ICLabel artifact probabilities
-    strictly above iclabel_threshold (default 0.75). Raise if an EOG candidate
-    has brain or other probability strictly above the same threshold. EOG pairs
-    contain (name, anode, cathode), defaulting to VEOG-R and VEOG-L.
+    Exclude components with any of the five ICLabel artifact probabilities
+    strictly above iclabel_threshold (default 0.75).
     Always display the table rounded to three decimals;
     return (ICA, unrounded component table) with return_details=True.
     Manual review and plotting are deferred.
@@ -240,10 +182,8 @@ def fit_ica(
     print(f"ICA training support: {len(fit_epochs)} epochs with {len(fit_epochs) * 2:.1f} s; "
           f"{len(ica.ch_names)} EEG channels; {ica.n_iter_} iterations.")
 
-    eog_indices, _ = find_eog_components(raw_ica, ica, eog_pairs=eog_pairs)
     probabilities = label_ica_components(raw_ica, fit_epochs, ica, reference_channel)
     exclude_indices, component_table = exclude_ica_components(
-        eog_indices,
         probabilities,
         iclabel_threshold=iclabel_threshold,
     )

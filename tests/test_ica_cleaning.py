@@ -16,7 +16,6 @@ import step3_ica_cleaning as step3
 
 
 NAMES = ["E14", "E126", "E21", "E127", "F3", "C3", "Cz", "BAD", "EOG"]
-DEFAULT_EOG_PAIRS = (("VEOG-R", "E14", "E126"), ("VEOG-L", "E21", "E127"))
 
 
 def make_raw(seconds=12, sfreq=1000, first_samp=5500):
@@ -131,68 +130,6 @@ class TestICAPreparation(unittest.TestCase):
             prepare(raw)
 
 
-class TestEOGCandidates(unittest.TestCase):
-    def test_adds_bipolar_eog_without_changing_eeg(self):
-        raw = make_raw().pick("eeg", exclude="bads")
-        original = raw.get_data().copy()
-        scores = [np.array([0.2, 0.8]), np.array([0.3, 0.7])]
-        ica = Mock()
-        ica.find_bads_eog.return_value = ([np.int64(1)], scores)
-        with mne.use_log_level("ERROR"):
-            indices, returned_scores = step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS)
-        self.assertEqual(indices, [1])
-        self.assertIs(type(indices[0]), int)
-        self.assertIs(returned_scores, scores)
-        np.testing.assert_array_equal(raw.get_data(picks=NAMES[:7]), original)
-        for name, anode, cathode in DEFAULT_EOG_PAIRS:
-            np.testing.assert_array_equal(raw.get_data(picks=[name])[0],
-                                          original[NAMES.index(anode)] -
-                                          original[NAMES.index(cathode)])
-        self.assertEqual(raw.get_channel_types()[-2:], ["eog", "eog"])
-        ica.find_bads_eog.assert_called_once_with(
-            raw, ch_name=["VEOG-R", "VEOG-L"], reject_by_annotation=True,
-        )
-
-    def test_skips_bad_and_missing_sources(self):
-        for unavailable in ("bad", "missing"):
-            with self.subTest(unavailable=unavailable):
-                raw = make_raw().pick("eeg", exclude="bads")
-                if unavailable == "bad":
-                    raw.info["bads"] = ["E126"]
-                else:
-                    raw.drop_channels(["E126"])
-                ica = Mock()
-                ica.find_bads_eog.return_value = ([], np.zeros(3))
-                with mne.use_log_level("ERROR"):
-                    step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS)
-                self.assertNotIn("VEOG-R", raw.ch_names)
-                self.assertIn("VEOG-L", raw.ch_names)
-                self.assertEqual(ica.find_bads_eog.call_args.kwargs["ch_name"], ["VEOG-L"])
-        raw = make_raw().pick(["F3", "C3", "Cz"])
-        ica = Mock()
-        self.assertEqual(step3.find_eog_components(raw, ica, eog_pairs=DEFAULT_EOG_PAIRS), ([], None))
-        ica.find_bads_eog.assert_not_called()
-
-    def test_custom_pairs_create_only_requested_bipolar_channels(self):
-        raw = make_raw().pick("eeg", exclude="bads")
-        original = raw.get_data().copy()
-        ica = Mock()
-        ica.find_bads_eog.return_value = ([0], np.array([0.8]))
-        with mne.use_log_level("ERROR"):
-            indices, _ = step3.find_eog_components(
-                raw, ica, eog_pairs=(("CUSTOM-EOG", "F3", "C3"),),
-            )
-        self.assertEqual(indices, [0])
-        self.assertEqual(raw.ch_names, NAMES[:7] + ["CUSTOM-EOG"])
-        self.assertEqual(raw.get_channel_types()[-1], "eog")
-        np.testing.assert_array_equal(raw.get_data(picks=NAMES[:7]), original)
-        np.testing.assert_array_equal(raw.get_data(picks=["CUSTOM-EOG"])[0],
-                                      original[NAMES.index("F3")] - original[NAMES.index("C3")])
-        ica.find_bads_eog.assert_called_once_with(
-            raw, ch_name=["CUSTOM-EOG"], reject_by_annotation=True,
-        )
-
-
 class TestICLabelMaps(unittest.TestCase):
     def test_restores_reference_before_centering_and_preserves_time_features(self):
         raw = make_raw().pick(["E14", "E126", "F3", "Cz"])
@@ -246,23 +183,24 @@ class TestICASelection(unittest.TestCase):
         probabilities[2, [0, 6]] = [0.6, 0.4]
         probabilities[3, [0, 2]] = [0.2, 0.8]
         original = probabilities.copy()
-        eog_indices = [3, 2, 3]
         with patch.object(step3, "display") as display:
-            exclusions, table = step3.exclude_ica_components(eog_indices, probabilities, 0.75)
+            exclusions, table = step3.exclude_ica_components(probabilities)
 
-        self.assertEqual(exclusions, [1, 2, 3])
-        self.assertEqual(eog_indices, [3, 2, 3])
+        self.assertEqual(exclusions, [1, 3])
         np.testing.assert_array_equal(probabilities, original)
         class_names = ["brain", "muscle artifact", "eye blink", "heart beat", "line noise",
                        "channel noise", "other"]
+        self.assertEqual(table.columns.tolist(),
+                         ["component", "winning_label", "winning_probability", *class_names,
+                          "iclabel_auto_exclude", "excluded"])
         np.testing.assert_array_equal(table[class_names].to_numpy(), original)
         self.assertEqual(table["component"].tolist(), [0, 1, 2, 3])
-        self.assertEqual(table["excluded"].tolist(), [False, True, True, True])
+        self.assertEqual(table["excluded"].tolist(), [False, True, False, True])
         self.assertEqual(table.loc[1, "winning_probability"], 0.75001)
         display.assert_called_once()
         self.assertEqual(display.call_args.args[0].loc[1, "winning_probability"], 0.75)
 
-    def fit_with_probabilities(self, probabilities, eog_indices):
+    def fit_with_probabilities(self, probabilities):
         raw = make_raw()
         raw_ica = raw.copy().pick("eeg", exclude="bads")
         epochs = mne.make_fixed_length_epochs(raw_ica, duration=2, preload=True, verbose=False)
@@ -270,13 +208,12 @@ class TestICASelection(unittest.TestCase):
         patches = (
             patch.object(step3, "prepare_ica_epochs", return_value=(raw_ica, epochs, "Cz")),
             patch.object(step3.mne.preprocessing, "ICA", return_value=ica),
-            patch.object(step3, "find_eog_components", return_value=(eog_indices, None)),
             patch.object(step3, "label_ica_components", return_value=probabilities),
             patch.object(step3, "display"),
         )
         return raw, epochs, ica, patches
 
-    def test_union_strict_threshold_and_full_precision_table(self):
+    def test_strict_threshold_and_full_precision_table(self):
         probabilities = np.zeros((7, 7))
         probabilities[0, [0, 1]] = [0.9, 0.1]
         probabilities[1, [0, 1]] = [0.24999, 0.75001]
@@ -285,19 +222,20 @@ class TestICASelection(unittest.TestCase):
         probabilities[4, [0, 4]] = [0.2, 0.8]
         probabilities[5, [0, 6]] = [0.1, 0.9]
         probabilities[6, [0, 1, 2]] = [0.2, 0.4, 0.4]
-        raw, epochs, ica, patches = self.fit_with_probabilities(probabilities, [3])
+        raw, epochs, ica, patches = self.fit_with_probabilities(probabilities)
         original = raw.copy()
-        with patches[0] as prep, patches[1] as constructor, patches[2] as eog, patches[3], patches[4] as display:
+        with patches[0] as prep, patches[1] as constructor, patches[2] as label, patches[3] as display:
             returned_ica, table = step3.fit_ica(raw, "Cz", return_details=True)
         self.assertIs(returned_ica, ica)
-        self.assertEqual(ica.exclude, [1, 3, 4])
+        self.assertEqual(ica.exclude, [1, 4])
         prep.assert_called_once_with(raw, "Cz")
         constructor.assert_called_once_with(
             n_components=None, method="infomax", fit_params={"extended": True},
-            max_iter="auto", random_state=518,
+            max_iter="auto", rng=518,
         )
         ica.fit.assert_called_once_with(epochs, picks="eeg")
-        eog.assert_called_once_with(prep.return_value[0], ica, eog_pairs=DEFAULT_EOG_PAIRS)
+        label.assert_called_once_with(prep.return_value[0], epochs, ica, "Cz")
+        self.assertEqual(prep.return_value[0].ch_names, NAMES[:7])
         class_names = ["brain", "muscle artifact", "eye blink", "heart beat", "line noise",
                        "channel noise", "other"]
         np.testing.assert_array_equal(table[class_names].to_numpy(), probabilities)
@@ -306,70 +244,39 @@ class TestICASelection(unittest.TestCase):
                           "muscle artifact"])
         self.assertEqual(table["iclabel_auto_exclude"].tolist(),
                          [False, True, False, False, True, False, False])
-        self.assertEqual(table["find_bads_eog"].tolist(),
-                         [False, False, False, True, False, False, False])
         self.assertEqual(table["excluded"].tolist(),
-                         [False, True, False, True, True, False, False])
+                         [False, True, False, False, True, False, False])
         self.assertEqual(display.call_args.args[0].loc[1, "muscle artifact"], 0.75)
         self.assertEqual(table.loc[1, "muscle artifact"], 0.75001)
         np.testing.assert_array_equal(raw.get_data(), original.get_data())
         self.assertEqual(raw.info["bads"], original.info["bads"])
 
-    def test_eog_conflict_raises_before_changing_exclusions(self):
+    def test_brain_and_other_probabilities_do_not_trigger_exclusion(self):
         for column, category in ((0, "brain"), (6, "other")):
             with self.subTest(category=category):
                 probabilities = np.zeros((1, 7))
-                probabilities[0, column] = 0.75001
-                probabilities[0, 2] = 0.24999
-                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
-                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
-                    with self.assertRaisesRegex(ValueError, "brain/other.*0"):
-                        step3.fit_ica(raw)
-                self.assertEqual(ica.exclude, [99])
-                display.assert_not_called()
-
-    def test_eog_brain_and_other_exact_threshold_do_not_conflict(self):
-        for column, category in ((0, "brain"), (6, "other")):
-            with self.subTest(category=category):
-                probabilities = np.zeros((1, 7))
-                probabilities[0, column] = 0.75
-                probabilities[0, 2] = 0.25
-                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
-                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
+                probabilities[0, column] = 0.9
+                probabilities[0, 2] = 0.1
+                raw, _, ica, patches = self.fit_with_probabilities(probabilities)
+                with patches[0], patches[1], patches[2], patches[3] as display:
                     returned_ica = step3.fit_ica(raw)
                 self.assertIs(returned_ica, ica)
                 display.assert_called_once()
-                self.assertEqual(ica.exclude, [0])
+                self.assertEqual(ica.exclude, [])
 
-    def test_custom_threshold_and_pairs_reach_exclusion_decisions(self):
+    def test_custom_threshold_reaches_exclusion_decisions(self):
         probabilities = np.zeros((3, 7))
         probabilities[0, [0, 1]] = [0.35, 0.65]
         probabilities[1, [0, 2]] = [0.4, 0.6]
         probabilities[2, [0, 6]] = [0.6, 0.4]
-        custom_pairs = (("CUSTOM-EOG", "F3", "C3"),)
-        raw, _, ica, patches = self.fit_with_probabilities(probabilities, [2])
-        with patches[0] as prep, patches[1], patches[2] as eog, patches[3], patches[4]:
+        raw, _, ica, patches = self.fit_with_probabilities(probabilities)
+        with patches[0], patches[1], patches[2], patches[3]:
             returned_ica, table = step3.fit_ica(
-                raw, iclabel_threshold=0.6, eog_pairs=custom_pairs, return_details=True,
+                raw, iclabel_threshold=0.6, return_details=True,
             )
         self.assertIs(returned_ica, ica)
-        self.assertEqual(ica.exclude, [0, 2])
+        self.assertEqual(ica.exclude, [0])
         self.assertEqual(table["iclabel_auto_exclude"].tolist(), [True, False, False])
-        self.assertEqual(table["find_bads_eog"].tolist(), [False, False, True])
-        eog.assert_called_once_with(prep.return_value[0], ica, eog_pairs=custom_pairs)
-
-    def test_eog_conflict_uses_custom_threshold(self):
-        for column, category in ((0, "brain"), (6, "other")):
-            with self.subTest(category=category):
-                probabilities = np.zeros((1, 7))
-                probabilities[0, column] = 0.65
-                probabilities[0, 2] = 0.35
-                raw, _, ica, patches = self.fit_with_probabilities(probabilities, [0])
-                with patches[0], patches[1], patches[2], patches[3], patches[4] as display:
-                    with self.assertRaisesRegex(ValueError, "brain/other >0.6"):
-                        step3.fit_ica(raw, iclabel_threshold=0.6)
-                self.assertEqual(ica.exclude, [99])
-                display.assert_not_called()
 
 
 if __name__ == "__main__":
