@@ -124,16 +124,24 @@ def find_eog_components(raw_ica, ica, *, eog_pairs):
 
     eog_names = [name for name, _, _ in usable_pairs]
     mne.set_bipolar_reference(
-        raw_ica, anode=[anode for _, anode, _ in usable_pairs],
-        cathode=[cathode for _, _, cathode in usable_pairs], ch_name=eog_names,
-        drop_refs=False, copy=False, on_bad="raise",
+        raw_ica,
+        anode=[anode for _, anode, _ in usable_pairs],
+        cathode=[cathode for _, _, cathode in usable_pairs],
+        ch_name=eog_names,
+        drop_refs=False,
+        copy=False,
+        on_bad="raise",
+        verbose=False,
     )
-    raw_ica.set_channel_types({name: "eog" for name in eog_names})
+    raw_ica.set_channel_types({name: "eog" for name in eog_names}, verbose=False)
     indices, scores = ica.find_bads_eog(
-        raw_ica, ch_name=eog_names, reject_by_annotation=True, verbose=False,
+        raw_ica,
+        ch_name=eog_names,
+        reject_by_annotation=True,
+        verbose=False,
     )
     indices = [int(index) for index in indices]
-    print(f"Candidate EOG components: {indices}")
+    print(f"Candidate EOG components by find_bads_eog(): {indices}")
     return indices, scores
 
 
@@ -229,7 +237,7 @@ def fit_ica(
     )
     ica.fit(fit_epochs, picks="eeg")
     print(f"ICA components retained: {ica.n_components_}")
-    print(f"ICA training support: {len(fit_epochs)} epochs / {len(fit_epochs) * 2:.1f} s; "
+    print(f"ICA training support: {len(fit_epochs)} epochs with {len(fit_epochs) * 2:.1f} s; "
           f"{len(ica.ch_names)} EEG channels; {ica.n_iter_} iterations.")
 
     eog_indices, _ = find_eog_components(raw_ica, ica, eog_pairs=eog_pairs)
