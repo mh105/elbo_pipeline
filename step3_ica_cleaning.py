@@ -140,7 +140,7 @@ def find_eog_components(raw_ica, ica, *, eog_pairs):
         reject_by_annotation=True,
         verbose=False,
     )
-    indices = [int(index) for index in indices]
+    indices = sorted(int(index) for index in indices)
     print(f"Candidate EOG components by find_bads_eog(): {indices}")
     return indices, scores
 
@@ -287,3 +287,10 @@ if __name__ == "__main__":
 
     # %% Fit ICA and select artifact components
     ica = fit_ica(raw_bads, reference_channel)
+
+    # Manual exclusion appears to be needed for now
+    ica.plot_components()
+    ica.plot_sources(raw_bads, block=True)
+
+    ica.exclude = sorted(set(int(index) for index in ica.exclude))
+    print(f"Final excluded ICA components: {ica.exclude}")
