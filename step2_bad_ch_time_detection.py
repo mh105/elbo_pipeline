@@ -3919,8 +3919,13 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
     with patch.object(_calibration, "_design_statistics_filter", return_value=(b, a)), \
             patch.object(_calibration, "_lfilter_channels", side_effect=filter_calibration):
         state, calibration = calibrate_asr(
-            data[:, calibration_input], sfreq, calibration="auto", cutoff=20,
-            filter_kind="asr", blocksize=blocksize, method="standard",
+            data[:, calibration_input],
+            sfreq,
+            calibration="auto",
+            cutoff=20,
+            filter_kind="asr",
+            blocksize=blocksize,
+            method="standard",
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
     require_calibration(len(calibration_indices))
