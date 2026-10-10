@@ -225,7 +225,7 @@ def fit_ica(
         method="infomax",
         fit_params={"extended": True},
         max_iter="auto",
-        random_state=518,
+        rng=518,
     )
     ica.fit(fit_epochs, picks="eeg")
     print(f"ICA components retained: {ica.n_components_}")
