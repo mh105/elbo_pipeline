@@ -89,7 +89,15 @@ def prepare_ica_epochs(raw, reference_channel=None):
     if len(fit_epochs) == 0:
         raise ValueError("No clean 2-second epochs remain for ICA fitting.")
     fit_epochs.drop_channels([reference_channel])
-    fit_epochs.decimate(decim=4)
+    with warnings.catch_warnings():
+        # The low-pass stopband starts at the new Nyquist frequency (125 Hz).
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning,
+            message=r"The measurement information indicates a low-pass frequency "
+                    r"of 100\.0 Hz\. The decim=4 parameter will result in a sampling "
+                    r"frequency of 250\.0 Hz, which can cause aliasing artifacts\.$",
+        )
+        fit_epochs.decimate(decim=4)
     if fit_epochs.info["sfreq"] != 250:
         raise ValueError("Expected 250 Hz sampling rate for ICA epochs.")
     return raw_ica, fit_epochs, reference_channel
