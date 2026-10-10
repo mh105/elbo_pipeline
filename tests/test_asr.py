@@ -67,11 +67,12 @@ class FakeASR:
         else:
             retained[10:15] = False
         b, a = _calibration._design_statistics_filter(sfreq, kwargs["filter_kind"])
+        _, filter_zi = _calibration._lfilter_channels(X[:, retained], b, a)
         state = ASRState(
             M=np.eye(n_channels), T=np.eye(n_channels),
             thresholds=np.ones(n_channels), calibration_patterns=np.eye(n_channels),
             filter_b=b, filter_a=a, cov=np.eye(n_channels), rank=n_channels,
-            filter_zi=np.zeros((n_channels, max(len(a), len(b)) - 1)),
+            filter_zi=filter_zi,
         )
         return state, {"clean_sample_mask": retained,
                        "calibration_samples": int(retained.sum()),

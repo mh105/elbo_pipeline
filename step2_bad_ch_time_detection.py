@@ -3917,21 +3917,24 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
             method="standard",
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
-    require_calibration(len(calibration_indices))
     plot_asr_calibration(raw, data, names, state, calibration_indices)
-    history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
-    _, initial_state = _asr_filter_channels(
-        history, b, a, np.zeros((len(picks), len(b) - 1))
-    )
-    state = replace(state, filter_zi=initial_state)
+
+    def update_initial_state(state, data):
+        """Initialize the statistics filter from the recording's reflected start."""
+        b, a = state.filter_b, state.filter_a
+        order = len(b) - 1
+        history = 2 * data[:, [0]] - data[:, order:0:-1]
+        _, filter_zi = _asr_filter_channels(
+            history, b, a, np.zeros((data.shape[0], order))
+        )
+        return replace(state, filter_zi=filter_zi)
+
+    state = update_initial_state(state, data)
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
         corrected, processing = process_asr(data, sfreq, state)
-
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
     plot_asr_effect(raw, data, names)
-    # The median Welch PSD shows persistent channel power; brief large
-    # events barely count.
     raw.compute_psd(
         fmax=45.0, average="median", verbose=False,
         exclude=raw.info["bads"] + [reference_channel],
