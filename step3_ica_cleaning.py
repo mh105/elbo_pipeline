@@ -171,7 +171,7 @@ def label_ica_components(raw_ica, fit_epochs, ica, reference_channel):
     return run_iclabel(topo, psd, autocorr, backend=None)
 
 
-def exclude_ica_components(eog_indices, probabilities, iclabel_threshold):
+def exclude_ica_components(eog_indices, probabilities, iclabel_threshold=0.75):
     """Return exclusion indices and the unrounded table; display a rounded copy.
 
     Raise if an EOG candidate has brain/other probability above the threshold.
@@ -245,7 +245,7 @@ def fit_ica(
     exclude_indices, component_table = exclude_ica_components(
         eog_indices,
         probabilities,
-        iclabel_threshold,
+        iclabel_threshold=iclabel_threshold,
     )
     ica.exclude = exclude_indices
     print(f"Excluded ICA components: {ica.exclude}")
