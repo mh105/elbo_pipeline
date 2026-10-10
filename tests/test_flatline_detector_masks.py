@@ -152,11 +152,13 @@ class TestPublicFlatlineStages(unittest.TestCase):
                     step2._mask_segment_by_flatline(raw, flatlines)
                 self.assertEqual(len(raw.annotations), 0)
                 self.assertEqual(flatlines, keys)
-        # A 0.5-s window still fits between the 0.4-s dropouts.
+        # A 0.5-s window still fits at either edge of the joined annotation.
         raw = native_raw(n_nonreference=7)
         step2._mask_segment_by_flatline(raw, flatlines_for(raw, every_window),
                                         window_length=0.5)
-        self.assertEqual(len(raw.annotations), 4)
+        self.assertEqual(len(raw.annotations), 1)
+        np.testing.assert_allclose(raw.annotations.onset, [200 / SFREQ])
+        np.testing.assert_allclose(raw.annotations.duration, [1600 / SFREQ])
 
     def test_detection_raises_before_annotating_or_changing_data(self):
         raw = native_raw(n_nonreference=7)

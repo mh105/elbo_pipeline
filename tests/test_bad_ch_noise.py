@@ -107,8 +107,8 @@ class TestVoltageMask(unittest.TestCase):
         original = raw.get_data().copy()
         self.assertIsNone(step2.mask_segment_by_voltage(raw))
         mask = raw.annotations.description == "BAD_voltage_mask"
-        np.testing.assert_allclose(raw.annotations.onset[mask], [0.1, 0.4])
-        np.testing.assert_allclose(raw.annotations.duration[mask], [0.2, 0.05])
+        np.testing.assert_allclose(raw.annotations.onset[mask], [0.1])
+        np.testing.assert_allclose(raw.annotations.duration[mask], [0.35])
         self.assertIn("event", raw.annotations.description)
         self.assertEqual(raw.info["bads"], ["E4"])
         np.testing.assert_array_equal(raw.get_data(), original)

@@ -12,6 +12,8 @@ later filters see no step. It returns a flatlines dictionary whose local
 intervals are widened by the reach of the later 0.3 Hz high-pass (5.5 s on each
 side). Every later detector, bad_ch_under_robust_ref, and
 interpolate_local_flatline_inplace take that dictionary.
+Global voltage masks and widened global flatline annotations join gaps of
+at most 2 s, masking the intervening data too.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
@@ -314,11 +316,11 @@ def _ramp_segments(data, block_samples, tolerance_v):
     return [[start, stop + 1] for start, stop in segments]
 
 
-def _merge_segments(segments):
-    """Merge touching or overlapping half-open sample intervals."""
+def _merge_segments(segments, max_gap_samples=0):
+    """Merge half-open sample intervals separated by at most max_gap_samples."""
     merged = []
     for start, stop in sorted(segments):
-        if merged and start <= merged[-1][1]:
+        if merged and start - merged[-1][1] <= max_gap_samples:
             merged[-1][1] = max(merged[-1][1], stop)
         else:
             merged.append([start, stop])
@@ -442,7 +444,8 @@ def detect_flatline_inplace(
     intervals; segments_on_subtypes stores the exact detections per rule as
     segments_on_raw, segments_on_highpass, and segments_on_ramp. All are
     aligned with ch_names. The exact global dropouts are saved as
-    global_segments, with global_ch_names and global_channel_fraction_cutoff;
+    global_segments, with global_ch_names and global_channel_fraction_cutoff.
+    Global annotations are widened and gaps of at most 2 s are joined;
     downstream_highpass_hz and widen_samples (the reach, in samples) record the
     widening. Run bad_ch_by_nan first; the native zero reference is exempt.
     Include finite existing bad EEG channels; skip already bad
@@ -726,10 +729,10 @@ def _mask_segment_by_flatline(
     denominator. A dropout has strictly more than channel_fraction_cutoff of
     that pool simultaneously flat. Annotate the dropouts widened by
     widen_samples on each side (the later high-pass's reach) within the data,
-    before whole-channel flatline rejection, and carry these annotations
-    through preprocessing. Save the eligible names, cutoff, and exact global
-    intervals in flatlines so later local repair uses the same
-    dropout decision.
+    then join annotation gaps of at most 2 s before whole-channel flatline
+    rejection. Carry these annotations through preprocessing. Save the eligible
+    names, cutoff, and exact global intervals in flatlines so later local repair
+    uses the same dropout decision; gap joining changes only the annotations.
 
     Before changing raw or flatlines, raise if the dropouts cover the entire
     recording, or leave no complete window_length window (the detectors'
@@ -743,6 +746,9 @@ def _mask_segment_by_flatline(
             "Global flatline dropout covers the entire recording; inspect the data."
         )
     masked = _widen_segments(segments, widen_samples, raw.n_times)
+    masked = _merge_segments(
+        masked, int(np.floor(_GLOBAL_MASK_MAX_GAP_S * raw.info["sfreq"]))
+    )
     window_samples = int(round(window_length * raw.info["sfreq"]))
     n_windows = raw.n_times // window_samples
     if masked and n_windows and _segments_to_windows(
@@ -763,11 +769,17 @@ def _mask_segment_by_flatline(
         )
 
 
+_VOLTAGE_MASK_THRESHOLD_UV = 500.0
+_VOLTAGE_MASK_CHANNEL_FRACTION_CUTOFF = 0.25
+_VOLTAGE_MASK_WINDOW_LENGTH = 0.1
+_GLOBAL_MASK_MAX_GAP_S = 2.0
+
+
 def mask_segment_by_voltage(
     raw,
-    voltage_threshold_uv=500.0,
-    channel_fraction_cutoff=0.25,
-    window_length=0.1,
+    voltage_threshold_uv=_VOLTAGE_MASK_THRESHOLD_UV,
+    channel_fraction_cutoff=_VOLTAGE_MASK_CHANNEL_FRACTION_CUTOFF,
+    window_length=_VOLTAGE_MASK_WINDOW_LENGTH,
     *,
     require_average=False,
     reference_channel=None,
@@ -787,42 +799,20 @@ def mask_segment_by_voltage(
     threshold in a window if any sample is strictly outside
     +/-voltage_threshold_uv. Annotate the entire window when strictly more than
     channel_fraction_cutoff of eligible channels exceed it, even if their
-    exceedances are not simultaneous. Merge adjacent masked windows; include
-    the final partial window with its actual duration.
+    exceedances are not simultaneous. Join masked spans separated by at most
+    2 s, masking the intervening data too; include the final partial window
+    with its actual duration. Preserve existing annotations.
 
-    The eight detectors that use this mask compute the same spans without
-    copying or annotating their input (_temporary_voltage_mask):
-    bad_ch_by_flatline (with the named native reference), bad_ch_by_voltage,
-    bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise,
-    bad_ch_by_correlation, and bad_ch_by_RANSAC.
+    Detectors and plots use the same implementation (_temporary_voltage_mask)
+    without annotating their input. Robust-reference passes cache per-channel
+    inputs (_mask_inputs), then recalculate spans as bad labels change.
     """
-    if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
-        raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
-    if (
-        not np.isfinite(channel_fraction_cutoff)
-        or not 0 <= channel_fraction_cutoff <= 1
-    ):
-        raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
-    if not np.isfinite(window_length) or window_length <= 0:
-        raise ValueError("window_length must be finite and greater than 0 (seconds).")
-    sfreq = raw.info["sfreq"]
-    window_samples = int(round(window_length * sfreq))
-    if window_samples < 1:
-        raise ValueError("window_length must cover at least one sample.")
-    if reference_channel is not None:
-        if require_average:
-            raise ValueError("A named native reference cannot be combined with "
-                             "require_average.")
-        reference_channel = _reference_channel(raw, "native", reference_channel)
-    else:
-        reference_channel = _reference_channel(
-            raw, "average" if require_average else "either"
-        )
-    picks = _mask_eeg_picks(raw, reference_channel)
-    spans = _voltage_mask_spans(
-        *_voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples),
-        window_samples, raw.n_times, channel_fraction_cutoff,
+    shared = _mask_inputs(raw, voltage_threshold_uv, window_length)
+    spans, _ = _temporary_voltage_mask(
+        raw, require_average=require_average, reference_channel=reference_channel,
+        shared=shared, channel_fraction_cutoff=channel_fraction_cutoff,
     )
+    sfreq = raw.info["sfreq"]
     raw.annotations.append(
         raw.first_time + spans[:, 0] / sfreq,
         (spans[:, 1] - spans[:, 0]) / sfreq,
@@ -849,11 +839,12 @@ def _voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples):
 
 
 def _voltage_mask_spans(
-    finite, exceeds, window_samples, n_times, channel_fraction_cutoff=0.25
+    finite, exceeds, window_samples, n_times, channel_fraction_cutoff, max_gap_samples
 ):
     """Merged half-open sample spans of the windows where strictly more than
     channel_fraction_cutoff of the pool, the rows of _voltage_exceedances,
-    exceed the threshold; raise if a row is not finite.
+    exceed the threshold. Join gaps of at most max_gap_samples and raise if
+    a row is not finite.
     """
     if not finite.all():
         raise ValueError(
@@ -863,37 +854,60 @@ def _voltage_mask_spans(
     edges = np.flatnonzero(np.diff(np.r_[False, bad, False]))
     spans = edges.reshape(-1, 2) * window_samples
     spans[:, 1] = np.minimum(spans[:, 1], n_times)
-    return spans
+    return np.asarray(
+        _merge_segments(spans.tolist(), max_gap_samples), dtype=int
+    ).reshape(-1, 2)
 
 
-def _mask_inputs(raw):
-    """What the reference checks and the default temporary voltage mask read
+def _mask_inputs(
+    raw, voltage_threshold_uv=_VOLTAGE_MASK_THRESHOLD_UV,
+    window_length=_VOLTAGE_MASK_WINDOW_LENGTH,
+):
+    """What the reference checks and the voltage mask read
     from the data, for every EEG channel, bad or not.
 
     Return the EEG picks, the names of the entirely zero ones (zeros), and
-    each one's finiteness and 0.1-s exceedances of +/-500 µV, the defaults of
-    mask_segment_by_voltage. Only bad labels change between the detectors of
-    a robust-reference pass, so the pass computes this once and passes it to
-    all seven; a detector called on its own computes it from its input.
+    each one's finiteness and short-window exceedances. The shared defaults
+    are 0.1-s windows and +/-500 µV. Only bad labels change between detectors
+    of a robust-reference pass, so the pass computes this once; standalone
+    detectors and annotation creation use the same preparation. Custom
+    voltage_threshold_uv and window_length apply to these cached inputs.
     """
+    if not np.isfinite(voltage_threshold_uv) or voltage_threshold_uv <= 0:
+        raise ValueError("voltage_threshold_uv must be finite and greater than 0.")
+    if not np.isfinite(window_length) or window_length <= 0:
+        raise ValueError("window_length must be finite and greater than 0 (seconds).")
+    window_samples = int(round(window_length * raw.info["sfreq"]))
+    if window_samples < 1:
+        raise ValueError("window_length must cover at least one sample.")
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
-    window_samples = int(round(0.1 * raw.info["sfreq"]))
-    finite, exceeds = _voltage_exceedances(raw, eeg, 500.0, window_samples)
+    finite, exceeds = _voltage_exceedances(raw, eeg, voltage_threshold_uv, window_samples)
     return {"eeg": eeg, "zeros": set(_zero_eeg_channels(raw, eeg)),
             "finite": finite, "exceeds": exceeds, "window_samples": window_samples}
 
 
 def _temporary_voltage_mask(
-    raw, *, require_average=False, reference_channel=None, shared=None
+    raw, *, require_average=False, reference_channel=None, shared=None,
+    channel_fraction_cutoff=_VOLTAGE_MASK_CHANNEL_FRACTION_CUTOFF,
 ):
-    """Check the reference, then return the spans that mask_segment_by_voltage
-    (default settings) would annotate, as half-open sample intervals, and any
+    """Return global voltage-mask spans as half-open sample intervals and any
     native reference, without copying or annotating raw.
 
     With reference_channel, require that named native reference, as
     bad_ch_by_flatline does, so that other all-zero channels do not raise.
-    shared is _mask_inputs(raw), computed here if None.
+    shared is _mask_inputs(raw), computed here with the shared defaults if None.
+    Its threshold and window determine the exceedances; the current eligible
+    pool and channel_fraction_cutoff determine the mask. Join gaps of at most
+    2 s after this decision.
     """
+    if (
+        not np.isfinite(channel_fraction_cutoff)
+        or not 0 <= channel_fraction_cutoff <= 1
+    ):
+        raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
+    if reference_channel is not None and require_average:
+        raise ValueError("A named native reference cannot be combined with "
+                         "require_average.")
     if shared is None:
         shared = _mask_inputs(raw)
     if reference_channel is None:
@@ -906,8 +920,11 @@ def _temporary_voltage_mask(
             raw, "native", reference_channel, known_zeros=shared["zeros"]
         )
     rows = np.searchsorted(shared["eeg"], _mask_eeg_picks(raw, reference_channel))
-    spans = _voltage_mask_spans(shared["finite"][rows], shared["exceeds"][rows],
-                                shared["window_samples"], raw.n_times)
+    spans = _voltage_mask_spans(
+        shared["finite"][rows], shared["exceeds"][rows],
+        shared["window_samples"], raw.n_times, channel_fraction_cutoff,
+        int(np.floor(_GLOBAL_MASK_MAX_GAP_S * raw.info["sfreq"])),
+    )
     return spans, reference_channel
 
 
@@ -3949,7 +3966,7 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report=None, flatlines=None):
 
 if __name__ == "__main__":
     # %% Load example data
-    raw = load_raw_data("sub-03")
+    raw = load_raw_data("sub-02")
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}
@@ -3961,11 +3978,11 @@ if __name__ == "__main__":
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    clean = ZapLine_notch(clean, line_freq=90.0)
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    # clean = ZapLine_notch(clean, line_freq=90.0)
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
     remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
     del raw_prep, clean  # Free two full-recording copies.
 
