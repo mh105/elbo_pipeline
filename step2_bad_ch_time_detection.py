@@ -87,15 +87,12 @@ apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
 annotations and widened local flat intervals, then uses automatic selection;
 at least 60 seconds must remain. Its statistics use a four-second minimum-phase
-FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Component
-cutoffs run from 5 for the largest covariance eigenvalue to 20 for the smallest,
-following their square roots. normalized=True instead uses fixed cutoff 20 and
-decomposes threshold-normalized covariance, substantially changing which spatial
-directions ASR can reject. Correction processes the full timeline, including
-masked periods. Afterwards, local flat spans are reconstructed again from
-corrected donors. Return one details dictionary with correction duration and
-percentage, component-rejection and applied-correction intervals on the original
-sample timeline, and calibration and window diagnostics.
+FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Correction
+processes the full timeline, including masked periods, at cutoff 20. Afterwards,
+local flat spans are reconstructed again from corrected donors. Return one
+details dictionary with correction duration and percentage, component-rejection
+and applied-correction intervals on the original sample timeline, and
+calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 plot_asr_calibration shows accepted support, a channel trace and spectrogram,
 and the calibrated covariance before correction.
@@ -3711,46 +3708,7 @@ def _asr_filter_channels(data, b, a, zi=None):
     return filtered, final_state
 
 
-def _asr_normalized_state(state):
-    """Return processing state, B, and its inverse for Z = B @ data.
-
-    B = diag(1 / thresholds) @ calibration_patterns.T makes the allowed
-    covariance identity. Transform the reconstruction factor M and causal
-    filter history as well, retaining the original calibration prior. Keep
-    the caller's state in electrode coordinates for calibration diagnostics.
-    """
-    thresholds = state.thresholds
-    if not np.isfinite(thresholds).all() or np.any(thresholds <= 0):
-        raise ValueError("Normalized ASR requires finite, positive RMS thresholds.")
-    patterns = state.calibration_patterns
-    transform = patterns.T / thresholds[:, None]
-    inverse = patterns * thresholds[None, :]
-    identity = np.eye(len(thresholds))
-    normalized_state = replace(
-        state, M=transform @ state.M, T=identity,
-        thresholds=np.ones(len(thresholds)), calibration_patterns=identity,
-        cov=transform @ state.cov @ transform.T,
-        filter_zi=None if state.filter_zi is None else transform @ state.filter_zi,
-    )
-    return normalized_state, transform, inverse
-
-
-def _process_normalized_asr(data, sfreq, state):
-    """Process threshold-normalized data; return electrode voltages and details.
-
-    Native standard processing now decomposes B @ C @ B.T and compares its
-    eigenvalues with one. Filtering, dimension limits, lookahead, and blending
-    use the existing processor. Component diagnostics are dimensionless.
-    """
-    normalized_state, transform, inverse = _asr_normalized_state(state)
-    corrected, processing = process_asr(transform @ data, sfreq, normalized_state)
-    processing["component_units"] = "dimensionless"
-    return inverse @ corrected, processing
-
-
-def apply_asr_inplace(
-    raw, reference_channel=None, flatlines=None, *, normalized=False,
-):
+def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
     """Correct good EEG channels with ASR in place; return details.
 
     Run after local flatline interpolation and validate_reference_inplace;
@@ -3761,24 +3719,10 @@ def apply_asr_inplace(
     intervals of the included channels and effective reference. Concatenate this
     support for native automatic selection, requiring at least 60 retained seconds.
 
-    By default, use standard ASR with component RMS thresholds mu + cutoff * sigma. Set
-    cutoff to 5 at the largest calibration covariance eigenvalue and 20 at the
-    smallest, interpolating linearly in their square roots. Equal eigenvalues
-    keep cutoff 20. Reuse native calibration's covariance and fitted mu/sigma.
-
-    normalized=True instead uses fixed cutoff 20 for every calibration
-    component and decomposes covariance after dividing calibration-component
-    signals by their RMS thresholds. This substantially changes ASR: it finds
-    directions with excessive variance relative to their calibrated allowance,
-    which can combine several ordinary empirical covariance eigenvectors.
-    Reject normalized eigenvalues at or above one, subject to the native
-    dimension limit. Retain the calibration reconstruction prior and restore
-    electrode voltages after reversing the coordinate transform.
-
-    Use a four-second minimum-phase statistics FIR and 100-ms covariance blocks
-    rounded to samples. Other ASR parameters keep their native defaults.
-    Initialize the statistics filter from reflected sequence starts rather than
-    calibration-ending history. Correction sees
+    Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
+    and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
+    their native defaults. Initialize the statistics filter from reflected
+    sequence starts rather than calibration-ending history. Correction sees
     the full original timeline, including global BAD periods; their existing
     annotations remain for later rejection. Re-interpolate local flat spans
     from corrected good, nonflat donors, protecting the effective reference.
@@ -3798,13 +3742,8 @@ def apply_asr_inplace(
     update rejects components), original calibration sample indices, filter
     coefficients, settings, and native calibration and processing diagnostics.
     component_segments uses the same sample-bound convention as corrected_segments.
-    Calibration diagnostics hold
-    eigenvalues and component_cutoffs in calibration-component order, with
-    thresholds updated to the values used for correction. With normalized=True,
-    processing component_variances and component_thresholds are dimensionless
-    variances and unit variance allowances; calibration thresholds remain RMS
-    voltages. Insufficient calibration raises before any corrected voltages are
-    written back. Show plot_asr_calibration after calibration and before correction.
+    Insufficient calibration raises before any corrected voltages are written
+    back. Show plot_asr_calibration after calibration and before correction.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3856,18 +3795,6 @@ def apply_asr_inplace(
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
     require_calibration(len(calibration_indices))
-    patterns = state.calibration_patterns
-    eigenvalues = np.diag(patterns.T @ state.cov @ patterns)
-    amplitudes = np.sqrt(eigenvalues)
-    cutoffs = np.full(len(amplitudes), 20.0)
-    amplitude_range = np.ptp(amplitudes)
-    if not normalized and amplitude_range > 0:
-        cutoffs -= 15.0 * (amplitudes - amplitudes.min()) / amplitude_range
-    thresholds = calibration["threshold_mu"] + cutoffs * calibration["threshold_sigma"]
-    state = replace(state, thresholds=thresholds, T=thresholds[:, None] * patterns.T)
-    calibration["eigenvalues"] = eigenvalues
-    calibration["component_cutoffs"] = cutoffs
-    calibration["thresholds"] = thresholds.copy()
     plot_asr_calibration(raw, data, names, state, calibration_indices)
     history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
     _, initial_state = _asr_filter_channels(
@@ -3875,10 +3802,7 @@ def apply_asr_inplace(
     )
     state = replace(state, filter_zi=initial_state)
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
-        if normalized:
-            corrected, processing = _process_normalized_asr(data, sfreq, state)
-        else:
-            corrected, processing = process_asr(data, sfreq, state)
+        corrected, processing = process_asr(data, sfreq, state)
 
     raw._data[picks] = corrected
     interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
@@ -3915,9 +3839,7 @@ def apply_asr_inplace(
         "calibration_sample_indices": calibration_indices,
         "filter_b": b,
         "filter_a": a,
-        "settings": {"cutoff": 20.0, "cutoff_min": 20.0 if normalized else 5.0,
-                     "cutoff_scaling": "fixed" if normalized else "sqrt_eigenvalue",
-                     "normalized": bool(normalized), "blocksize": blocksize,
+        "settings": {"cutoff": 20.0, "blocksize": blocksize,
                      "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
                      "method": "standard", "mne_denoise_version": mne_denoise.__version__},
         "calibration": calibration,

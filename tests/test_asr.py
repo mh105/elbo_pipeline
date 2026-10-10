@@ -1,6 +1,5 @@
 import sys
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,7 +54,6 @@ class FakeASR:
         self.calibration_data = None
         self.processing_data = None
         self.calibration_kwargs = None
-        self.processing_state = None
         self.corrected = None
 
     def calibrate(self, X, sfreq, **kwargs):
@@ -77,14 +75,10 @@ class FakeASR:
         )
         return state, {"clean_sample_mask": retained,
                        "calibration_samples": int(retained.sum()),
-                       "blocksize": kwargs["blocksize"],
-                       "thresholds": state.thresholds.copy(),
-                       "threshold_mu": np.full(n_channels, 0.2),
-                       "threshold_sigma": np.full(n_channels, 0.04)}
+                       "blocksize": kwargs["blocksize"]}
 
     def process(self, X, sfreq, state, **kwargs):
         self.processing_data = X.copy()
-        self.processing_state = state
         offsets = (np.arange(X.shape[0]) + 1)[:, None] * 2e-6
         self.corrected = X + offsets
         mask = np.zeros(X.shape[1], dtype=bool)
@@ -267,136 +261,23 @@ class TestASRWrapper(unittest.TestCase):
                 self.assertEqual(fake.calibration_kwargs["blocksize"], int(0.1 * sfreq))
 
     def test_no_correction_reports_zero_duration_and_percentage(self):
-        for normalized in [False, True]:
-            with self.subTest(normalized=normalized):
-                raw = make_raw()
-                fake = FakeASR()
-                process = fake.process
-
-                def identity_process(X, sfreq, state, **kwargs):
-                    _, diagnostics = process(X, sfreq, state, **kwargs)
-                    diagnostics["n_components_reconstructed"][:] = 0
-                    diagnostics["sample_mask"][:] = False
-                    return X.copy(), diagnostics
-
-                fake.process = identity_process
-                details = self.run_fake(
-                    raw, fake, reference_channel="Cz", normalized=normalized,
-                )
-                self.assertEqual(details["duration_s"], 75.)
-                self.assertEqual(details["corrected_duration_s"], 0.)
-                self.assertEqual(details["corrected_percent"], 0.)
-                self.assertEqual(details["corrected_segments"], [])
-                self.assertEqual(details["component_segments"], [])
-
-    def test_sqrt_eigenvalue_cutoffs_follow_amplitude_and_reach_processing(self):
         raw = make_raw()
         fake = FakeASR()
-        calibrate = fake.calibrate
+        process = fake.process
 
-        def calibrate_with_spectrum(X, sfreq, **kwargs):
-            state, diagnostics = calibrate(X, sfreq, **kwargs)
-            n_channels = X.shape[0]
-            eigenvalues = np.array([1.] + [4.] * (n_channels - 2) + [16.])
-            patterns = np.eye(n_channels)
-            patterns[np.ix_([0, n_channels - 1], [0, n_channels - 1])] = [
-                [0.6, -0.8], [0.8, 0.6],
-            ]
-            return replace(
-                state, cov=(patterns * eigenvalues) @ patterns.T,
-                M=(patterns * np.sqrt(eigenvalues)) @ patterns.T,
-                calibration_patterns=patterns, T=patterns.T,
-            ), diagnostics
+        def identity_process(X, sfreq, state, **kwargs):
+            _, diagnostics = process(X, sfreq, state, **kwargs)
+            diagnostics["n_components_reconstructed"][:] = 0
+            diagnostics["sample_mask"][:] = False
+            return X.copy(), diagnostics
 
-        fake.calibrate = calibrate_with_spectrum
-        with patch.object(step2, "plot_asr_calibration") as plotting, \
-                patch.object(step2, "plot_asr_effect"):
-            details = self.run_fake(raw, fake, reference_channel="Cz")
-        n_channels = len(details["ch_names"])
-        expected_cutoffs = np.array([20.] + [15.] * (n_channels - 2) + [5.])
-        expected_thresholds = np.array([1.] + [0.8] * (n_channels - 2) + [0.4])
-        state = fake.processing_state
-        np.testing.assert_allclose(state.thresholds, expected_thresholds)
-        np.testing.assert_allclose(state.T @ state.calibration_patterns,
-                                   np.diag(expected_thresholds), atol=1e-15)
-        np.testing.assert_allclose(details["calibration"]["component_cutoffs"], expected_cutoffs)
-        np.testing.assert_allclose(details["calibration"]["eigenvalues"],
-                                   [1.] + [4.] * (n_channels - 2) + [16.])
-        np.testing.assert_allclose(details["calibration"]["thresholds"], expected_thresholds)
-        np.testing.assert_allclose(plotting.call_args.args[3].thresholds, expected_thresholds)
-        self.assertEqual(details["settings"]["cutoff"], 20.0)
-        self.assertEqual(details["settings"]["cutoff_min"], 5.0)
-        self.assertEqual(details["settings"]["cutoff_scaling"], "sqrt_eigenvalue")
-        self.assertFalse(details["settings"]["normalized"])
-
-    def test_normalized_uses_fixed_20_and_restores_electrode_coordinates(self):
-        raw = make_raw()
-        raw.info["bads"] = ["F7"]
-        original = raw.get_data()
-        selected = [i for i, name in enumerate(raw.ch_names)
-                    if name in NAMES and name not in ["F7", "Cz"]]
-        fake = FakeASR()
-        calibrate = fake.calibrate
-
-        def calibrate_with_spectrum(X, sfreq, **kwargs):
-            state, diagnostics = calibrate(X, sfreq, **kwargs)
-            n_channels = X.shape[0]
-            eigenvalues = np.linspace(1., 16., n_channels)
-            patterns = np.eye(n_channels)
-            patterns[np.ix_([0, n_channels - 1], [0, n_channels - 1])] = [
-                [0.6, -0.8], [0.8, 0.6],
-            ]
-            diagnostics["threshold_mu"] = np.linspace(0.2, 0.4, n_channels)
-            return replace(
-                state, cov=(patterns * eigenvalues) @ patterns.T,
-                M=(patterns * np.sqrt(eigenvalues)) @ patterns.T,
-                calibration_patterns=patterns,
-            ), diagnostics
-
-        fake.calibrate = calibrate_with_spectrum
-        with patch.object(step2, "plot_asr_calibration") as plotting, \
-                patch.object(step2, "plot_asr_effect"):
-            details = self.run_fake(
-                raw, fake, reference_channel="Cz", normalized=True,
-            )
-        state = plotting.call_args.args[3]
-        thresholds = np.linspace(0.2, 0.4, len(selected)) + 20 * 0.04
-        inverse = state.calibration_patterns * thresholds
-        np.testing.assert_allclose(details["calibration"]["component_cutoffs"], 20.)
-        np.testing.assert_allclose(details["calibration"]["thresholds"], thresholds)
-        np.testing.assert_allclose(inverse @ fake.processing_data, original[selected])
-        np.testing.assert_allclose(raw._data[selected], inverse @ fake.corrected)
-        # The temporary processing state preserves the electrode-space prior.
-        np.testing.assert_allclose(inverse @ fake.processing_state.M, state.M, atol=1e-14)
-        np.testing.assert_allclose(fake.processing_state.T, np.eye(len(selected)))
-        b, a = details["filter_b"], details["filter_a"]
-        data = original[selected]
-        history = 2 * data[:, [0]] - data[:, len(b) - 1:0:-1]
-        _, zi = lfilter(b, a, history, axis=1,
-                        zi=np.zeros((len(selected), len(b) - 1)))
-        np.testing.assert_allclose(inverse @ fake.processing_state.filter_zi, zi,
-                                   rtol=1e-10, atol=1e-15)
-        for name in ["F7", "Cz", "EOG"]:
-            row = raw.ch_names.index(name)
-            np.testing.assert_array_equal(raw._data[row], original[row])
-        self.assertEqual(details["component_segments"], [(100, 200), (300, 400)])
-        self.assertEqual(details["corrected_segments"], [(100, 250), (300, 450)])
-        self.assertEqual(details["corrected_duration_s"], 1.2)
-        self.assertEqual(details["corrected_percent"], 1.6)
-        self.assertEqual(details["settings"]["cutoff_min"], 20.)
-        self.assertEqual(details["settings"]["cutoff_scaling"], "fixed")
-        self.assertTrue(details["settings"]["normalized"])
-        self.assertEqual(details["processing"]["component_units"], "dimensionless")
-
-    def test_equal_eigenvalues_keep_cutoff_20(self):
-        raw = make_raw()
-        fake = FakeASR()
-        with patch.object(step2, "plot_asr_calibration"), \
-                patch.object(step2, "plot_asr_effect"):
-            details = self.run_fake(raw, fake, reference_channel="Cz")
-        np.testing.assert_array_equal(details["calibration"]["component_cutoffs"], 20.0)
-        np.testing.assert_array_equal(fake.processing_state.thresholds, 1.0)
-        np.testing.assert_array_equal(fake.processing_state.T, np.eye(len(details["ch_names"])))
+        fake.process = identity_process
+        details = self.run_fake(raw, fake, reference_channel="Cz")
+        self.assertEqual(details["duration_s"], 75.)
+        self.assertEqual(details["corrected_duration_s"], 0.)
+        self.assertEqual(details["corrected_percent"], 0.)
+        self.assertEqual(details["corrected_segments"], [])
+        self.assertEqual(details["component_segments"], [])
 
     def test_post_asr_repair_uses_corrected_donors_and_protects_effective_reference(self):
         raw = make_raw(reference="F3")
@@ -427,11 +308,6 @@ class TestASRWrapper(unittest.TestCase):
         np.testing.assert_array_equal(raw._data[target, 1200:], corrected[target, 1200:])
 
     def test_real_asr_preserves_length_reference_and_excluded_channels(self):
-        for normalized in [False, True]:
-            with self.subTest(normalized=normalized):
-                self.check_real_asr(normalized)
-
-    def check_real_asr(self, normalized):
         raw = make_raw(seconds=90)
         # Independent bandpassed channels plus a large, brief artifact.
         rng = np.random.default_rng(914)
@@ -449,10 +325,7 @@ class TestASRWrapper(unittest.TestCase):
         raw.set_annotations(mne.Annotations([5], [1], ["bad_acquisition"]))
         original = raw.get_data()
         designer = _calibration._design_statistics_filter
-        details = step2.apply_asr_inplace(
-            raw, "Cz", flatlines=flatlines_for(raw, {}),
-            normalized=normalized,
-        )
+        details = step2.apply_asr_inplace(raw, "Cz", flatlines=flatlines_for(raw, {}))
 
         self.assertEqual(raw.get_data().shape, original.shape)
         self.assertTrue(np.isfinite(raw.get_data()).all())
@@ -472,53 +345,6 @@ class TestASRWrapper(unittest.TestCase):
         self.assertIs(_calibration._design_statistics_filter, designer)
         self.assertEqual(set(raw.annotations.description),
                          {"bad_acquisition", "BAD_voltage_mask"})
-
-
-class TestNormalizedASR(unittest.TestCase):
-    def test_rejects_mixtures_of_ordinary_empirical_components(self):
-        # Both ordinary components pass their allowance of 10, but their
-        # contrast has variance 2.5 against allowance 1.
-        allowance = np.array([[10., 9.], [9., 10.]])
-        values, patterns = np.linalg.eigh(allowance)
-        thresholds = np.sqrt(values)
-        M = (patterns * [0.5, 1.]) @ patterns.T
-        state = ASRState(
-            M=M, T=thresholds[:, None] * patterns.T,
-            thresholds=thresholds, calibration_patterns=patterns,
-            filter_b=np.ones(1), filter_a=np.ones(1), cov=M @ M.T, rank=2,
-        )
-        data = np.zeros((2, 2000))
-        t = np.arange(1000) / 1000
-        data[:, 500:1500] = np.sqrt(2) * np.array([
-            2 * np.sin(2 * np.pi * 8 * t), np.sin(2 * np.pi * 16 * t),
-        ])
-        original_T = state.T.copy()
-        standard, std_details = step2.process_asr(data, 1000, state)
-        normalized, norm_details = step2._process_normalized_asr(data, 1000, state)
-        middle = ((norm_details["window_starts"] >= 750)
-                  & (norm_details["window_stops"] <= 1250))
-        self.assertTrue(middle.any())
-        np.testing.assert_array_equal(std_details["n_components_reconstructed"][middle], 0)
-        np.testing.assert_array_equal(norm_details["n_components_reconstructed"][middle], 1)
-        np.testing.assert_allclose(norm_details["component_variances"][middle, -1],
-                                   2.54898679, rtol=1e-8)
-        np.testing.assert_allclose(norm_details["component_thresholds"], 1., atol=1e-14)
-        np.testing.assert_allclose(standard[:, 750:1250], data[:, 750:1250])
-        self.assertGreater(np.linalg.norm(normalized[:, 750:1250] - data[:, 750:1250]), 1.)
-        np.testing.assert_array_equal(state.T, original_T)
-
-    def test_invalid_thresholds_raise_before_processing(self):
-        state, _ = FakeASR().calibrate(np.ones((2, 1000)), 250, filter_kind="none",
-                                       blocksize=25)
-        for threshold in [0., -1., np.nan, np.inf]:
-            with self.subTest(threshold=threshold), \
-                    patch.object(step2, "process_asr") as processing:
-                with self.assertRaisesRegex(ValueError, "finite, positive"):
-                    step2._process_normalized_asr(
-                        np.ones((2, 1000)), 250,
-                        replace(state, thresholds=np.array([threshold, 1.])),
-                    )
-                processing.assert_not_called()
 
 
 class TestASRFilter(unittest.TestCase):
