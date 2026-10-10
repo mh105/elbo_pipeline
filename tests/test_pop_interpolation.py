@@ -79,10 +79,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
 
-        self.assertEqual(result["ch_names"], ["C3"])
-        np.testing.assert_array_equal(result["segments"][0], [[2250, 2750]])
-        np.testing.assert_allclose(result["pop_times_s"]["C3"], [2499 / 250])
-        np.testing.assert_allclose(result["pop_steps_uv"]["C3"], [500], rtol=0.05)
+        self.assertIsNone(result)
         expected, estimate = expected_repair(raw, original, "C3", 2250, 2750, {"C3"})
         row = raw.ch_names.index("C3")
         np.testing.assert_allclose(raw._data[row, 2250:2750], expected, rtol=0, atol=1e-15)
@@ -107,7 +104,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines)
 
-        self.assertEqual(result["ch_names"], ["C3", "C4"])
+        self.assertIsNone(result)
         for name, start, stop in [("C3", 2250, 2750), ("C4", 2350, 2850)]:
             expected, _ = expected_repair(raw, original, name, start, stop,
                                           {"C3", "C4", "P3"})
@@ -124,9 +121,10 @@ class TestLocalPopInterpolation(unittest.TestCase):
             raw, flatlines_for(raw, global_segments=[(300, 350)]),
         )
 
-        np.testing.assert_array_equal(result["segments"][0], [[0, 300], [350, 450]])
+        self.assertIsNone(result)
         row = raw.ch_names.index("C3")
         np.testing.assert_array_equal(raw._data[row, 300:350], original[row, 300:350])
+        np.testing.assert_array_equal(raw._data[row, 450:], original[row, 450:])
         # No fade at the recording start or the dropout: there is nothing to blend.
         for start, stop, fade_in, fade_out in [(0, 300, False, False), (350, 450, False, True)]:
             expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"},
@@ -142,11 +140,13 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
 
+        self.assertIsNone(result)
         self.assertEqual(raw.info["bads"], [])
-        np.testing.assert_array_equal(
-            result["segments"][0], [[750, 1250], [2250, 2750], [3750, 4250]],
-        )
         row = raw.ch_names.index("C3")
+        for start, stop in [(750, 1250), (2250, 2750), (3750, 4250)]:
+            expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
+            np.testing.assert_allclose(raw._data[row, start:stop], expected,
+                                       rtol=0, atol=1e-15)
         np.testing.assert_array_equal(raw._data[row, 1250:2250], original[row, 1250:2250])
 
     def test_requires_a_good_native_reference(self):
@@ -170,7 +170,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         moved._data[eeg] -= moved._data[NAMES.index("FC1")].copy()
         original = moved.get_data()
         result = step2.interpolate_local_pops_inplace(moved, flatlines)
-        self.assertEqual(result["ch_names"], ["C3"])
+        self.assertIsNone(result)
         expected, _ = expected_repair(moved, original, "C3", 2250, 2750, {"C3"})
         np.testing.assert_allclose(moved._data[moved.ch_names.index("C3"), 2250:2750], expected,
                                    rtol=0, atol=1e-15)
@@ -181,7 +181,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         raw = make_raw()
         original = raw.get_data()
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
-        self.assertEqual(result["ch_names"], [])
+        self.assertIsNone(result)
         np.testing.assert_array_equal(raw.get_data(), original)
 
         add_pop(raw, "C3", 2500)

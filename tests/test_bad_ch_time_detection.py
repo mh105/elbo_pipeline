@@ -35,7 +35,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             "bad_ch_under_robust_ref": {"correlation": []},
             "interpolate_local_flatline_inplace": None,
             "validate_reference_inplace": "F3",
-            "interpolate_local_pops_inplace": {"ch_names": [], "segments": []},
+            "interpolate_local_pops_inplace": None,
             "apply_asr_inplace": self.asr_details,
         }
         stack = ExitStack()
@@ -153,7 +153,6 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             self.assertIs(spans, flatlines)
             np.testing.assert_array_equal(raw.get_data(picks=["F3"]), 0)
             progression.append("pops")
-            return {"ch_names": [], "segments": []}
 
         def apply_asr(raw, reference, spans):
             self.assertEqual(progression, ["interpolate", "validate", "pops"])

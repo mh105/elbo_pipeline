@@ -3508,7 +3508,7 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
 
 def interpolate_local_pops_inplace(raw, flatlines):
     """Repair the electrode pops of the good EEG channels in place from the
-    other good EEG channels; return the repaired intervals.
+    other good EEG channels; return None.
 
     Run this after validate_reference_inplace, once raw.info["bads"] lists the
     final bad channels, and before ASR, which can keep or rebuild a pop on a
@@ -3534,10 +3534,6 @@ def interpolate_local_pops_inplace(raw, flatlines):
     end that meets kept data, but not at the recording edges or a global
     dropout. Bad labels, annotations, non-EEG channels, and all other samples
     are unchanged.
-
-    Return ch_names and the aligned segments, half-open crop-relative sample
-    intervals as integer arrays of shape (n, 2), as in flatlines, with
-    bad_ch_by_pop's pop_times_s and pop_steps_uv for these channels.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3572,13 +3568,6 @@ def interpolate_local_pops_inplace(raw, flatlines):
                   for start, stop in segments) / sfreq
     print(f"Pops repaired: {n_pops} on {len(intervals)} good channels, "
           f"{seconds:.1f} channel-seconds")
-    return {
-        "ch_names": list(intervals),
-        "segments": [np.array(segments, dtype=int).reshape(-1, 2)
-                     for segments in intervals.values()],
-        "pop_times_s": {name: pops["pop_times_s"][name] for name in intervals},
-        "pop_steps_uv": {name: pops["pop_steps_uv"][name] for name in intervals},
-    }
 
 
 def validate_reference_inplace(raw, flatlines):
