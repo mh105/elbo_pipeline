@@ -4087,7 +4087,7 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report=None, flatlines=None):
 
 if __name__ == "__main__":
     # %% Load example data
-    raw = load_raw_data("sub-02")
+    raw = load_raw_data("sub-03")
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}
@@ -4099,11 +4099,11 @@ if __name__ == "__main__":
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    # clean = ZapLine_notch(clean, line_freq=90.0)
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    clean = ZapLine_notch(clean, line_freq=90.0)
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
     remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
     del raw_prep, clean  # Free two full-recording copies.
 
