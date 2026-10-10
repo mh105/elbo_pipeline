@@ -35,6 +35,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             "bad_ch_under_robust_ref": {"correlation": []},
             "interpolate_local_flatline_inplace": None,
             "validate_reference_inplace": "F3",
+            "interpolate_local_pops_inplace": {"ch_names": [], "segments": []},
             "apply_asr_inplace": self.asr_details,
         }
         stack = ExitStack()
@@ -146,8 +147,16 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             progression.append("validate")
             return "F3"
 
-        def apply_asr(raw, reference, spans):
+        def repair_pops(raw, spans):
             self.assertEqual(progression, ["interpolate", "validate"])
+            self.assertIs(raw, self.raw)
+            self.assertIs(spans, flatlines)
+            np.testing.assert_array_equal(raw.get_data(picks=["F3"]), 0)
+            progression.append("pops")
+            return {"ch_names": [], "segments": []}
+
+        def apply_asr(raw, reference, spans):
+            self.assertEqual(progression, ["interpolate", "validate", "pops"])
             self.assertIs(raw, self.raw)
             self.assertEqual(reference, "F3")
             self.assertIs(spans, flatlines)
@@ -160,6 +169,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.steps["bad_ch_by_voltage"].side_effect = mark_voltage
         self.steps["interpolate_local_flatline_inplace"].side_effect = interpolate
         self.steps["validate_reference_inplace"].side_effect = validate
+        self.steps["interpolate_local_pops_inplace"].side_effect = repair_pops
         self.steps["apply_asr_inplace"].side_effect = apply_asr
         returned_report, details, reference = step2.bad_ch_time_detection_inplace(
             self.raw, report, flatlines,
@@ -168,7 +178,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.assertIs(returned_report, report)
         self.assertIs(details, self.asr_details)
         self.assertEqual(reference, "F3")
-        self.assertEqual(progression, ["interpolate", "validate", "asr"])
+        self.assertEqual(progression, ["interpolate", "validate", "pops", "asr"])
         self.assertAlmostEqual(self.raw._data[2, 0], 2e-6)
         np.testing.assert_allclose(self.raw._data[2, 1:], 1e-6, rtol=0, atol=1e-20)
         self.assertEqual(self.raw.info["bads"], ["C3"])
