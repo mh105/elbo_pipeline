@@ -294,15 +294,20 @@ class TestASRWrapper(unittest.TestCase):
         geometry = step2._spline_geometry(raw)
         target = raw.ch_names.index("Fp1")
         reference = raw.ch_names.index("F3")
-        for start, stop, invalid in [
-            (1000, 1100, [target]), (1100, 1200, [target, reference]),
-        ]:
-            donors = [i for i in geometry["picks"]
-                      if raw.ch_names[i] not in raw.info["bads"] and i not in invalid]
-            weights = step2._spline_weights(geometry, donors, [target])
-            np.testing.assert_allclose(raw._data[target, start:stop],
-                                       (weights @ corrected[donors, start:stop])[0],
-                                       rtol=0, atol=1e-15)
+        # The reference's original flat interval overlaps Fp1's, so it donates
+        # nowhere in it; 0.25-s fades blend the estimate in and out.
+        donors = [i for i in geometry["picks"]
+                  if raw.ch_names[i] not in raw.info["bads"] and i not in [target, reference]]
+        weights = step2._spline_weights(geometry, donors, [target])
+        estimate = (weights @ corrected[donors, 1000:1200])[0]
+        weight = np.ones(200)
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(62) + 0.5) / 62)
+        weight[:62], weight[-62:] = rise, rise[::-1]
+        np.testing.assert_allclose(
+            raw._data[target, 1000:1200],
+            weight * estimate + (1 - weight) * corrected[target, 1000:1200],
+            rtol=0, atol=1e-15,
+        )
         np.testing.assert_array_equal(raw._data[reference], 0)
         np.testing.assert_array_equal(raw._data[target, :1000], corrected[target, :1000])
         np.testing.assert_array_equal(raw._data[target, 1200:], corrected[target, 1200:])

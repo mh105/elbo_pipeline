@@ -57,6 +57,19 @@ def mne_reconstruction(raw, bads):
     return expected
 
 
+def faded(original, repaired, start, stop, fade_in=True, fade_out=True, sfreq=250):
+    """One channel's samples with the repair blended in by 0.25-s raised cosines
+    at the requested interval ends."""
+    weight = np.ones(stop - start)
+    length = min(int(round(0.25 * sfreq)), (stop - start) // 2)
+    rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
+    if fade_in:
+        weight[:length] = rise
+    if fade_out:
+        weight[stop - start - length:] = rise[::-1]
+    return weight * repaired[start:stop] + (1 - weight) * original[start:stop]
+
+
 class TestSphericalSpline(unittest.TestCase):
     def test_weights_match_mne_for_original_indices_and_float64(self):
         raw = make_raw()
@@ -97,16 +110,27 @@ class TestSphericalSpline(unittest.TestCase):
             raw._data[NAMES.index(name), 450:550] = 0
         flatlines = flatlines_for(raw, spans)
         original = raw.copy()
-        # The mean repairs the bad T7 too; the in-place repair leaves it as it is.
+        # The mean repairs the bad T7 too, configuration by configuration.
         reconstruction = mne_reconstruction(original, ["T7"])
-        expected = original.copy()
         intervals = [(200, 400, ["F7"]), (400, 450, ["F7", "F3"]),
                      (550, 600, ["F7", "F3"]), (600, 800, ["F3"])]
         for start, stop, local in intervals:
             repaired = mne_reconstruction(original, ["T7"] + local)
             rows = [raw.ch_names.index(name) for name in ["T7"] + local]
             reconstruction._data[rows, start:stop] = repaired._data[rows, start:stop]
-            expected._data[rows[1:], start:stop] = repaired._data[rows[1:], start:stop]
+        # In place, T7 stays as it is, and each channel's interval takes one donor
+        # set without either overlapping channel. It fades only where it meets
+        # kept data, not at the dropout.
+        both = mne_reconstruction(original, ["T7", "F7", "F3"])
+        expected = original.copy()
+        for name, start, stop, fade_in, fade_out in [
+            ("F7", 200, 450, True, False), ("F7", 550, 600, False, True),
+            ("F3", 400, 450, True, False), ("F3", 550, 800, False, True),
+        ]:
+            row = raw.ch_names.index(name)
+            expected._data[row, start:stop] = faded(
+                original._data[row], both._data[row], start, stop, fade_in, fade_out
+            )
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, raw.info["bads"], flatlines, geometry)
         self.assertTrue(np.isfinite(mean).all())
@@ -134,7 +158,7 @@ class TestSphericalSpline(unittest.TestCase):
         expected = raw.copy()
         repaired = mne_reconstruction(raw, ["F7", "F3"])
         row = raw.ch_names.index("F3")
-        expected._data[row, 200:400] = repaired._data[row, 200:400]
+        expected._data[row, 200:400] = faded(raw._data[row], repaired._data[row], 200, 400)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         self.assertEqual(raw.info["bads"], ["F7", "EOG"])
@@ -174,6 +198,8 @@ class TestSphericalSpline(unittest.TestCase):
         mean = step2._robust_mean(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
+        for row in rows:  # In place, the 100-sample spans are fades end to end.
+            expected._data[row, 450:550] = faded(raw._data[row], repaired._data[row], 450, 550)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         self.assertGreater(np.abs(raw._data[rows, 450:550]).max(), 0)
@@ -188,10 +214,35 @@ class TestSphericalSpline(unittest.TestCase):
         expected._data[row, 100:300] = repaired._data[row, 100:300]
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, [], flatlines, geometry)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
+        expected._data[row, 100:300] = faded(raw._data[row], repaired._data[row], 100, 300)
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
+
+    def test_requires_the_native_reference(self):
+        raw = make_raw()
+        row = raw.ch_names.index("F7")
+        raw._data[row, 100:300] = 0
+        flatlines = flatlines_for(raw, {"F7": [[100, 300]]})
+        eeg = slice(0, len(NAMES))
+        average, moved = raw.copy(), raw.copy()
+        average._data[eeg] -= average._data[eeg].mean(axis=0)
+        moved._data[eeg] -= moved._data[NAMES.index("FC1")].copy()
+        # The default is the saved native reference Cz, no longer zero in either.
+        for name, data in [("average", average), ("moved", moved)]:
+            with self.subTest(name=name):
+                original = data.get_data()
+                with self.assertRaisesRegex(ValueError, "not entirely zero"):
+                    step2.interpolate_local_flatline_inplace(data, flatlines)
+                np.testing.assert_array_equal(data.get_data(), original)
+        step2.interpolate_local_flatline_inplace(moved, flatlines, reference_channel="FC1")
+        np.testing.assert_array_equal(moved._data[raw.ch_names.index("FC1")], 0)
+        # Before validation moves it, a bad native reference still qualifies.
+        raw.info["bads"] = ["Cz"]
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        self.assertGreater(np.abs(raw._data[row, 150:250]).min(), 0)
+        np.testing.assert_array_equal(raw._data[raw.ch_names.index("Cz")], 0)
 
     def test_long_recording_is_applied_in_chunks(self):
         raw = make_raw(n_times=17000)
@@ -207,7 +258,7 @@ class TestSphericalSpline(unittest.TestCase):
         flatlines = flatlines_for(raw, {"F7": [[100, 16900]]})
         expected = raw.copy()
         repaired = mne_reconstruction(raw, ["T7", "F7"])
-        expected._data[row, 100:16900] = repaired._data[row, 100:16900]
+        expected._data[row, 100:16900] = faded(raw._data[row], repaired._data[row], 100, 16900)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
 

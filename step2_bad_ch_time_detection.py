@@ -78,10 +78,11 @@ interpolated) and adds the final flags to raw.info["bads"]; the data keep the
 native reference, and the robust mean is returned in its details. RANSAC
 remains available separately and is not used in this iteration. With the bad
 channels final, interpolate_local_flatline_inplace repairs the local flat
-intervals of the good channels from the other good channels. If the native
-reference is itself bad, validate_reference_inplace then re-references the
-data to the nearest good one of its five nearest electrodes, or raises if all
-five are bad.
+intervals of the good channels from the other good channels: each interval
+takes one set of spline donors, the good channels not locally flat in it, and
+fades in and out over 0.25 s where it meets kept data. If the native reference
+is itself bad, validate_reference_inplace then re-references the data to the
+nearest good one of its five nearest electrodes, or raises if all five are bad.
 
 apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
@@ -3409,6 +3410,59 @@ def bad_ch_under_robust_ref(
     return robust_bad_ch_report
 
 
+def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments):
+    """Repair channels' intervals in place by spherical splines, each interval
+    from one set of donors.
+
+    targets maps EEG channel names to sorted, disjoint half-open sample
+    intervals to repair; samples in the global dropouts stay as they are.
+    invalid maps EEG channel names to intervals in which they are not genuine
+    donors, such as their flat intervals. An interval's donors are the good EEG
+    channels with no target or invalid interval overlapping it, read from the
+    input: every channel repaired in that interval is excluded, so no repaired
+    trace is a donor, and switching donors cannot put steps inside an interval.
+    A 0.25-s raised-cosine fade blends the estimate in or out at each end that
+    meets kept data, but not at the recording edges or a global dropout, which
+    have none.
+    """
+    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
+    sample_chunk = 8192
+    geometry = _spline_geometry(raw)
+    good = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]]
+    dropout_starts = {start for start, _ in global_segments}
+    dropout_stops = {stop for _, stop in global_segments}
+    fade = int(round(0.25 * raw.info["sfreq"]))
+    targets = {name: _subtract_segments(segments, global_segments)
+               for name, segments in targets.items()}
+
+    def overlaps(segments, start, stop):
+        return any(first < stop and last > start for first, last in segments)
+
+    for name, segments in targets.items():
+        target = raw.ch_names.index(name)
+        for start, stop in segments:
+            unavailable = {other for record in (targets, invalid)
+                           for other, spans in record.items()
+                           if overlaps(spans, start, stop)}
+            donors = [i for i in good if raw.ch_names[i] not in unavailable]
+            weights = _spline_weights(geometry, donors, [target])
+            weight = np.ones(stop - start)
+            length = min(fade, (stop - start) // 2)
+            if length:
+                rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
+                if start > 0 and start not in dropout_stops:
+                    weight[:length] = rise
+                if stop < raw.n_times and stop not in dropout_starts:
+                    weight[-length:] = rise[::-1]
+            for first in range(start, stop, sample_chunk):
+                last = min(first + sample_chunk, stop)
+                part = weight[first - start:last - start]
+                estimate = (weights @ raw._data[donors, first:last])[0]
+                raw._data[target, first:last] = (
+                    part * estimate + (1 - part) * raw._data[target, first:last]
+                )
+
+
 def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None):
     """Interpolate the local flat intervals of the good EEG channels in place
     from the other good EEG channels; return None.
@@ -3418,41 +3472,34 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
     detect_flatline_inplace, whose alignment is validated. Repair its local
     intervals, widened by the reach of the 0.3 Hz high-pass, except inside the
     global dropouts it saved, which stay as they are. Channels in
-    raw.info["bads"] are neither repaired nor donors. Each set of channels
-    flat at the same time is repaired by spherical splines from the good
-    channels not flat then, read from the input, so a repaired trace is never
-    a donor; on native data the all-zero reference is a donor unless it is
-    bad. The EEG data lose rank within the repaired intervals. Bad labels,
-    annotations, non-EEG channels, and all other samples are unchanged.
+    raw.info["bads"] are neither repaired nor donors. Spherical splines
+    estimate each channel's interval from one set of donors: the good channels
+    with no local flat interval overlapping it, read from the input, so a
+    repaired trace is never a donor; on native data the all-zero reference is a
+    donor unless it is bad. A 0.25-s raised-cosine fade blends the estimate in
+    or out at each end that meets kept data, but not at the recording edges or
+    a global dropout. The EEG data lose rank where the estimate replaces them
+    fully. Bad labels, annotations, non-EEG channels, and all other samples are
+    unchanged.
 
-    After ASR, pass the effective reference_channel to keep its zero trace
-    unchanged if validation switched electrodes. Its original flat intervals
-    still exclude it from the donors.
+    Require the native reference: reference_channel, or by default the one
+    that detect_flatline_inplace resolved, flatlines["reference_channel"], must
+    be entirely zero, bad or not; its zero trace is never repaired. After ASR,
+    pass the effective reference_channel if validation switched electrodes:
+    the default then raises, as the original reference is no longer zero. The
+    effective reference's original flat intervals still exclude it from the
+    donors.
     """
-    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-    sample_chunk = 8192
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     _validate_flatlines(raw, flatlines)
-    reference_pick = None
-    if reference_channel is not None:
-        reference_channel = _reference_channel(raw, "native", reference_channel)
-        reference_pick = raw.ch_names.index(reference_channel)
-    geometry = _spline_geometry(raw)
-    bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
-    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
-        if flat:
-            invalid = np.union1d(np.asarray(bads, dtype=int), flat)
-            donors = geometry["picks"][~np.isin(geometry["picks"], invalid)]
-            targets = [pick for pick in flat if pick != reference_pick]
-            if not targets:
-                continue
-            weights = _spline_weights(geometry, donors, targets)
-            for first in range(start, stop, sample_chunk):
-                last = min(first + sample_chunk, stop)
-                raw._data[targets, first:last] = (
-                    weights @ raw._data[donors, first:last]
-                )
+    if reference_channel is None:
+        reference_channel = flatlines["reference_channel"]
+    reference_channel = _reference_channel(raw, "native", reference_channel)
+    local = dict(zip(flatlines["ch_names"], flatlines["segments"]))
+    targets = {name: segments for name, segments in local.items()
+               if name not in raw.info["bads"] and name != reference_channel}
+    _interpolate_local_intervals_inplace(raw, targets, local, flatlines["global_segments"])
 
 
 def validate_reference_inplace(raw, flatlines):
@@ -3461,9 +3508,11 @@ def validate_reference_inplace(raw, flatlines):
     channel name in effect.
 
     Run this after interpolate_local_flatline_inplace, once raw.info["bads"]
-    lists the final bad channels. The native reference is the one that
-    detect_flatline_inplace resolved, flatlines["reference_channel"], and must
-    still be entirely zero. A bad reference puts its artifacts into every
+    lists the final bad channels, so that a new reference's own flat spans are
+    repaired before every channel is referenced to it. The native reference is
+    the one that detect_flatline_inplace resolved,
+    flatlines["reference_channel"], and must still be entirely zero. A bad
+    reference puts its artifacts into every
     native-referenced channel; subtracting a good electrode's trace from every
     EEG channel, bads included, cancels them and makes that electrode the
     all-zero reference. The candidates are the five EEG channels, bad or not,
