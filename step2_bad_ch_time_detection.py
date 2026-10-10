@@ -3569,12 +3569,12 @@ def interpolate_local_pops_inplace(raw, flatlines):
     local = dict(zip(flatlines["ch_names"], flatlines["segments"]))
     global_segments = flatlines["global_segments"]
 
-    def pop_intervals(data):
+    def pop_intervals(raw_pop):
         """Map channels to the repair intervals of the pops bad_ch_by_pop finds
-        on data, and to their numbers of pops."""
-        bads = list(data.info["bads"])
-        _, pops = bad_ch_by_pop(data, flatlines=flatlines, return_details=True)
-        data.info["bads"] = bads  # The bad labels are final; pops are only repaired.
+        on raw_pop, and to their numbers of pops."""
+        bads = list(raw_pop.info["bads"])
+        _, pops = bad_ch_by_pop(raw_pop, flatlines=flatlines, return_details=True)
+        raw_pop.info["bads"] = bads  # The bad labels are final; pops are only repaired.
         intervals, counts = {}, {}
         for name, times in pops["pop_times_s"].items():
             # A pop's time is the sample before its first confirmed jump.
