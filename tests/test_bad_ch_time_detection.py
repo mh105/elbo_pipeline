@@ -139,23 +139,23 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             raw._data[2, 0] = 5e-6
             progression.append("interpolate")
 
-        def validate(raw, spans):
+        def repair_pops(raw, spans):
             self.assertEqual(progression, ["interpolate"])
+            self.assertIs(raw, self.raw)
+            self.assertIs(spans, flatlines)
+            np.testing.assert_array_equal(raw.get_data(picks=["Cz"]), 0)
+            progression.append("pops")
+
+        def validate(raw, spans):
+            self.assertEqual(progression, ["interpolate", "pops"])
             self.assertIs(raw, self.raw)
             self.assertIs(spans, flatlines)
             raw._data -= raw._data[0].copy()
             progression.append("validate")
             return "F3"
 
-        def repair_pops(raw, spans):
-            self.assertEqual(progression, ["interpolate", "validate"])
-            self.assertIs(raw, self.raw)
-            self.assertIs(spans, flatlines)
-            np.testing.assert_array_equal(raw.get_data(picks=["F3"]), 0)
-            progression.append("pops")
-
         def apply_asr(raw, reference, spans):
-            self.assertEqual(progression, ["interpolate", "validate", "pops"])
+            self.assertEqual(progression, ["interpolate", "pops", "validate"])
             self.assertIs(raw, self.raw)
             self.assertEqual(reference, "F3")
             self.assertIs(spans, flatlines)
@@ -177,7 +177,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.assertIs(returned_report, report)
         self.assertIs(details, self.asr_details)
         self.assertEqual(reference, "F3")
-        self.assertEqual(progression, ["interpolate", "validate", "pops", "asr"])
+        self.assertEqual(progression, ["interpolate", "pops", "validate", "asr"])
         self.assertAlmostEqual(self.raw._data[2, 0], 2e-6)
         np.testing.assert_allclose(self.raw._data[2, 1:], 1e-6, rtol=0, atol=1e-20)
         self.assertEqual(self.raw.info["bads"], ["C3"])
