@@ -47,40 +47,25 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         }
         self.filter = stack.enter_context(patch.object(mne.io.BaseRaw, "filter"))
 
-    def test_optional_inputs_distinguish_none_from_supplied_empty_dictionaries(self):
-        for has_report in (False, True):
-            for has_flatlines in (False, True):
-                with self.subTest(has_report=has_report, has_flatlines=has_flatlines):
-                    for mock in self.steps.values():
-                        mock.reset_mock()
-                    supplied_report = {} if has_report else None
-                    supplied_flatlines = {} if has_flatlines else None
-                    report, details, reference = step2.bad_ch_time_detection_inplace(
-                        self.raw, supplied_report, supplied_flatlines,
-                    )
-                    if has_report:
-                        self.assertIs(report, supplied_report)
-                    self.assertIs(details, self.asr_details)
-                    self.assertEqual(reference, "F3")
-                    initialized = not (has_report and has_flatlines)
-                    self.assertEqual(self.steps["bad_ch_by_nan"].call_count, int(initialized))
-                    self.assertEqual(self.steps["bad_ch_by_flatline"].call_count, int(initialized))
-                    self.assertEqual(self.steps["detect_flatline_inplace"].call_count,
-                                     int(not has_flatlines))
-                    self.assertEqual("nan" in report, initialized)
-                    self.assertEqual("flatline" in report, initialized)
-                    expected_flatlines = (supplied_flatlines if has_flatlines
-                                          else self.detected_flatlines)
-                    if initialized:
-                        self.assertIs(self.steps["bad_ch_by_flatline"].call_args.kwargs["flatlines"],
-                                      expected_flatlines)
-                    for name in ("bad_ch_by_voltage", "bad_ch_by_HFnoise",
-                                 "bad_ch_by_pop", "bad_ch_by_small"):
-                        call = self.steps[name].call_args
-                        self.assertIs(call.args[0], self.raw)
-                        self.assertIs(call.kwargs["flatlines"], expected_flatlines)
-                    self.assertIs(self.steps["apply_asr_inplace"].call_args.args[2],
-                                  expected_flatlines)
+    def test_supplied_inputs_are_reused_without_initial_detection(self):
+        supplied_report = {"flatline": ["P3"]}
+        supplied_flatlines = self.detected_flatlines
+        report, details, reference = step2.bad_ch_time_detection_inplace(
+            self.raw, supplied_report, supplied_flatlines,
+        )
+        self.assertIs(report, supplied_report)
+        self.assertIs(details, self.asr_details)
+        self.assertEqual(reference, "F3")
+        self.assertEqual(report["flatline"], ["P3"])
+        self.assertNotIn("nan", report)
+        for name in ("bad_ch_by_nan", "detect_flatline_inplace", "bad_ch_by_flatline"):
+            self.steps[name].assert_not_called()
+        for name in ("bad_ch_by_voltage", "bad_ch_by_HFnoise",
+                     "bad_ch_by_pop", "bad_ch_by_small"):
+            call = self.steps[name].call_args
+            self.assertIs(call.args[0], self.raw)
+            self.assertIs(call.kwargs["flatlines"], supplied_flatlines)
+        self.assertIs(self.steps["apply_asr_inplace"].call_args.args[2], supplied_flatlines)
         self.filter.assert_not_called()
 
     def test_preserves_supplied_report_and_appends_robust_results_by_criterion(self):
@@ -109,20 +94,13 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.assertNotIn("correlation", plotted[0])
         self.filter.assert_not_called()
 
-    def test_missing_flatline_metadata_preserves_prior_flags_and_merges_new_names(self):
-        self.raw.info["bads"] = ["C3"]
-        for new_names, expected in (([], ["C3"]), (["C3", "P3"], ["C3", "P3"])):
-            with self.subTest(new_names=new_names):
-                report = {"flatline": ["C3"]}
-                self.steps["bad_ch_by_flatline"].return_value = {"flatline": new_names}
-
-                returned_report, _, _ = step2.bad_ch_time_detection_inplace(
-                    self.raw, report, flatlines=None,
-                )
-
-                self.assertIs(returned_report, report)
-                self.assertEqual(report["flatline"], expected)
-                self.assertEqual(self.raw.info["bads"], ["C3"])
+    def test_both_initial_inputs_are_required_before_any_processing(self):
+        for kwargs in ({}, {"bad_ch_report": {}}, {"flatlines": {}}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+                step2.bad_ch_time_detection_inplace(self.raw, **kwargs)
+        for mock in self.steps.values():
+            mock.assert_not_called()
+        self.filter.assert_not_called()
 
     def test_same_raw_carries_cleaning_changes_and_validated_reference_to_asr(self):
         report, flatlines = {}, {}

@@ -4023,27 +4023,15 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
     return details
 
 
-def bad_ch_time_detection_inplace(raw, bad_ch_report=None, flatlines=None):
+def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     """Detect bad channels, repair the good channels' electrode pops, and apply
     ASR in place; return report, ASR details, and the effective reference channel.
 
     Supply preloaded native-reference data. Line-noise removal and filtering
-    remain the caller's responsibility. Reuse the initial report and flatlines
-    detected before filtering when available. If either is missing, run the
-    NaN and flatline criteria, detecting flat spans only when flatlines is None.
-    A supplied report is updated in place. Retain the detectors' existing plots.
+    remain the caller's responsibility. Require the initial bad_ch_report and
+    flatlines detected before filtering. Update the supplied report in place.
+    Retain the detectors' existing plots.
     """
-    if bad_ch_report is None or flatlines is None:
-        if bad_ch_report is None:
-            bad_ch_report = {}
-        bad_ch_report.update(bad_ch_by_nan(raw))
-        if flatlines is None:
-            flatlines = detect_flatline_inplace(raw)
-        flatline_names = bad_ch_by_flatline(raw, flatlines=flatlines)["flatline"]
-        bad_ch_report["flatline"] = list(dict.fromkeys(
-            bad_ch_report.get("flatline", []) + flatline_names
-        ))
-
     bad_ch_report.update(bad_ch_by_voltage(raw, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_HFnoise(raw, flatlines=flatlines))
     bad_ch_report.update(bad_ch_by_pop(raw, flatlines=flatlines))
