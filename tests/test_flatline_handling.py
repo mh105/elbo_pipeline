@@ -175,6 +175,45 @@ class TestBadAnnotationGapPolicy(unittest.TestCase):
         self.assertEqual(annotation_spans(raw, "BAD_voltage_mask"), [[310, 320]])
         self.assertEqual(annotation_spans(raw, "BAD_by_close_gap"), [[110, 310]])
 
+    def test_rejection_does_not_pad_existing_bad_annotations(self):
+        for label in ("BAD_voltage_mask", "bad_voltage_mask", "BAD_by_flatline", "BAD_manual"):
+            with self.subTest(label=label):
+                raw = native_raw()
+                raw.set_annotations(mne.Annotations([5], [0.1], [label]))
+                before = raw.annotations.copy()
+                expected = np.zeros(raw.n_times, bool)
+                expected[500:510] = True
+                np.testing.assert_array_equal(step2._rejected_samples(raw, widen_samples=66),
+                                              expected)
+                self.assertEqual(raw.annotations, before)
+
+    def test_rejection_closes_gaps_after_padding_temporary_spans(self):
+        raw = native_raw()
+        raw.set_annotations(mne.Annotations([1], [0.1], ["BAD_by_flatline"]))
+        before = raw.annotations.copy()
+        for start in (410, 411):
+            with self.subTest(start=start):
+                spans = np.array([[start, start+10]])
+                original = spans.copy()
+                expected = np.zeros(raw.n_times, bool)
+                expected[100:110] = True
+                expected[start-100:start+110] = True
+                if start == 410:  # Exactly 2 s remain after padding; 411 leaves 2.01 s.
+                    expected[110:310] = True
+                np.testing.assert_array_equal(step2._rejected_samples(raw, spans, 100), expected)
+                np.testing.assert_array_equal(spans, original)
+                self.assertEqual(raw.annotations, before)
+
+    def test_rejection_joins_padded_spans_transitively_with_mixed_bad_annotations(self):
+        raw = native_raw()
+        raw.set_annotations(mne.Annotations([1, 7.2], [0.1, 0.1],
+                                            ["BAD_by_flatline", "BAD_manual"]))
+        before = raw.annotations.copy()
+        expected = np.zeros(raw.n_times, bool)
+        expected[100:730] = True
+        np.testing.assert_array_equal(step2._rejected_samples(raw, [[410, 420]], 100), expected)
+        self.assertEqual(raw.annotations, before)
+
 
 if __name__ == "__main__":
     unittest.main()

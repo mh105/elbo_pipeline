@@ -878,10 +878,12 @@ def _temporary_voltage_mask(
 
     With reference_channel, require that named native reference, as
     bad_ch_by_flatline does, so that other all-zero channels do not raise.
-    shared is _mask_inputs(raw), computed here with the shared defaults if None.
+    shared is _mask_inputs(raw), computed here with the shared
+    defaults if None.
     Its threshold and window determine the exceedances; the current eligible
     pool and channel_fraction_cutoff determine the exact mask. _rejected_samples
-    fills gaps <=2 s across these spans and existing global BAD annotations.
+    applies the consumer's padding to these spans, then fills gaps <=2 s
+    between them and existing global BAD annotations.
     """
     if (
         not np.isfinite(channel_fraction_cutoff)
@@ -915,32 +917,27 @@ def _rejected_samples(raw, mask_spans=(), widen_samples=0):
     temporary voltage mask's half-open sample intervals.
 
     Annotations are converted to samples by MNE's own routine, so that the
-    result matches get_data(reject_by_annotation="omit"), including its
+    bounds match get_data(reject_by_annotation="omit"), including its
     rounding and its skipping of empty spans, without parsing the
-    annotations again for every window. widen_samples extends the mask spans
-    and BAD_voltage_mask annotations on each side within the data. Flatline
-    spans have already been bridged before filtering and are not widened.
-    Other BAD spans are omitted as annotated. Fill gaps <=2 s between base
-    global BAD periods and temporary spans using the same annotation policy,
-    without modifying raw; filter reach does not change the gap decision.
+    annotations again for every window. widen_samples extends only the supplied
+    temporary mask spans on each side within the data. Existing BAD annotations
+    keep their bounds, including BAD_voltage_mask and BAD_by_flatline. Then
+    fill gaps <=2 s between global BAD periods and the widened temporary spans.
+    This changes only the returned exclusion mask; raw and mask_spans are
+    unchanged.
     """
     onsets, ends = _annotations_starts_stops(raw, ["BAD"])
-    descriptions = [description for description in raw.annotations.description
-                    if description.upper().startswith("BAD")]
-    widen = np.where(
-        np.isin(descriptions, ("BAD_voltage_mask",)), widen_samples, 0
-    )
+    mask_spans = _widen_segments(mask_spans, widen_samples, raw.n_times)
     bounds = np.concatenate([
-        np.column_stack([onsets - widen, ends + widen]),
-        np.reshape(np.asarray(mask_spans, dtype=int), (-1, 2))
-        + [-widen_samples, widen_samples],
+        np.column_stack([onsets, ends]),
+        np.asarray(mask_spans, dtype=int).reshape(-1, 2),
         np.asarray(_bad_annotation_gaps(raw, mask_spans), dtype=int).reshape(-1, 2),
     ])
-    rejected = np.zeros(raw.n_times, dtype=bool)
+    rejected_samples = np.zeros(raw.n_times, dtype=bool)
     for start, stop in np.clip(bounds, 0, raw.n_times):
         if start < stop:
-            rejected[start:stop] = True
-    return rejected
+            rejected_samples[start:stop] = True
+    return rejected_samples
 
 
 def _retained_windows(rejected, window_samples, n_windows):
@@ -1232,9 +1229,10 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
 
     Require sfreq > 100 Hz and re-referenced data. Find the temporary voltage
     mask, select channels and complete windows as in bad_ch_by_std,
-    band-limit the selected channels with _band_limit, and widen the masks
-    by the filters' reach (_rejected_samples). Return the rejected samples,
-    picks, window_samples, n_windows, and the band-limited data of picks. In
+    band-limit the selected channels with _band_limit, and widen temporary
+    voltage-mask spans by the filters' reach (_rejected_samples). Existing BAD
+    annotations and channel flatline spans receive no filter padding. Return the
+    rejected samples, picks, window_samples, n_windows, and the band-limited data. In
     a robust-reference pass, _pass["band_limited"] supplies that data
     instead, as the band-limited native channels minus the band-limited
     robust mean (bad_ch_under_robust_ref).
@@ -2290,10 +2288,10 @@ def bad_ch_by_HFnoise(
     that violate in every scorable (retained, non-flat) window, since no
     non-violating baseline is available.
 
-    As in PREP, the low-pass filters the whole record once; each voltage-mask
-    span is widened on both sides by the filter's reach (0.66 s), as in
+    As in PREP, the low-pass filters the whole record once; each temporary
+    voltage-mask span is widened on both sides by the filter's reach (0.66 s), as in
     bad_ch_by_correlation, so masked bursts stay out of the windows scored.
-    Flatline annotations are not widened. Accept the native reference or
+    Existing BAD annotations are not widened. Accept the native reference or
     re-referenced data as in bad_ch_by_voltage. Temporary masking and the
     occurrence denominator follow bad_ch_by_std. Require sfreq > 100 Hz to
     evaluate noise above 50 Hz, and a recording longer than the 0.66 s
@@ -2890,10 +2888,11 @@ def bad_ch_by_correlation(
     band-limited to 1-45 Hz by _band_limited_windows() (via _band_limit).
     Require re-referenced data as in bad_ch_by_std, and sfreq > 100 Hz.
     Exclude existing bads and non-EEG channels. Compute the temporary voltage
-    mask on the input, as in bad_ch_by_std, then widen each masked span on both
+    mask on the input, as in bad_ch_by_std, then widen those temporary spans on both
     sides by the filters' reach, since filtering spreads masked artifacts into
-    neighbouring windows. Retain complete windows that overlap no widened mask
-    or BAD annotation. Raise if an evaluated channel is constant in a retained
+    neighbouring windows. Existing BAD annotations are not padded. Retain complete
+    windows that overlap no rejected sample after global gap closing. Raise if an
+    evaluated channel is constant in a retained
     window, in the input or after filtering: its r would be undefined, and
     re-referenced data should never be constant. Add detections to
     raw.info["bads"], preserving existing labels without duplicates. Input data
