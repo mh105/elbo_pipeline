@@ -118,6 +118,18 @@ class TestPublicFlatlineStages(unittest.TestCase):
         np.testing.assert_array_equal(details["flat"][row], [0, 0, 1, 0])
         self.assertNotIn("E2", raw.info["bads"])
 
+    def test_flatline_reference_checks_share_one_zero_scan(self):
+        raw = native_raw()
+        raw._data[0] = 0  # A dead electrode alongside the named Cz reference.
+        flatlines = flatlines_for(raw, {"E0": [[0, raw.n_times]]})
+        with patch.object(step2, "_zero_eeg_channels", wraps=step2._zero_eeg_channels) as zeros:
+            report = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
+        self.assertEqual(report, {"flatline": ["E0"]})
+        uncached = [call for call in zeros.call_args_list
+                    if call.kwargs.get("known_zeros", call.args[2] if len(call.args) > 2 else None)
+                    is None]
+        self.assertEqual(len(uncached), 1)
+
     def test_flatline_denominator_excludes_the_temporary_voltage_mask(self):
         raw = native_raw()  # 12 channels besides Cz, four 2-s windows.
         raw._data[0, WINDOW:2 * WINDOW] = 3e-6  # E0 flat in window 1.

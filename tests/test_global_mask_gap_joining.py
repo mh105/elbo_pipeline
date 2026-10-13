@@ -58,7 +58,7 @@ class TestVoltageGapJoining(unittest.TestCase):
     def test_custom_public_settings_match_cached_temporary_mask(self):
         raw = native_raw()
         raw._data[0, [100, 325]] = 126e-6
-        shared = step2._mask_inputs(raw, voltage_threshold_uv=125, window_length=0.25)
+        shared = step2._voltage_mask_inputs(raw, voltage_threshold_uv=125, window_length=0.25)
         spans, _ = step2._temporary_voltage_mask(
             raw, reference_channel="Cz", shared=shared, channel_fraction_cutoff=0.1,
         )
@@ -73,7 +73,7 @@ class TestVoltageGapJoining(unittest.TestCase):
     def test_cache_reuses_flags_but_recalculates_the_eligible_denominator(self):
         raw = native_raw()
         raw._data[:2, 101] = 501e-6  # Two of eight equals the cutoff.
-        shared = step2._mask_inputs(raw)
+        shared = step2._voltage_mask_inputs(raw)
         with patch.object(raw, "get_data", side_effect=AssertionError("Data rescanned")):
             spans, _ = step2._temporary_voltage_mask(raw, shared=shared)
             self.assertEqual(spans.shape, (0, 2))
@@ -98,7 +98,7 @@ class TestVoltageGapJoining(unittest.TestCase):
         raw._data[7] = np.nan
         raw.info["bads"] = ["E7"]
         raw._data[:2, 101] = 501e-6
-        shared = step2._mask_inputs(raw)
+        shared = step2._voltage_mask_inputs(raw)
         spans, _ = step2._temporary_voltage_mask(raw, shared=shared)
         np.testing.assert_array_equal(spans, [[100, 110]])
         step2.mask_segment_by_voltage(raw)
@@ -130,7 +130,7 @@ class TestVoltageGapJoining(unittest.TestCase):
             {"window_length": 0.001}, {"window_length": np.nan},
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
-                step2._mask_inputs(raw, **settings)
+                step2._voltage_mask_inputs(raw, **settings)
 
     def test_cropped_annotation_time_base_matches_temporary_spans(self):
         for meas_date in (None, datetime(2026, 10, 9, tzinfo=timezone.utc)):

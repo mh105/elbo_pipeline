@@ -140,7 +140,7 @@ from step1_line_noise_removal import (  # noqa: F401
 def _zero_eeg_channels(raw, picks, known_zeros=None):
     """Names of the picked channels whose samples are all exactly zero.
 
-    known_zeros, the set of such EEG names from _mask_inputs,
+    known_zeros, the set of such EEG names from _voltage_mask_inputs,
     replaces the scan.
     """
     if known_zeros is not None:
@@ -168,7 +168,8 @@ def _reference_channel(raw, reference, reference_channel=None, known_zeros=None)
     zero. Return its name. "average": no EEG channel, bad or not, may be
     entirely zero; return None. "either": return the one entirely zero non-bad
     EEG channel, or None if there is none; raise if there are several.
-    known_zeros is passed to _zero_eeg_channels.
+    known_zeros can supply cached names of EEG channels that are zero throughout
+    this Raw, avoiding another sample scan. It does not contain local flat spans.
     """
     eeg_all = mne.pick_types(raw.info, eeg=True, exclude=[])
     eeg_good = mne.pick_types(raw.info, eeg=True, exclude="bads")
@@ -795,9 +796,10 @@ def mask_segment_by_voltage(
 
     Detectors and plots use the same implementation (_temporary_voltage_mask)
     without annotating their input. Robust-reference passes cache per-channel
-    inputs (_mask_inputs), then recalculate spans as bad labels change.
+    inputs (_voltage_mask_inputs), then recalculate spans as bad labels
+    change.
     """
-    shared = _mask_inputs(raw, voltage_threshold_uv, window_length)
+    shared = _voltage_mask_inputs(raw, voltage_threshold_uv, window_length)
     spans, _ = _temporary_voltage_mask(
         raw, require_average=require_average, reference_channel=reference_channel,
         shared=shared, channel_fraction_cutoff=channel_fraction_cutoff,
@@ -842,16 +844,18 @@ def _voltage_mask_spans(
     return spans
 
 
-def _mask_inputs(
+def _voltage_mask_inputs(
     raw, voltage_threshold_uv=_VOLTAGE_MASK_THRESHOLD_UV,
     window_length=_VOLTAGE_MASK_WINDOW_LENGTH,
 ):
-    """What the reference checks and the voltage mask read
-    from the data, for every EEG channel, bad or not.
+    """Compute reusable reference and voltage-mask inputs
+    from every EEG channel, bad or not.
 
-    Return the EEG picks, the names of the entirely zero ones (zeros), and
-    each one's finiteness and short-window exceedances. The shared defaults
-    are 0.1-s windows and +/-500 µV. Only bad labels change between detectors
+    Return the EEG picks, the names of channels zero throughout this Raw (zeros),
+    and each one's finiteness and short-window exceedances. Reference checks
+    reuse zeros to avoid rescanning samples; this cache contains no local flat
+    spans. The shared defaults are 0.1-s windows and +/-500 µV.
+    Only bad labels change between detectors
     of a robust-reference pass, so the pass computes this once; standalone
     detectors and annotation creation use the same preparation. Custom
     voltage_threshold_uv and window_length apply to these cached inputs.
@@ -878,7 +882,7 @@ def _temporary_voltage_mask(
 
     With reference_channel, require that named native reference, as
     bad_ch_by_flatline does, so that other all-zero channels do not raise.
-    shared is _mask_inputs(raw), computed here with the shared
+    shared is _voltage_mask_inputs(raw), computed here with the shared
     defaults if None.
     Its threshold and window determine the exceedances; the current eligible
     pool and channel_fraction_cutoff determine the exact mask. _rejected_samples
@@ -894,7 +898,7 @@ def _temporary_voltage_mask(
         raise ValueError("A named native reference cannot be combined with "
                          "require_average.")
     if shared is None:
-        shared = _mask_inputs(raw)
+        shared = _voltage_mask_inputs(raw)
     if reference_channel is None:
         reference_channel = _reference_channel(
             raw, "average" if require_average else "either",
@@ -1240,7 +1244,7 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
     sfreq = raw.info["sfreq"]
     if sfreq <= 100:
         raise ValueError("The 45-50 Hz low-pass requires a sampling rate above 100 Hz.")
-    shared = _mask_inputs(raw) if _pass is None else _pass
+    shared = _voltage_mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
@@ -2036,18 +2040,24 @@ def bad_ch_by_flatline(
     follow the other window detectors, with flat and violates equal to the
     mapped segment mask in retained windows and NaN in excluded windows.
     """
-    reference_channel = _reference_channel(raw, "native", reference_channel)
+    shared = _voltage_mask_inputs(raw)
+    reference_channel = _reference_channel(
+        raw, "native", reference_channel, known_zeros=shared["zeros"]
+    )
     picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "native", reference_channel
+        raw, window_length, occurrence_cutoff, "native", reference_channel,
+        known_zeros=shared["zeros"],
     )
     if flatlines is None:
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
-    spans, _ = _temporary_voltage_mask(raw, reference_channel=reference_channel)
+    spans, _ = _temporary_voltage_mask(
+        raw, reference_channel=reference_channel, shared=shared
+    )
     rejected = _rejected_samples(raw, spans)
-    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     retained = _retained_windows(rejected, window_samples, n_windows)
+    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = flat[:, retained].sum(axis=1)
     n_retained = int(retained.sum())
     if return_details:
@@ -2213,7 +2223,7 @@ def bad_ch_by_std(
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    shared = _mask_inputs(raw) if _pass is None else _pass
+    shared = _voltage_mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
@@ -2322,7 +2332,7 @@ def bad_ch_by_HFnoise(
     sfreq = raw.info["sfreq"]
     if sfreq <= 100:
         raise ValueError("bad_ch_by_HFnoise requires a sampling rate above 100 Hz.")
-    shared = _mask_inputs(raw) if _pass is None else _pass
+    shared = _voltage_mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "either", known_zeros=shared["zeros"]
@@ -2466,7 +2476,7 @@ def bad_ch_by_BBnoise(
         raise ValueError("min_bad_bands must be an integer between 1 and 5.")
     if raw.info["sfreq"] / 2 < SPECTRAL_BANDS[-1][1]:
         raise ValueError("Sampling rate must cover all spectral bands through 45 Hz.")
-    shared = _mask_inputs(raw) if _pass is None else _pass
+    shared = _voltage_mask_inputs(raw) if _pass is None else _pass
     spans, _ = _temporary_voltage_mask(raw, require_average=True, shared=shared)
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
@@ -2773,7 +2783,7 @@ def bad_ch_by_small(
     """
     if not np.isfinite(robust_z_cutoff) or robust_z_cutoff <= 0:
         raise ValueError("robust_z_cutoff must be finite and greater than 0.")
-    shared = _mask_inputs(raw)
+    shared = _voltage_mask_inputs(raw)
     reference_channel = _reference_channel(
         raw, "native", reference_channel, known_zeros=shared["zeros"]
     )
@@ -3313,7 +3323,7 @@ def bad_ch_under_robust_ref(
             referenced._data[i] -= reference
         # Only bad labels change within a pass, so its detectors share one set
         # of reference checks and voltage-mask exceedances.
-        shared = _mask_inputs(referenced)
+        shared = _voltage_mask_inputs(referenced)
         shared["band_limited"] = (
             band_rows, band_native, _band_limit(reference[None], raw.info["sfreq"])[0],
             band_reach,
