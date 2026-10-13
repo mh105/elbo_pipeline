@@ -944,20 +944,25 @@ def _rejected_samples(raw, mask_spans=(), widen_samples=0):
     return rejected_samples
 
 
-def _retained_windows(rejected, window_samples, n_windows):
-    """Complete windows containing no rejected sample."""
-    windows = rejected[:n_windows * window_samples].reshape(n_windows, window_samples)
-    return ~windows.any(axis=1)
+def _retained_windows(rejected_samples, window_samples, n_windows):
+    """Return a Boolean mask over complete windows containing no rejected sample."""
+    rejected_windows = rejected_samples[:n_windows * window_samples].reshape(
+        n_windows, window_samples
+    )
+    return ~rejected_windows.any(axis=1)
 
 
-def _unmasked_windows(
-    raw, picks, window_samples, n_windows, rejected, *, return_start=False
+def _iterate_retained_windows(
+    raw, picks, window_samples, n_windows, rejected_samples, *, return_start=False
 ):
-    """Yield complete windows with no rejected sample
-    (_rejected_samples), without closing gaps.
+    """Iterate complete retained windows at their original sample positions.
+
+    Skip any window containing a rejected sample and ignore the partial tail.
+    Read each retained window's Raw data without changing it. With return_start,
+    yield (start_sample, data); otherwise yield data alone.
     """
-    retained = _retained_windows(rejected, window_samples, n_windows)
-    for start in (np.flatnonzero(retained) * window_samples).tolist():
+    retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
+    for start in (np.flatnonzero(retained_windows) * window_samples).tolist():
         data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
                             reject_by_annotation=None)
         yield (start, data) if return_start else data
@@ -1256,8 +1261,8 @@ def _band_limited_windows(raw, window_length, occurrence_cutoff, _pass=None):
         filtered, reach = _band_limit(
             raw.get_data(picks=picks, reject_by_annotation=None), sfreq
         )
-    rejected = _rejected_samples(raw, spans, reach)
-    return rejected, picks, window_samples, n_windows, filtered
+    rejected_samples = _rejected_samples(raw, spans, reach)
+    return rejected_samples, picks, window_samples, n_windows, filtered
 
 
 def _require_variance(values, names, what, start, sfreq):
@@ -2055,15 +2060,15 @@ def bad_ch_by_flatline(
     spans, _ = _temporary_voltage_mask(
         raw, reference_channel=reference_channel, shared=shared
     )
-    rejected = _rejected_samples(raw, spans)
-    retained = _retained_windows(rejected, window_samples, n_windows)
+    rejected_samples = _rejected_samples(raw, spans)
+    retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    counts = flat[:, retained].sum(axis=1)
-    n_retained = int(retained.sum())
+    counts = flat[:, retained_windows].sum(axis=1)
+    n_retained = int(retained_windows.sum())
     if return_details:
         details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
-        for start, data in _unmasked_windows(
-            raw, picks, window_samples, n_windows, rejected, return_start=True
+        for start, data in _iterate_retained_windows(
+            raw, picks, window_samples, n_windows, rejected_samples, return_start=True
         ):
             violates = flat[:, start // window_samples]
             index = _record_window_details(
@@ -2133,8 +2138,8 @@ def bad_ch_by_voltage(
     bads_before = list(raw.info["bads"])
     exclude = bads_before + ([] if reference_channel is None else [reference_channel])
     picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
-    retained = ~_rejected_samples(raw, spans)
-    if not retained.any():
+    retained_samples = ~_rejected_samples(raw, spans)
+    if not retained_samples.any():
         raise ValueError("No unmasked samples remain for channel detection.")
     exceed_fraction = np.empty(len(picks))
     if return_details:
@@ -2143,7 +2148,7 @@ def bad_ch_by_voltage(
             "exceed_fraction": exceed_fraction,
         }
     for row, pick in enumerate(picks):
-        scorable = retained.copy()
+        scorable = retained_samples.copy()
         for start, stop in local_flat.get(raw.ch_names[pick], []):
             scorable[start:stop] = False
         n_scorable = np.count_nonzero(scorable)
@@ -2229,7 +2234,7 @@ def bad_ch_by_std(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     order, neighbour_names = _nearest_channels(raw, picks)
-    rejected = _rejected_samples(raw, spans)
+    rejected_samples = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
@@ -2240,8 +2245,8 @@ def bad_ch_by_std(
             ("robust_std_uv", "log_ratio", "robust_z"),
         )
         details["neighbours"] = neighbour_names
-    for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, rejected, return_start=True
+    for start, data in _iterate_retained_windows(
+        raw, picks, window_samples, n_windows, rejected_samples, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         robust_std, log_std, z = np.full((3, len(picks)), np.nan)
@@ -2340,7 +2345,7 @@ def bad_ch_by_HFnoise(
     lowpass = _lowpass_45_hz(
         raw.get_data(picks=picks, reject_by_annotation=None), sfreq
     )
-    rejected = _rejected_samples(raw, spans, len(_lowpass_kernel(sfreq)) - 1)
+    rejected_samples = _rejected_samples(raw, spans, len(_lowpass_kernel(sfreq)) - 1)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
@@ -2351,8 +2356,8 @@ def bad_ch_by_HFnoise(
             raw, picks, window_samples, n_windows,
             ("ratio", "robust_z", "hf_mad_uv", "lf_mad_uv"),
         )
-    for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, rejected, return_start=True
+    for start, data in _iterate_retained_windows(
+        raw, picks, window_samples, n_windows, rejected_samples, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         ratio, hf_mad, lf_mad, z = np.full((4, len(picks)), np.nan)
@@ -2482,7 +2487,7 @@ def bad_ch_by_BBnoise(
         raw, window_length, occurrence_cutoff, "average", known_zeros=shared["zeros"]
     )
     order, neighbour_names = _nearest_channels(raw, picks)
-    rejected = _rejected_samples(raw, spans)
+    rejected_samples = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
@@ -2498,8 +2503,8 @@ def bad_ch_by_BBnoise(
             details[metric] = np.full(
                 (len(picks), n_windows, len(SPECTRAL_BANDS)), np.nan
             )
-    for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, rejected, return_start=True
+    for start, data in _iterate_retained_windows(
+        raw, picks, window_samples, n_windows, rejected_samples, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         # Welch needs a row to define its frequency grid even when
@@ -2641,8 +2646,8 @@ def bad_ch_by_pop(
     distances = np.linalg.norm(positions[:, None] - positions[None], axis=-1)
     np.fill_diagonal(distances, np.inf)
     neighbors = np.argsort(distances, axis=1)[:, :6]
-    retained = ~_rejected_samples(raw, spans)
-    retained_min = retained.sum() / sfreq / 60
+    rejected_samples = _rejected_samples(raw, spans)
+    retained_min = (~rejected_samples).sum() / sfreq / 60
     if retained_min == 0:
         raise ValueError("No unmasked samples remain for channel detection.")
     _validate_flatlines(raw, flatlines)
@@ -2653,12 +2658,11 @@ def bad_ch_by_pop(
     names = [raw.ch_names[pick] for pick in picks]
     # Samples each channel does not score: unretained, or in its local
     # flat intervals.
-    unretained = ~retained
     excluded = {}
     for name in names:
-        excluded[name] = unretained
+        excluded[name] = rejected_samples
         if len(local_flat.get(name, [])):
-            excluded[name] = unretained.copy()
+            excluded[name] = rejected_samples.copy()
             for start, stop in local_flat[name]:
                 excluded[name][start:stop] = True
     # Neighbours are read only around the candidate jumps.
@@ -2793,8 +2797,7 @@ def bad_ch_by_small(
     picks, window_samples, n_windows = _prepare_channel_windows(
         raw, window_length, occurrence_cutoff, "native", reference_channel, shared["zeros"]
     )
-    retained = _retained_windows(_rejected_samples(raw, spans), window_samples, n_windows)
-    _require_retained_windows(retained.sum())
+    rejected_samples = _rejected_samples(raw, spans)
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     donor_picks = np.sort(np.r_[picks, raw.ch_names.index(reference_channel)])
     target_rows = np.searchsorted(donor_picks, picks)
@@ -2802,6 +2805,7 @@ def bad_ch_by_small(
     configurations = {}
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
+    n_retained = 0
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows,
@@ -2811,7 +2815,10 @@ def bad_ch_by_small(
         details["flat"] = flat
         details["configuration_index"] = np.full(n_windows, -1, dtype=int)
         details["configurations"] = []
-    for index in np.flatnonzero(retained):
+    for start, data in _iterate_retained_windows(
+        raw, donor_picks, window_samples, n_windows, rejected_samples, return_start=True
+    ):
+        index = start // window_samples
         eligible = np.ones(len(donor_picks), dtype=bool)
         eligible[target_rows] = ~flat[:, index]
         key = tuple(donor_picks[eligible])
@@ -2828,9 +2835,6 @@ def bad_ch_by_small(
                     "ch_names": [raw.ch_names[pick] for pick in key],
                 })
         configuration, weights = configurations[key]
-        start = index * window_samples
-        data = raw.get_data(picks=donor_picks, start=start, stop=start + window_samples,
-                            reject_by_annotation=None)
         observed_mad = _mad(data[target_rows], axis=1)
         predicted_mad = _mad(weights @ data, axis=1)
         valid = predicted_mad > np.finfo(float).eps
@@ -2845,6 +2849,7 @@ def bad_ch_by_small(
         violates = z < -robust_z_cutoff
         counts += violates
         n_scorable += scorable
+        n_retained += 1
         if return_details:
             _record_window_details(
                 details, start, window_samples, data[target_rows], violates
@@ -2855,6 +2860,7 @@ def bad_ch_by_small(
             details["ratio"][:, index] = ratio
             details["robust_z"][:, index] = z
             details["configuration_index"][index] = configuration
+    _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(
         raw, picks, counts, n_scorable, occurrence_cutoff
     )
@@ -2929,7 +2935,7 @@ def bad_ch_by_correlation(
     if not np.isfinite(quantile) or not 0 <= quantile <= 1:
         raise ValueError("quantile must be between 0 and 1.")
     # Filter a copy of the EEG data to 1-45 Hz for correlation scoring.
-    rejected, picks, window_samples, n_windows, filtered = _band_limited_windows(
+    rejected_samples, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff, _pass
     )
     names = np.array([raw.ch_names[i] for i in picks], dtype=object)
@@ -2941,8 +2947,8 @@ def bad_ch_by_correlation(
         details = _init_window_details(
             raw, picks, window_samples, n_windows, ("score",)
         )
-    for start, data in _unmasked_windows(
-        raw, picks, window_samples, n_windows, rejected, return_start=True
+    for start, data in _iterate_retained_windows(
+        raw, picks, window_samples, n_windows, rejected_samples, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
         filtered_window = filtered[valid, start:start + window_samples]
@@ -3082,7 +3088,7 @@ def bad_ch_by_RANSAC(
         raise ValueError("subset_fraction must be greater than 0 and at most 1.")
     # Filter a copy of the EEG data to 1-45 Hz for prediction and
     # correlation scoring.
-    rejected, picks, window_samples, n_windows, filtered = _band_limited_windows(
+    rejected_samples, picks, window_samples, n_windows, filtered = _band_limited_windows(
         raw, window_length, occurrence_cutoff, _pass
     )
     n_predictors = int(
@@ -3100,14 +3106,14 @@ def bad_ch_by_RANSAC(
     names = [raw.ch_names[pick] for pick in picks]
     sfreq = raw.info["sfreq"]
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    retained = _retained_windows(rejected, window_samples, n_windows)
-    n_retained = int(retained.sum())
+    retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
+    n_retained = int(retained_windows.sum())
     _require_retained_windows(n_retained)
     geometry = _spline_geometry(raw) if _geometry is None else _geometry
     patterns = [np.ones(len(picks), dtype=bool)]
     pattern_of = {patterns[0].tobytes(): 0}
     configuration_index = np.full(n_windows, -1, dtype=int)
-    for index in np.flatnonzero(retained):
+    for index in np.flatnonzero(retained_windows):
         eligible = ~flat[:, index]
         if eligible.sum() <= n_predictors:
             raise ValueError(
@@ -3138,19 +3144,15 @@ def bad_ch_by_RANSAC(
         })
     r = np.full((len(picks), n_windows), np.nan)
     kept_predictions = {}
-    for index in np.flatnonzero(retained):
-        start = index * window_samples
+    for start, data in _iterate_retained_windows(
+        raw, picks, window_samples, n_windows, rejected_samples, return_start=True
+    ):
+        index = start // window_samples
         configuration = configurations[configuration_index[index]]
         rows = configuration["rows"]
         active_names = [names[row] for row in rows]
-        data = raw.get_data(
-            picks=picks[rows],
-            start=start,
-            stop=start + window_samples,
-            reject_by_annotation=None,
-        )
         filtered_window = filtered[:, start:start + window_samples]
-        _require_variance(data, active_names, "The input", start, sfreq)
+        _require_variance(data[rows], active_names, "The input", start, sfreq)
         _require_variance(
             filtered_window[rows], active_names, "The band-limited signal", start, sfreq
         )
@@ -3167,7 +3169,7 @@ def bad_ch_by_RANSAC(
     violates = (
         (r < correlation_cutoff if method == "threshold" else z > robust_z_cutoff)
         | flat
-    ) & retained
+    ) & retained_windows
     counts = violates.sum(axis=1)
     bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
@@ -3188,10 +3190,10 @@ def bad_ch_by_RANSAC(
         details["noise_gain_by_window"] = np.full(r.shape, np.nan)
         for field in ("flagged_filtered_uv", "flagged_predicted_uv"):
             details[field] = {name: [] for name in names}
-        for index in np.flatnonzero(retained):
-            start = index * window_samples
-            data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
-                                reject_by_annotation=None)
+        for start, data in _iterate_retained_windows(
+            raw, picks, window_samples, n_windows, rejected_samples, return_start=True
+        ):
+            index = start // window_samples
             _record_window_details(details, start, window_samples, data, violates[:, index])
             configuration = configurations[configuration_index[index]]
             details["noise_gain_by_window"][configuration["rows"], index] = configuration[
