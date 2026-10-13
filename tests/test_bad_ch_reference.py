@@ -68,7 +68,9 @@ class TestReferenceRequirements(unittest.TestCase):
                     original = raw.get_data().copy()
                     kwargs = {"reference_channel": reference_channel}
                     if method is step2.bad_ch_by_flatline:
-                        kwargs["flatlines"] = None  # The reference check comes first.
+                        kwargs["flatlines"] = step2.detect_flatline_inplace(
+                            make_raw(average=False), reference_channel
+                        )
                     with self.assertRaisesRegex(ValueError, message):
                         method(raw, **kwargs)
                     self.assertEqual(raw.info["bads"], [])

@@ -2049,20 +2049,20 @@ def bad_ch_by_flatline(
     follow the other window detectors, with flat and violates equal to the
     mapped segment mask in retained windows and NaN in excluded windows.
     """
-    shared = _voltage_mask_inputs(raw)
-    reference_channel = _reference_channel(
-        raw, "native", reference_channel, known_zeros=shared["zeros"]
-    )
-    picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "native", reference_channel,
-        known_zeros=shared["zeros"],
-    )
     if flatlines is None:
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
+    shared = _voltage_mask_inputs(raw)
+    reference_channel = _reference_channel(
+        raw, "native", reference_channel, known_zeros=shared["zeros"]
+    )
     spans, _ = _temporary_voltage_mask(
         raw, reference_channel=reference_channel, shared=shared
+    )
+    picks, window_samples, n_windows = _prepare_channel_windows(
+        raw, window_length, occurrence_cutoff, "native", reference_channel,
+        known_zeros=shared["zeros"],
     )
     rejected_samples = _rejected_samples(raw, spans)
     retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
