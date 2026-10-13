@@ -1913,8 +1913,8 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     an interpolated Raw copy.
 
     Whole-channel bads are repaired throughout the record. Local flat channels
-    join them only in their intervals outside the global dropout intervals that
-    detect_flatline_inplace annotated as BAD_by_flatline.
+    are also repaired only in their intervals outside the global dropout intervals
+    that detect_flatline_inplace annotated as BAD_by_flatline.
     Other BAD spans do not stop the local repair. Every configuration reads
     its genuine donors from the original recording.
     """
