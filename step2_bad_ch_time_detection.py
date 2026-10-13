@@ -1893,6 +1893,8 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     return overview, traces
 
 
+# %% Bad channel detection functions
+
 def _mean_configuration(geometry, invalid):
     """Cache the projector for the mean of measured
     donors and repaired targets.
