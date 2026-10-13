@@ -22,15 +22,17 @@ bad_ch_by_std reports standard deviation high relative to each channel's six
 nearest neighbours as std; bad_ch_by_BBnoise compares band power with the same
 neighbours. Signal data and input annotations are unchanged.
 
-The windowed detectors (bad_ch_by_flatline, bad_ch_by_std, bad_ch_by_HFnoise,
-bad_ch_by_BBnoise, bad_ch_by_correlation) flag a channel violating in more than
+bad_ch_by_std, bad_ch_by_HFnoise, bad_ch_by_BBnoise, and
+bad_ch_by_correlation flag a channel violating in more than
 25% of its scorable 2-s windows: the windows clear of BAD annotations
 (BAD_by_flatline included) and of the temporary BAD_voltage_mask, without the
-channel's local flat intervals. Three rules differ by design. bad_ch_by_RANSAC
-counts local flat windows as failures to predict within the shared denominator;
+channel's local flat intervals. Other criteria treat flat time differently:
+bad_ch_by_flatline counts local flat windows as violations within the shared
+retained-window denominator; bad_ch_by_RANSAC counts them as failures to predict
+within that denominator; and bad_ch_by_small excludes flat donors but scores
+flat targets using their actual input MAD, including linearly filled samples.
 bad_ch_by_voltage counts scorable samples, not windows, since every sample
-beyond its threshold matters; and bad_ch_by_pop counts pops per
-scorable minute.
+beyond its threshold matters; bad_ch_by_pop counts pops per scorable minute.
 
 The 2-second window detectors accept return_details=True to return (report,
 details), including window metrics and original flagged waveforms.
@@ -3036,8 +3038,9 @@ def bad_ch_by_RANSAC(
     robust_z_cutoff. Known flat target windows are automatic violations, with
     missing r, and remain in that target's occurrence denominator: a flat
     channel cannot be predicted from the others, so its flat time counts as
-    failure to predict. This is deliberate and differs from the other
-    flat-aware detectors, which leave local-flat windows out of both counts;
+    failure to predict. This deliberately differs from bad_ch_by_std,
+    bad_ch_by_HFnoise, bad_ch_by_BBnoise, and bad_ch_by_correlation, which leave
+    local-flat windows out of both the violation count and the denominator;
     partly flat channels below bad_ch_by_flatline's cutoff can therefore still
     be flagged here. Pool only finite measured correlations for robust_z.
     Either way, flag channels violating in strictly more than occurrence_cutoff
