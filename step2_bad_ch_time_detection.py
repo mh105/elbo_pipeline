@@ -1893,8 +1893,6 @@ def plot_pca_cleaning(raw, cleaned_raw, pca_details):
     return overview, traces
 
 
-# %% Robust average reference
-
 def _mean_configuration(geometry, invalid):
     """Cache the projector for the mean of measured
     donors and repaired targets.
@@ -3209,6 +3207,8 @@ def bad_ch_by_RANSAC(
         return report, _finish_window_details(details, window_samples)
     return report
 
+
+# %% Robust average reference
 
 def bad_ch_under_robust_ref(
     raw, reference_channel=None, max_iterations=10, *, flatlines=None,
