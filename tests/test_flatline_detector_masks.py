@@ -150,6 +150,15 @@ class TestPublicFlatlineStages(unittest.TestCase):
                                                   flatlines=flatlines),
                          {"flatline": ["E3"]})
 
+    def test_window_iterator_requires_a_retained_complete_window(self):
+        raw = native_raw(tail=1)
+        rejected_samples = np.ones(raw.n_times, dtype=bool)
+        rejected_samples[-1] = False  # An unmasked partial tail is insufficient.
+        with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
+            list(step2._iterate_retained_windows(
+                raw, [0], WINDOW, raw.n_times // WINDOW, rejected_samples
+            ))
+
     def test_scoring_consumers_enforce_their_own_window_requirements(self):
         everything = {name: [[0, 4 * WINDOW]] for name in ("E0", "E1", "E2")}
         # Every 2-s window overlaps a dropout, but 1600 of 2000 samples are not flat.

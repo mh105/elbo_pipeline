@@ -961,9 +961,11 @@ def _iterate_retained_windows(
 
     Skip any window containing a rejected sample and ignore the partial tail.
     Read each retained window's Raw data without changing it. With return_start,
-    yield (start_sample, data); otherwise yield data alone.
+    yield (start_sample, data); otherwise yield data alone. Raise if no complete
+    window is retained, when iteration begins.
     """
     retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
+    _require_retained_windows(retained_windows.sum())
     for start in (np.flatnonzero(retained_windows) * window_samples).tolist():
         data = raw.get_data(picks=picks, start=start, stop=start + window_samples,
                             reject_by_annotation=None)
@@ -2240,7 +2242,6 @@ def bad_ch_by_std(
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows,
@@ -2261,7 +2262,6 @@ def bad_ch_by_std(
         violates = z > robust_z_cutoff
         counts += violates
         n_scorable += scorable
-        n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
@@ -2270,7 +2270,6 @@ def bad_ch_by_std(
             details["robust_std_uv"][:, index] = robust_std * 1e6
             details["log_ratio"][:, index] = log_ratio
             details["robust_z"][:, index] = z
-    _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"std": bad_names}
@@ -2351,7 +2350,6 @@ def bad_ch_by_HFnoise(
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
     hf_mads, lf_mads, window_violations = [], [], []
     if return_details:
         details = _init_window_details(
@@ -2372,7 +2370,6 @@ def bad_ch_by_HFnoise(
         violates = z > robust_z_cutoff
         counts += violates
         n_scorable += valid
-        n_retained += 1
         hf_mads.append(hf_mad)
         lf_mads.append(lf_mad)
         window_violations.append(violates)
@@ -2385,7 +2382,6 @@ def bad_ch_by_HFnoise(
             details["robust_z"][:, index] = z
             details["hf_mad_uv"][:, index] = hf_mad * 1e6
             details["lf_mad_uv"][:, index] = lf_mad * 1e6
-    _require_retained_windows(n_retained)
     candidates = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     hf_mads = np.asarray(hf_mads).T
     lf_mads = np.asarray(lf_mads).T
@@ -2493,7 +2489,6 @@ def bad_ch_by_BBnoise(
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows, ("n_bad_bands",)
@@ -2536,7 +2531,6 @@ def bad_ch_by_BBnoise(
         violates = n_bad_bands >= min_bad_bands
         counts += violates
         n_scorable += scorable
-        n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
@@ -2549,7 +2543,6 @@ def bad_ch_by_BBnoise(
             details["band_violates"][~scorable, index] = np.nan
             details["n_bad_bands"][:, index] = n_bad_bands
             details["n_bad_bands"][~scorable, index] = np.nan
-    _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"BBnoise": bad_names}
@@ -2807,7 +2800,6 @@ def bad_ch_by_small(
     configurations = {}
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows,
@@ -2851,7 +2843,6 @@ def bad_ch_by_small(
         violates = z < -robust_z_cutoff
         counts += violates
         n_scorable += scorable
-        n_retained += 1
         if return_details:
             _record_window_details(
                 details, start, window_samples, data[target_rows], violates
@@ -2862,7 +2853,6 @@ def bad_ch_by_small(
             details["ratio"][:, index] = ratio
             details["robust_z"][:, index] = z
             details["configuration_index"][index] = configuration
-    _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(
         raw, picks, counts, n_scorable, occurrence_cutoff
     )
@@ -2944,7 +2934,6 @@ def bad_ch_by_correlation(
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     counts = np.zeros(len(picks), dtype=int)
     n_scorable = np.zeros(len(picks), dtype=int)
-    n_retained = 0
     if return_details:
         details = _init_window_details(
             raw, picks, window_samples, n_windows, ("score",)
@@ -2969,14 +2958,12 @@ def bad_ch_by_correlation(
         violates = score < correlation_cutoff
         counts += violates
         n_scorable += scorable
-        n_retained += 1
         if return_details:
             index = _record_window_details(
                 details, start, window_samples, data, violates
             )
             details["violates"][~scorable, index] = np.nan
             details["score"][:, index] = score
-    _require_retained_windows(n_retained)
     bad_names = _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"correlation": bad_names}
@@ -3111,7 +3098,6 @@ def bad_ch_by_RANSAC(
     flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
     retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
     n_retained = int(retained_windows.sum())
-    _require_retained_windows(n_retained)
     geometry = _spline_geometry(raw) if _geometry is None else _geometry
     patterns = [np.ones(len(picks), dtype=bool)]
     pattern_of = {patterns[0].tobytes(): 0}
