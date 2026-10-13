@@ -128,7 +128,7 @@ class TestPopDetection(unittest.TestCase):
             data[5, start * SFREQ:(start + 3) * SFREQ] = 100e-6
         raw = pop_raw(data)
         # Unbridged spans, as if the data had not been through detect_flatline_inplace.
-        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
+        flatlines = step2.detect_flatline_inplace(raw.copy())
         self.assertEqual(flatlines["ch_names"], ["E5"])
         report, details = step2.bad_ch_by_pop(raw, return_details=True)
         row = details["ch_names"].index("E5")
@@ -155,9 +155,9 @@ class TestPopDetection(unittest.TestCase):
         for name in others:  # E5's other neighbours are flat around each step.
             for time_s in (10, 30, 50):
                 raw._data[raw.ch_names.index(name), (time_s - 1) * SFREQ:(time_s + 1) * SFREQ] = 0
-        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
+        flatlines = step2.detect_flatline_inplace(raw.copy())
         self.assertEqual(sorted(flatlines["ch_names"]), sorted(others))
-        self.assertEqual(flatlines["global_segments"], [])
+        self.assertEqual(flatlines["global_segments_exact"], [])
 
         def e5_pops(**kwargs):
             _, details = step2.bad_ch_by_pop(raw.copy(), return_details=True, **kwargs)

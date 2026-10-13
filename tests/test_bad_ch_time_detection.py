@@ -21,7 +21,8 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             np.array([[1e-6] * 50, [2e-6] * 50, [3e-6] * 50, [0.0] * 50]),
             mne.create_info(["F3", "C3", "P3", "Cz"], 1000, "eeg"), verbose=False,
         )
-        self.detected_flatlines = {"segments": []}
+        self.detected_flatlines = {"segments_exact": [], "segments_bridged": [],
+                                  "global_segments_exact": []}
         self.asr_details = {"corrected_duration_s": 0.01}
         results = {
             "bad_ch_by_nan": {"nan": []},

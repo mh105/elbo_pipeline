@@ -96,8 +96,9 @@ class TestWindowDetails(unittest.TestCase):
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
         raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_excluded"]))
-        # Annotates the global dropout; exact spans suit this short recording.
-        flatlines = step2.detect_flatline_inplace(raw, downstream_highpass_hz=None)
+        # E0's final 2-s gap is closed in its channel span, independently of
+        # the global dropout and existing BAD annotation.
+        flatlines = step2.detect_flatline_inplace(raw)
         original = raw.copy()
         expected = step2.bad_ch_by_flatline(raw.copy(), flatlines=flatlines)
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
@@ -107,8 +108,8 @@ class TestWindowDetails(unittest.TestCase):
         self.assert_window_details(original, raw, report["flatline"], details, 200,
                                    [False, False, True, True])
         self.assertEqual(details["ch_names"], [f"E{i}" for i in range(5)])
-        np.testing.assert_array_equal(details["flat"][0], [np.nan, np.nan, 1, 0])
-        np.testing.assert_array_equal(details["violates"][0], [np.nan, np.nan, 1, 0])
+        np.testing.assert_array_equal(details["flat"][0], [np.nan, np.nan, 1, 1])
+        np.testing.assert_array_equal(details["violates"][0], [np.nan, np.nan, 1, 1])
 
     def test_noise_details_preserve_mask_gaps_metrics_and_channel_order(self):
         for detector, factory in ((step2.bad_ch_by_std, std_raw),

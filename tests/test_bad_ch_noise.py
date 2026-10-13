@@ -91,7 +91,7 @@ def expected_bads(detector, flagged):
 
 
 class TestVoltageMask(unittest.TestCase):
-    def test_strict_thresholds_merge_partial_tail_and_channel_exclusions(self):
+    def test_strict_thresholds_gap_labels_partial_tail_and_channel_exclusions(self):
         data = np.ones((6, 45)) * 1e-6
         data[0, 1] = 501e-6  # Exactly one of four eligible channels: do not mask.
         data[1, 2] = -500e-6  # Equality is not an exceedance.
@@ -107,8 +107,11 @@ class TestVoltageMask(unittest.TestCase):
         original = raw.get_data().copy()
         self.assertIsNone(step2.mask_segment_by_voltage(raw))
         mask = raw.annotations.description == "BAD_voltage_mask"
-        np.testing.assert_allclose(raw.annotations.onset[mask], [0.1])
-        np.testing.assert_allclose(raw.annotations.duration[mask], [0.35])
+        np.testing.assert_allclose(raw.annotations.onset[mask], [0.1, 0.4])
+        np.testing.assert_allclose(raw.annotations.duration[mask], [0.2, 0.05])
+        gap = raw.annotations.description == "BAD_by_close_gap"
+        np.testing.assert_allclose(raw.annotations.onset[gap], [0.3])
+        np.testing.assert_allclose(raw.annotations.duration[gap], [0.1])
         self.assertIn("event", raw.annotations.description)
         self.assertEqual(raw.info["bads"], ["E4"])
         np.testing.assert_array_equal(raw.get_data(), original)
@@ -168,8 +171,8 @@ class TestVoltageDetection(unittest.TestCase):
         raw = make_raw(rng.normal(scale=5e-6, size=(8, 100)), sfreq=100)
         raw._data[0, :20] += 300e-6  # 20 exceeding samples...
         raw._data[0, 40:80] = 1e-6  # ...and a 0.4-s flat span on E0.
-        flatlines = step2.detect_flatline_inplace(raw.copy(), downstream_highpass_hz=None)
-        self.assertEqual(flatlines["segments"], [[[40, 80]]])
+        flatlines = step2.detect_flatline_inplace(raw.copy())
+        self.assertEqual(flatlines["segments_bridged"], [[[40, 80]]])
         # Counting the flat span as valid, in-range samples dilutes 20/60 to 20/100.
         report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, return_details=True)
         self.assertEqual(report, {"voltage": []})
@@ -179,7 +182,7 @@ class TestVoltageDetection(unittest.TestCase):
         self.assertEqual(report, {"voltage": ["E0"]})
         self.assertAlmostEqual(details["exceed_fraction"][0], 20 / 60)
         # A channel flat throughout has no scorable samples: no fraction, no flag.
-        flatlines["segments"] = [[[0, 100]]]
+        flatlines["segments_bridged"] = [[[0, 100]]]
         report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, flatlines=flatlines,
                                                   return_details=True)
         self.assertEqual(report, {"voltage": []})

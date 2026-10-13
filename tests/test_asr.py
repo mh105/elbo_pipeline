@@ -34,15 +34,17 @@ def make_raw(seconds=75, sfreq=250, first_samp=1000, reference="Cz"):
 
 
 def flatlines_for(raw, spans, reference="Cz"):
-    """Supply the already widened local intervals saved by flatline detection."""
+    """Supply prescribed gap-joined channel intervals."""
     return {
         "ch_names": list(spans),
-        "segments": [np.asarray(value, dtype=int).reshape(-1, 2)
+        "segments_exact": [np.asarray(value, dtype=int).reshape(-1, 2)
+                           for value in spans.values()],
+        "segments_bridged": [np.asarray(value, dtype=int).reshape(-1, 2)
                      for value in spans.values()],
         "raw_ch_names": list(raw.ch_names), "eeg_ch_names": NAMES.copy(),
         "sfreq": float(raw.info["sfreq"]), "first_samp": int(raw.first_samp),
         "n_times": int(raw.n_times), "reference_channel": reference,
-        "global_segments": [], "widen_samples": 20,
+        "global_segments_exact": [],
     }
 
 
@@ -113,6 +115,7 @@ class TestASRWrapper(unittest.TestCase):
         })
         original = raw.get_data()
         annotations = raw.annotations.copy()
+        annotations.append(raw.first_time + 2, 1, "BAD_by_close_gap")
         rejected = step2._rejected_samples(raw)
         rejected[1250:1400] = True
         rejected[1750:1850] = True

@@ -24,11 +24,9 @@ from step2_bad_ch_time_detection import (
 def flatline(raw, **kwargs):
     """Detect flatlines (masking global dropouts on raw), then score them.
 
-    The window rules here concern exact spans, so local intervals are not
-    widened for a later high-pass (5.5 s would cover these short recordings).
+    Flatline intervals are gap-joined per channel without filter widening.
     """
-    flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"),
-                                        downstream_highpass_hz=None)
+    flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"))
     return bad_ch_by_flatline(raw, flatlines=flatlines, **kwargs)
 
 
@@ -234,7 +232,7 @@ class TestBadChByFlatline(unittest.TestCase):
                 variances = np.ones((4, 5))
                 variances[:flat_windows, 0] = 0
                 raw = make_raw(variances)
-                flatlines = detect_flatline_inplace(raw, downstream_highpass_hz=None)
+                flatlines = detect_flatline_inplace(raw)
                 bridged = raw.get_data().copy()  # Detection bridged E0's flat span.
                 self.assertEqual(bad_ch_by_flatline(raw, flatlines=flatlines),
                                  {"flatline": expected})
@@ -315,9 +313,7 @@ class TestWindowRules(unittest.TestCase):
                 raw.crop(tmax=8.99)  # Four complete windows and one 1-second tail.
                 kwargs = {}
                 if not average:  # Detect once, as the pipeline does, then score.
-                    kwargs["flatlines"] = detect_flatline_inplace(
-                        raw, downstream_highpass_hz=None
-                    )
+                    kwargs["flatlines"] = detect_flatline_inplace(raw)
                 raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
                 # Only one of four full windows violates the rule.
                 self.assertEqual(detector(raw, **kwargs), report_of(detector, []))

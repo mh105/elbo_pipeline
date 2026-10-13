@@ -16,8 +16,9 @@ def flatline_result(raw, by_name):
         "n_times": int(raw.n_times),
         "reference_channel": "Cz",
         "ch_names": list(by_name),
-        "segments": list(by_name.values()),
-        "global_segments": [],
+        "segments_exact": list(by_name.values()),
+        "segments_bridged": list(by_name.values()),
+        "global_segments_exact": [],
     }
 
 

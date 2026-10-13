@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mne
 import numpy as np
@@ -19,27 +20,27 @@ NAMES = ["Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8", "FC5", "FC1", "FC2", "FC6",
 REACH = 250  # 1 s at 250 Hz stands in for the 0.3 Hz high-pass reach.
 
 
-def make_raw(n_times=5000):  # 20 s of native-reference noise
+def make_raw(n_times=5000, sfreq=250):  # 20 s of native-reference noise by default
     rng = np.random.default_rng(311)
     data = rng.normal(scale=10e-6, size=(len(NAMES) + 1, n_times))
     data[:len(NAMES)] -= data[NAMES.index("Cz")]
-    raw = mne.io.RawArray(data, mne.create_info(NAMES + ["EOG"], 250,
+    raw = mne.io.RawArray(data, mne.create_info(NAMES + ["EOG"], sfreq,
                                               ["eeg"] * len(NAMES) + ["eog"]), verbose=False)
     raw.set_montage(mne.channels.make_standard_montage("colin27_1020"), verbose=False)
     return raw
 
 
-def flatlines_for(raw, spans=None, global_segments=(), widen_samples=REACH):
-    """Local flat intervals as detect_flatline_inplace saves them, already widened."""
+def flatlines_for(raw, spans=None, global_segments=()):
+    """Prescribed channel spans without filter reach metadata."""
     spans = spans or {}
     return {
         "ch_names": list(spans),
-        "segments": [np.asarray(value, dtype=int).reshape(-1, 2) for value in spans.values()],
+        "segments_exact": [np.asarray(value, dtype=int).reshape(-1, 2) for value in spans.values()],
+        "segments_bridged": [np.asarray(value, dtype=int).reshape(-1, 2) for value in spans.values()],
         "raw_ch_names": list(raw.ch_names), "eeg_ch_names": NAMES.copy(),
         "sfreq": float(raw.info["sfreq"]), "first_samp": int(raw.first_samp),
         "n_times": int(raw.n_times), "reference_channel": "Cz",
-        "global_segments": [list(bounds) for bounds in global_segments],
-        "widen_samples": widen_samples,
+        "global_segments_exact": [list(bounds) for bounds in global_segments],
     }
 
 
@@ -69,6 +70,13 @@ def expected_repair(raw, original, name, start, stop, invalid, fade_in=True, fad
 
 
 class TestLocalPopInterpolation(unittest.TestCase):
+    def setUp(self):
+        # Keep these detailed interval tests short; the real reach is checked below.
+        filter_patch = patch.object(step2.mne.filter, "create_filter",
+                                    return_value=np.zeros(2 * REACH + 1))
+        filter_patch.start()
+        self.addCleanup(filter_patch.stop)
+
     def test_repairs_the_reach_around_a_pop_and_nothing_else(self):
         raw = make_raw()
         raw.info["bads"] = ["T7"]
@@ -237,18 +245,33 @@ class TestLocalPopInterpolation(unittest.TestCase):
         _, left = step2.bad_ch_by_pop(raw, flatlines=flatlines, return_details=True)
         self.assertEqual(sum(map(len, left["pop_times_s"].values())), 0)
 
-    def test_without_pops_or_reach_the_data_are_unchanged(self):
+    def test_without_pops_the_data_are_unchanged(self):
         raw = make_raw()
         original = raw.get_data()
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
         self.assertIsNone(result)
         np.testing.assert_array_equal(raw.get_data(), original)
 
-        add_pop(raw, "C3", 2500)
-        popped = raw.get_data()
-        with self.assertRaisesRegex(ValueError, "reach"):
-            step2.interpolate_local_pops_inplace(raw, flatlines_for(raw, widen_samples=0))
-        np.testing.assert_array_equal(raw.get_data(), popped)
+
+class TestPopRepairReach(unittest.TestCase):
+    def test_pop_repair_keeps_five_and_a_half_second_reach_without_flatline_metadata(self):
+        for sfreq in (250, 500, 1000):
+            with self.subTest(sfreq=sfreq):
+                raw = make_raw(n_times=20 * sfreq, sfreq=sfreq)
+                onset, reach = 10 * sfreq, int(5.5 * sfreq)
+                add_pop(raw, "C3", onset)
+                original = raw.get_data()
+                result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
+                self.assertIsNone(result)
+                start, stop = onset - reach, onset + reach
+                expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
+                row = raw.ch_names.index("C3")
+                np.testing.assert_allclose(raw._data[row, start:stop], expected,
+                                           rtol=0, atol=1e-15)
+                np.testing.assert_array_equal(raw._data[row, :start], original[row, :start])
+                np.testing.assert_array_equal(raw._data[row, stop:], original[row, stop:])
+                others = [i for i in range(len(raw.ch_names)) if i != row]
+                np.testing.assert_array_equal(raw._data[others], original[others])
 
 
 if __name__ == "__main__":

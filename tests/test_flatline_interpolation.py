@@ -32,11 +32,11 @@ def make_raw(n_times=3000):  # 12 s, so a 2-s window survives the test dropouts.
 
 def flatlines_for(raw, spans, channel_fraction_cutoff=0.25):
     """Prescribed flat spans, with the global dropouts that detect_flatline_inplace
-    would decide from the current bads (without annotating raw)."""
+    would decide and annotate from the current bads."""
     names = list(spans)
     segments = [np.array(spans[name], dtype=int).reshape(-1, 2) for name in names]
     empty = [np.empty((0, 2), dtype=int) for _ in names]
-    result = {"ch_names": names, "segments": segments,
+    result = {"ch_names": names, "segments_exact": segments, "segments_bridged": segments,
               "segments_on_subtypes": {
                   "segments_on_raw": segments, "segments_on_highpass": empty,
                   "segments_on_ramp": empty,
@@ -45,7 +45,7 @@ def flatlines_for(raw, spans, channel_fraction_cutoff=0.25):
               "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],
               "first_samp": raw.first_samp, "n_times": raw.n_times, "reference_channel": "Cz",
               "min_samples": 10, "tolerance_v": 1e-9, "highpass_hz": 1.0}
-    step2._mask_segment_by_flatline(raw.copy(), result, channel_fraction_cutoff)
+    step2._mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
     return result
 
 
@@ -182,15 +182,17 @@ class TestSphericalSpline(unittest.TestCase):
         names = ["F7", "F3", "F4", "F8", "FC5", "FC1", "FC2", "FC6"]
         rows = [raw.ch_names.index(name) for name in names]
         raw._data[rows, 450:550] = 0
+        unannotated = raw.copy()
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names})
-        self.assertEqual(flatlines["global_segments"], [[450, 550]])  # 8 of 29 > 25%.
+        self.assertEqual(flatlines["global_segments_exact"], [[450, 550]])  # 8 of 29 > 25%.
         default = raw.copy()
         step2.interpolate_local_flatline_inplace(default, flatlines)
         np.testing.assert_array_equal(default.get_data(), raw.get_data())
 
+        raw = unannotated
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names},
                                   channel_fraction_cutoff=0.5)
-        self.assertEqual(flatlines["global_segments"], [])
+        self.assertEqual(flatlines["global_segments_exact"], [])
         expected = raw.copy()
         repaired = mne_reconstruction(raw, names)
         expected._data[rows, 450:550] = repaired._data[rows, 450:550]
