@@ -3562,10 +3562,16 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     if half_width < 1:
         raise ValueError("repair_width must cover at least two samples.")
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
-    local = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
-    global_segments = _merge_segments(list(zip(*_annotations_starts_stops(
+    local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
+    global_flat = _merge_segments(list(zip(*_annotations_starts_stops(
         raw, ["BAD_by_flatline"]
     ))))
+
+    def re_reference_inplace(raw, new_reference):
+        """Subtract the named reference from all EEG channels in place."""
+        reference = raw._data[raw.ch_names.index(new_reference)].copy()
+        for i in mne.pick_types(raw.info, eeg=True, exclude=[]):
+            raw._data[i] -= reference
 
     def pop_intervals(raw_pop):
         """Map channels to the repair intervals of the pops bad_ch_by_pop finds
@@ -3578,7 +3584,7 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
             # A pop's time is the sample before its first confirmed jump.
             jumps = [[int(round(time * sfreq)) + 1] * 2 for time in times]
             segments = _subtract_segments(
-                _widen_segments(jumps, half_width, raw.n_times), global_segments
+                _widen_segments(jumps, half_width, raw.n_times), global_flat
             )
             if segments:
                 intervals[name], counts[name] = segments, len(times)
@@ -3590,43 +3596,39 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     mean = _robust_mean(raw, raw.info["bads"], flatlines)
     for i in eeg:
         average._data[i] -= mean
-    popping, n_popping = pop_intervals(average)
+    intervals_avg, n_pops_avg = pop_intervals(average)
     del average
-    own = popping.get(final_reference, [])
-    if own:
+    reference_pops = intervals_avg.get(final_reference, [])
+    if reference_pops:
         # Channels popping with it are not its donors either.
-        invalid = {name: [*local.get(name, []), *popping.get(name, [])]
-                   for name in {*local, *popping}}
+        invalid = {name: [*local_flat.get(name, []), *intervals_avg.get(name, [])]
+                   for name in {*local_flat, *intervals_avg}}
         _interpolate_local_intervals_inplace(
-            raw, {final_reference: own}, invalid, global_segments
+            raw, {final_reference: reference_pops}, invalid, global_flat
         )
         if final_reference == reference_channel:
-            # Re-reference to the repaired native reference. It is still zero
-            # outside its repaired intervals, so those times are unchanged.
-            repaired = raw._data[raw.ch_names.index(reference_channel)].copy()
-            for i in eeg:
-                raw._data[i] -= repaired
+            # The native reference is good and repaired, so re-reference to it.
+            re_reference_inplace(raw, reference_channel)
 
     # On the final reference, the other good channels' pops are local.
     detection = raw
     if final_reference != reference_channel:
+        # The native reference is bad, so re-reference to the repaired final reference.
         detection = raw.copy()
-        new_reference = raw._data[raw.ch_names.index(final_reference)].copy()
-        for i in eeg:
-            detection._data[i] -= new_reference
+        re_reference_inplace(detection, final_reference)
     intervals, n_pops = pop_intervals(detection)
     del detection
-    _interpolate_local_intervals_inplace(raw, intervals, local, global_segments)
+    _interpolate_local_intervals_inplace(raw, intervals, local_flat, global_flat)
     seconds = sum(stop - start for segments in intervals.values()
                   for start, stop in segments) / sfreq
-    print(f"Pops repaired: {n_popping.get(final_reference, 0)} on the final "
+    print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
           f"reference {final_reference} "
-          f"({sum(stop - start for start, stop in own) / sfreq:.1f} s), "
+          f"({sum(stop - start for start, stop in reference_pops) / sfreq:.1f} s), "
           f"{sum(n_pops.values())} on {len(intervals)} other good channels "
           f"({seconds:.1f} channel-seconds)")
 
 
-def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments):
+def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
     """Repair channels' intervals in place by spherical splines, each interval
     from one set of donors.
 
@@ -3645,7 +3647,7 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments)
     geometry = _spline_geometry(raw)
     good = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]]
     fade = int(round(0.25 * raw.info["sfreq"]))
-    targets = {name: _subtract_segments(segments, global_segments)
+    targets = {name: _subtract_segments(segments, global_flat)
                for name, segments in targets.items()}
 
     def overlaps(segments, start, stop):
