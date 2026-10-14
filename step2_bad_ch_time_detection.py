@@ -84,8 +84,8 @@ remains available separately and is not used in this iteration. With the bad
 channels final, interpolate_local_flatline_inplace repairs the local flat
 intervals of the good channels from the other good channels.
 interpolate_local_pops_inplace then repairs the electrode pops that
-bad_ch_by_pop detects on the good channels, over the 0.3 Hz high-pass reach
-(5.5 s) on either side of each jump: first those of the final reference, found
+bad_ch_by_pop detects on the good channels, within repair_width seconds
+(2 s by default) centered on each jump: first those of the final reference, found
 on a robust-average copy, then the others, found on the final reference. The
 final reference is the native one if it is good; if it is bad,
 validate_reference_inplace then re-references the data to the nearest good one
@@ -3442,54 +3442,6 @@ def bad_ch_under_robust_ref(
     return robust_bad_ch_report
 
 
-def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments):
-    """Repair channels' intervals in place by spherical splines, each interval
-    from one set of donors.
-
-    targets maps EEG channel names to sorted, disjoint half-open sample
-    intervals to repair; samples in the global dropouts stay as they are.
-    invalid maps EEG channel names to intervals in which they are not genuine
-    donors, such as their flat intervals. An interval's donors are the good EEG
-    channels with no target or invalid interval overlapping it, read from the
-    input: every channel repaired in that interval is excluded, so no repaired
-    trace is a donor, and switching donors cannot put steps inside an interval.
-    A 0.25-s raised-cosine fade blends the estimate with the input at both ends,
-    including recording edges and global dropout boundaries.
-    """
-    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-    sample_chunk = 8192
-    geometry = _spline_geometry(raw)
-    good = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]]
-    fade = int(round(0.25 * raw.info["sfreq"]))
-    targets = {name: _subtract_segments(segments, global_segments)
-               for name, segments in targets.items()}
-
-    def overlaps(segments, start, stop):
-        return any(first < stop and last > start for first, last in segments)
-
-    for name, segments in targets.items():
-        target = raw.ch_names.index(name)
-        for start, stop in segments:
-            unavailable = {other for record in (targets, invalid)
-                           for other, spans in record.items()
-                           if overlaps(spans, start, stop)}
-            donors = [i for i in good if raw.ch_names[i] not in unavailable]
-            weights = _spline_weights(geometry, donors, [target])
-            weight = np.ones(stop - start)
-            length = min(fade, (stop - start) // 2)
-            if length:
-                rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
-                weight[:length] = rise
-                weight[-length:] = rise[::-1]
-            for first in range(start, stop, sample_chunk):
-                last = min(first + sample_chunk, stop)
-                part = weight[first - start:last - start]
-                estimate = (weights @ raw._data[donors, first:last])[0]
-                raw._data[target, first:last] = (
-                    part * estimate + (1 - part) * raw._data[target, first:last]
-                )
-
-
 def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None):
     """Interpolate the local flat intervals of the good EEG channels in place
     from the other good EEG channels; return None.
@@ -3555,7 +3507,7 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
                 raw._data[targets, first:last] = part * projected + (1 - part) * previous
 
 
-def interpolate_local_pops_inplace(raw, flatlines):
+def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     """Repair the electrode pops of the good EEG channels in place from the
     other good EEG channels, the final reference's first; return None.
 
@@ -3572,23 +3524,22 @@ def interpolate_local_pops_inplace(raw, flatlines):
     they are. Only local pops are detectable: a reference's own pops appear in
     every channel and hide the local steps that occur with them (on sub-26,
     the Cz-referenced data showed 39 of the 74 pops found after moving the
-    reference to E7). So first detect pops on a robust-average copy
-    (_robust_mean, with the bads and local flat intervals repaired), where the
+    reference to E7). First find the final reference's pops on a robust-average
+    copy (_robust_mean, with the bads and local flat intervals repaired), where the
     final reference's own pops are local and a bad native reference's pops
-    cancel, and repair the final reference's, with no donor popping in the
-    interval. A good native reference repaired this way is then re-referenced
+    cancel. Check the other good channels on this copy too, to exclude popping
+    donors; repair only the final reference, on raw's native reference.
+    A good native reference repaired this way is then re-referenced
     to: subtracting its repaired trace from every EEG channel, bads included,
     makes it zero again and takes its pops out of every channel. Then detect
     the other good channels' pops on the final reference, on a re-referenced
     copy if validation will move it, and repair them. raw keeps the native
     reference.
 
-    The high-pass applied before detection spreads a step over its reach on
-    either side of the jump. Compute that reach here from the existing 0.3 Hz
-    high-pass (5.5 s), independently of flatline detection. Repair that interval
-    around each pop's jump, merged per channel, except inside the global
-    dropouts, which stay as they are. Spherical splines estimate each interval from one
-    set of donors: the good EEG channels, a good all-zero reference included,
+    Repair a window of repair_width seconds (2 s by default) centered on each
+    pop's jump, rounded to samples and merged per channel, except inside global
+    dropouts, which stay as they are. Spherical splines estimate each interval
+    from one set of donors: the good EEG channels, a good all-zero reference included,
     with no repaired or local flat interval overlapping it, read from the
     input. A 0.25-s raised-cosine fade blends the estimate with the input at both
     ends, including recording edges and global dropout boundaries. Bad labels,
@@ -3596,17 +3547,20 @@ def interpolate_local_pops_inplace(raw, flatlines):
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
+    if not np.isfinite(repair_width) or repair_width <= 0:
+        raise ValueError("repair_width must be finite and greater than 0 (seconds).")
     _validate_flatlines(raw, flatlines)
     reference_channel = _reference_channel(
         raw, "native", flatlines["reference_channel"]
     )
-    final_reference = reference_channel
     if reference_channel in raw.info["bads"]:
         final_reference, _ = _candidate_reference_replacement(raw, reference_channel)
+    else:
+        final_reference = reference_channel
     sfreq = raw.info["sfreq"]
-    reach = len(mne.filter.create_filter(
-        None, sfreq, l_freq=0.3, h_freq=None, verbose=False,
-    )) // 2
+    half_width = int(round(repair_width * sfreq / 2))
+    if half_width < 1:
+        raise ValueError("repair_width must cover at least two samples.")
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     local = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
     global_segments = _merge_segments(list(zip(*_annotations_starts_stops(
@@ -3624,14 +3578,14 @@ def interpolate_local_pops_inplace(raw, flatlines):
             # A pop's time is the sample before its first confirmed jump.
             jumps = [[int(round(time * sfreq)) + 1] * 2 for time in times]
             segments = _subtract_segments(
-                _widen_segments(jumps, reach, raw.n_times), global_segments
+                _widen_segments(jumps, half_width, raw.n_times), global_segments
             )
             if segments:
                 intervals[name], counts[name] = segments, len(times)
         return intervals, counts
 
-    # On the robust average, the final reference's own pops are local, and a
-    # bad native reference's pops cancel.
+    # Find the final reference's own pops on the robust average, where a bad
+    # native reference's pops cancel; other channels' pops only exclude donors.
     average = raw.copy()
     mean = _robust_mean(raw, raw.info["bads"], flatlines)
     for i in eeg:
@@ -3647,8 +3601,8 @@ def interpolate_local_pops_inplace(raw, flatlines):
             raw, {final_reference: own}, invalid, global_segments
         )
         if final_reference == reference_channel:
-            # Re-reference to the repaired native reference. It was zero
-            # outside its repaired intervals, so nothing else changes.
+            # Re-reference to the repaired native reference. It is still zero
+            # outside its repaired intervals, so those times are unchanged.
             repaired = raw._data[raw.ch_names.index(reference_channel)].copy()
             for i in eeg:
                 raw._data[i] -= repaired
@@ -3670,6 +3624,54 @@ def interpolate_local_pops_inplace(raw, flatlines):
           f"({sum(stop - start for start, stop in own) / sfreq:.1f} s), "
           f"{sum(n_pops.values())} on {len(intervals)} other good channels "
           f"({seconds:.1f} channel-seconds)")
+
+
+def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments):
+    """Repair channels' intervals in place by spherical splines, each interval
+    from one set of donors.
+
+    targets maps EEG channel names to sorted, disjoint half-open sample
+    intervals to repair; samples in the global dropouts stay as they are.
+    invalid maps EEG channel names to intervals in which they are not genuine
+    donors, such as their flat intervals. An interval's donors are the good EEG
+    channels with no target or invalid interval overlapping it, read from the
+    input: every channel repaired in that interval is excluded, so no repaired
+    trace is a donor, and switching donors cannot put steps inside an interval.
+    A 0.25-s raised-cosine fade blends the estimate with the input at both ends,
+    including recording edges and global dropout boundaries.
+    """
+    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
+    sample_chunk = 8192
+    geometry = _spline_geometry(raw)
+    good = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]]
+    fade = int(round(0.25 * raw.info["sfreq"]))
+    targets = {name: _subtract_segments(segments, global_segments)
+               for name, segments in targets.items()}
+
+    def overlaps(segments, start, stop):
+        return any(first < stop and last > start for first, last in segments)
+
+    for name, segments in targets.items():
+        target = raw.ch_names.index(name)
+        for start, stop in segments:
+            unavailable = {other for record in (targets, invalid)
+                           for other, spans in record.items()
+                           if overlaps(spans, start, stop)}
+            donors = [i for i in good if raw.ch_names[i] not in unavailable]
+            weights = _spline_weights(geometry, donors, [target])
+            weight = np.ones(stop - start)
+            length = min(fade, (stop - start) // 2)
+            if length:
+                rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
+                weight[:length] = rise
+                weight[-length:] = rise[::-1]
+            for first in range(start, stop, sample_chunk):
+                last = min(first + sample_chunk, stop)
+                part = weight[first - start:last - start]
+                estimate = (weights @ raw._data[donors, first:last])[0]
+                raw._data[target, first:last] = (
+                    part * estimate + (1 - part) * raw._data[target, first:last]
+                )
 
 
 def _candidate_reference_replacement(raw, reference_channel):

@@ -17,7 +17,6 @@ import step2_bad_ch_time_detection as step2
 NAMES = ["Fp1", "Fp2", "F7", "F3", "Fz", "F4", "F8", "FC5", "FC1", "FC2", "FC6", "T7",
          "C3", "Cz", "C4", "T8", "CP5", "CP1", "CP2", "CP6", "P7", "P3", "Pz", "P4",
          "P8", "PO3", "PO4", "O1", "Oz", "O2"]
-REACH = 250  # 1 s at 250 Hz stands in for the 0.3 Hz high-pass reach.
 
 
 def make_raw(n_times=5000, sfreq=250):  # 20 s of native-reference noise by default
@@ -68,14 +67,7 @@ def expected_repair(raw, original, name, start, stop, invalid):
 
 
 class TestLocalPopInterpolation(unittest.TestCase):
-    def setUp(self):
-        # Keep these detailed interval tests short; the real reach is checked below.
-        filter_patch = patch.object(step2.mne.filter, "create_filter",
-                                    return_value=np.zeros(2 * REACH + 1))
-        filter_patch.start()
-        self.addCleanup(filter_patch.stop)
-
-    def test_repairs_the_reach_around_a_pop_and_nothing_else(self):
+    def test_repairs_one_second_on_each_side_of_a_pop_and_nothing_else(self):
         raw = make_raw()
         raw.info["bads"] = ["T7"]
         raw.set_annotations(mne.Annotations([18], [0.5], ["BAD_manual"]))
@@ -250,25 +242,41 @@ class TestLocalPopInterpolation(unittest.TestCase):
         np.testing.assert_array_equal(raw.get_data(), original)
 
 
-class TestPopRepairReach(unittest.TestCase):
-    def test_pop_repair_keeps_five_and_a_half_second_reach_without_flatline_metadata(self):
+class TestPopRepairWidth(unittest.TestCase):
+    def test_default_and_custom_widths_are_independent_of_filters(self):
         for sfreq in (250, 500, 1000):
-            with self.subTest(sfreq=sfreq):
-                raw = make_raw(n_times=20 * sfreq, sfreq=sfreq)
-                onset, reach = 10 * sfreq, int(5.5 * sfreq)
-                add_pop(raw, "C3", onset)
+            for half_seconds, kwargs in [(1, {}), (2, {"repair_width": 4.0})]:
+                with self.subTest(sfreq=sfreq, half_seconds=half_seconds), patch.object(
+                    step2.mne.filter, "create_filter",
+                    side_effect=AssertionError("Pop repair must not construct a filter."),
+                ):
+                    raw = make_raw(n_times=20 * sfreq, sfreq=sfreq)
+                    onset, half_width = 10 * sfreq, half_seconds * sfreq
+                    add_pop(raw, "C3", onset)
+                    original = raw.get_data()
+                    result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw), **kwargs)
+                    self.assertIsNone(result)
+                    start, stop = onset - half_width, onset + half_width
+                    expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
+                    row = raw.ch_names.index("C3")
+                    np.testing.assert_allclose(raw._data[row, start:stop], expected,
+                                               rtol=0, atol=1e-15)
+                    np.testing.assert_array_equal(raw._data[row, :start], original[row, :start])
+                    np.testing.assert_array_equal(raw._data[row, stop:], original[row, stop:])
+                    others = [i for i in range(len(raw.ch_names)) if i != row]
+                    np.testing.assert_array_equal(raw._data[others], original[others])
+
+    def test_invalid_widths_raise_without_changing_data(self):
+        for repair_width in (0, -1, np.nan, np.inf, 0.001):
+            with self.subTest(repair_width=repair_width):
+                raw = make_raw()
+                add_pop(raw, "C3", 2500)
                 original = raw.get_data()
-                result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
-                self.assertIsNone(result)
-                start, stop = onset - reach, onset + reach
-                expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
-                row = raw.ch_names.index("C3")
-                np.testing.assert_allclose(raw._data[row, start:stop], expected,
-                                           rtol=0, atol=1e-15)
-                np.testing.assert_array_equal(raw._data[row, :start], original[row, :start])
-                np.testing.assert_array_equal(raw._data[row, stop:], original[row, stop:])
-                others = [i for i in range(len(raw.ch_names)) if i != row]
-                np.testing.assert_array_equal(raw._data[others], original[others])
+                with self.assertRaisesRegex(ValueError, "repair_width"):
+                    step2.interpolate_local_pops_inplace(
+                        raw, flatlines_for(raw), repair_width=repair_width,
+                    )
+                np.testing.assert_array_equal(raw.get_data(), original)
 
 
 if __name__ == "__main__":
