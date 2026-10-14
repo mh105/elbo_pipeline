@@ -91,8 +91,8 @@ final reference is the native one if it is good; if it is bad,
 validate_reference_inplace then re-references the data to the nearest good one
 of its five nearest electrodes, or raises if all five are bad. Each repaired
 flat or pop interval takes one set of spline donors, the good channels neither
-repaired nor locally flat in it, and fades in and out over 0.25 s where it
-meets kept data.
+repaired nor locally flat in it, and blends with the input over 0.25 s at both
+ends of every repair interval.
 
 apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
@@ -3405,16 +3405,13 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments)
     channels with no target or invalid interval overlapping it, read from the
     input: every channel repaired in that interval is excluded, so no repaired
     trace is a donor, and switching donors cannot put steps inside an interval.
-    A 0.25-s raised-cosine fade blends the estimate in or out at each end that
-    meets kept data, but not at the recording edges or a global dropout, which
-    have none.
+    A 0.25-s raised-cosine fade blends the estimate with the input at both ends,
+    including recording edges and global dropout boundaries.
     """
     # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
     sample_chunk = 8192
     geometry = _spline_geometry(raw)
     good = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]]
-    dropout_starts = {start for start, _ in global_segments}
-    dropout_stops = {stop for _, stop in global_segments}
     fade = int(round(0.25 * raw.info["sfreq"]))
     targets = {name: _subtract_segments(segments, global_segments)
                for name, segments in targets.items()}
@@ -3434,10 +3431,8 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_segments)
             length = min(fade, (stop - start) // 2)
             if length:
                 rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
-                if start > 0 and start not in dropout_stops:
-                    weight[:length] = rise
-                if stop < raw.n_times and stop not in dropout_starts:
-                    weight[-length:] = rise[::-1]
+                weight[:length] = rise
+                weight[-length:] = rise[::-1]
             for first in range(start, stop, sample_chunk):
                 last = min(first + sample_chunk, stop)
                 part = weight[first - start:last - start]
@@ -3460,9 +3455,9 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
     estimate each channel's interval from one set of donors: the good channels
     with no local flat interval overlapping it, read from the input, so a
     repaired trace is never a donor; on native data the all-zero reference is a
-    donor unless it is bad. A 0.25-s raised-cosine fade blends the estimate in
-    or out at each end that meets kept data, but not at the recording edges or
-    a global dropout. The EEG data lose rank where the estimate replaces them
+    donor unless it is bad. A 0.25-s raised-cosine fade blends the estimate with
+    the input at both ends, including recording edges and global dropout
+    boundaries. The EEG data lose rank where the estimate replaces them
     fully. Bad labels, annotations, non-EEG channels, and all other samples are
     unchanged.
 
@@ -3524,10 +3519,9 @@ def interpolate_local_pops_inplace(raw, flatlines):
     dropouts, which stay as they are. Spherical splines estimate each interval from one
     set of donors: the good EEG channels, a good all-zero reference included,
     with no repaired or local flat interval overlapping it, read from the
-    input. A 0.25-s raised-cosine fade blends the estimate in or out at each
-    end that meets kept data, but not at the recording edges or a global
-    dropout. Bad labels, annotations, non-EEG channels, and all other samples
-    are unchanged.
+    input. A 0.25-s raised-cosine fade blends the estimate with the input at both
+    ends, including recording edges and global dropout boundaries. Bad labels,
+    annotations, non-EEG channels, and all other samples are unchanged.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")

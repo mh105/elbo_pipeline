@@ -49,9 +49,9 @@ def add_pop(raw, name, onset, step_uv=500.0):
     raw._data[raw.ch_names.index(name), onset:] += step_uv * 1e-6
 
 
-def expected_repair(raw, original, name, start, stop, invalid, fade_in=True, fade_out=True):
+def expected_repair(raw, original, name, start, stop, invalid):
     """Spline estimate from the good donors, blended in by 0.25-s raised cosines
-    at the requested ends."""
+    at both ends."""
     geometry = step2._spline_geometry(raw)
     donors = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]
               and raw.ch_names[i] not in invalid]
@@ -61,10 +61,8 @@ def expected_repair(raw, original, name, start, stop, invalid, fade_in=True, fad
     fade = min(int(round(0.25 * raw.info["sfreq"])), (stop - start) // 2)
     weight = np.ones(stop - start)
     rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(fade) + 0.5) / fade)
-    if fade_in:
-        weight[:fade] = rise
-    if fade_out:
-        weight[stop - start - fade:] = rise[::-1]
+    weight[:fade] = rise
+    weight[stop - start - fade:] = rise[::-1]
     data = original[target, start:stop]
     return weight * estimate + (1 - weight) * data, estimate
 
@@ -133,10 +131,9 @@ class TestLocalPopInterpolation(unittest.TestCase):
         row = raw.ch_names.index("C3")
         np.testing.assert_array_equal(raw._data[row, 300:350], original[row, 300:350])
         np.testing.assert_array_equal(raw._data[row, 450:], original[row, 450:])
-        # No fade at the recording start or the dropout: there is nothing to blend.
-        for start, stop, fade_in, fade_out in [(0, 300, False, False), (350, 450, False, True)]:
-            expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"},
-                                          fade_in, fade_out)
+        # Both ends blend with the input, including the recording and dropout boundaries.
+        for start, stop in [(0, 300), (350, 450)]:
+            expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
             np.testing.assert_allclose(raw._data[row, start:stop], expected,
                                        rtol=0, atol=1e-15)
 

@@ -57,16 +57,14 @@ def mne_reconstruction(raw, bads):
     return expected
 
 
-def faded(original, repaired, start, stop, fade_in=True, fade_out=True, sfreq=250):
+def faded(original, repaired, start, stop, sfreq=250):
     """One channel's samples with the repair blended in by 0.25-s raised cosines
-    at the requested interval ends."""
+    at both interval ends."""
     weight = np.ones(stop - start)
     length = min(int(round(0.25 * sfreq)), (stop - start) // 2)
     rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
-    if fade_in:
-        weight[:length] = rise
-    if fade_out:
-        weight[stop - start - length:] = rise[::-1]
+    weight[:length] = rise
+    weight[stop - start - length:] = rise[::-1]
     return weight * repaired[start:stop] + (1 - weight) * original[start:stop]
 
 
@@ -119,17 +117,17 @@ class TestSphericalSpline(unittest.TestCase):
             rows = [raw.ch_names.index(name) for name in ["T7"] + local]
             reconstruction._data[rows, start:stop] = repaired._data[rows, start:stop]
         # In place, T7 stays as it is, and each channel's interval takes one donor
-        # set without either overlapping channel. It fades only where it meets
-        # kept data, not at the dropout.
+        # set without either overlapping channel. Both ends fade into the input,
+        # including the dropout boundaries.
         both = mne_reconstruction(original, ["T7", "F7", "F3"])
         expected = original.copy()
-        for name, start, stop, fade_in, fade_out in [
-            ("F7", 200, 450, True, False), ("F7", 550, 600, False, True),
-            ("F3", 400, 450, True, False), ("F3", 550, 800, False, True),
+        for name, start, stop in [
+            ("F7", 200, 450), ("F7", 550, 600),
+            ("F3", 400, 450), ("F3", 550, 800),
         ]:
             row = raw.ch_names.index(name)
             expected._data[row, start:stop] = faded(
-                original._data[row], both._data[row], start, stop, fade_in, fade_out
+                original._data[row], both._data[row], start, stop
             )
         geometry = step2._spline_geometry(raw)
         mean = step2._robust_mean(raw, raw.info["bads"], flatlines, geometry)
@@ -148,6 +146,23 @@ class TestSphericalSpline(unittest.TestCase):
             donors, targets = call.args[1], call.args[2]
             self.assertFalse(set(donors) & set(targets))
             self.assertNotIn(NAMES.index("T7"), set(donors) | set(targets))
+
+    def test_recording_edge_spans_fade_from_temporally_filled_samples(self):
+        for start, stop in [(0, 400), (2600, 3000), (0, 40), (2960, 3000)]:
+            with self.subTest(start=start, stop=stop):
+                raw = make_raw()
+                row = raw.ch_names.index("F7")
+                step2._bridge_flat_spans_inplace(raw._data[row], [[start, stop]])
+                flatlines = flatlines_for(raw, {"F7": [[start, stop]]})
+                original = raw.copy()
+                repaired = mne_reconstruction(original, ["F7"])
+                expected = original.copy()
+                expected._data[row, start:stop] = faded(
+                    original._data[row], repaired._data[row], start, stop
+                )
+                step2.interpolate_local_flatline_inplace(raw, flatlines)
+                np.testing.assert_allclose(raw.get_data(), expected.get_data(),
+                                           rtol=0, atol=1e-15)
 
     def test_local_repair_leaves_bad_channels_alone(self):
         raw = make_raw()
