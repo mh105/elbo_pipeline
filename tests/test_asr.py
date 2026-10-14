@@ -298,18 +298,24 @@ class TestASRWrapper(unittest.TestCase):
         geometry = step2._spline_geometry(raw)
         target = raw.ch_names.index("Fp1")
         reference = raw.ch_names.index("F3")
-        # The reference's original flat interval overlaps Fp1's, so it donates
-        # nowhere in it; 0.25-s fades blend the estimate in and out.
+        # The effective reference donates until its original flat span starts.
+        # The two 100-sample configurations cap their fades at 50 samples.
         donors = [i for i in geometry["picks"]
-                  if raw.ch_names[i] not in raw.info["bads"] and i not in [target, reference]]
+                  if raw.ch_names[i] not in raw.info["bads"] and i != target]
         weights = step2._spline_weights(geometry, donors, [target])
-        estimate = (weights @ corrected[donors, 1000:1200])[0]
-        weight = np.ones(200)
-        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(62) + 0.5) / 62)
-        weight[:62], weight[-62:] = rise, rise[::-1]
+        before = (weights @ corrected[donors, 1000:1200])[0]
+        donors = [i for i in donors if i != reference]
+        weights = step2._spline_weights(geometry, donors, [target])
+        after = (weights @ corrected[donors, 1000:1200])[0]
+        data = corrected[target, 1000:1200]
+        expected = data.copy()
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(50) + 0.5) / 50)
+        expected[:50] = (1 - rise) * data[:50] + rise * before[:50]
+        expected[50:100] = before[50:100]
+        expected[100:150] = (1 - rise) * before[100:150] + rise * after[100:150]
+        expected[150:] = (1 - rise) * after[150:] + rise * data[150:]
         np.testing.assert_allclose(
-            raw._data[target, 1000:1200],
-            weight * estimate + (1 - weight) * corrected[target, 1000:1200],
+            raw._data[target, 1000:1200], expected,
             rtol=0, atol=1e-15,
         )
         np.testing.assert_array_equal(raw._data[reference], 0)

@@ -89,10 +89,11 @@ bad_ch_by_pop detects on the good channels, over the 0.3 Hz high-pass reach
 on a robust-average copy, then the others, found on the final reference. The
 final reference is the native one if it is good; if it is bad,
 validate_reference_inplace then re-references the data to the nearest good one
-of its five nearest electrodes, or raises if all five are bad. Each repaired
-flat or pop interval takes one set of spline donors, the good channels neither
-repaired nor locally flat in it, and blends with the input over 0.25 s at both
-ends of every repair interval.
+of its five nearest electrodes, or raises if all five are bad. Flatline repair
+and the robust mean share active flat-channel configurations and 0.25-s
+internal crossfades. Each pop interval takes one set of spline donors, the
+good channels neither repaired nor locally flat in it, and blends with the
+input over 0.25 s at both ends.
 
 apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
@@ -688,6 +689,36 @@ def _flatline_configurations(raw, flatlines, bads=()):
             pending = start, stop, pattern
     if pending is not None:
         yield pending
+
+
+def _flatline_interpolation_plan(raw, flatlines, bads=()):
+    """Yield disjoint (start, stop, flat, other, weight) interpolation pieces.
+
+    flat is the active local configuration; other is its intersection with
+    the neighbouring configuration during a fade. weight multiplies flat's
+    projection, with the remainder multiplying other's; None means flat alone.
+    Fades stay inside each configuration, including at recording and global
+    dropout edges, and are capped at half its duration. Simultaneous departures
+    and arrivals therefore pass through their common flat channels.
+    """
+    configurations = list(_flatline_configurations(raw, flatlines, bads))
+    fade = int(round(0.25 * raw.info["sfreq"]))
+    for index, (start, stop, flat) in enumerate(configurations):
+        before = configurations[index - 1][2] if index else ()
+        after = configurations[index + 1][2] if index + 1 < len(configurations) else ()
+        before = tuple(sorted(set(flat).intersection(before)))
+        after = tuple(sorted(set(flat).intersection(after)))
+        length = min(fade, (stop - start) // 2)
+        first = start + length if before != flat else start
+        last = stop - length if after != flat else stop
+        if first > start or last < stop:
+            rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(length) + 0.5) / length)
+        if first > start:
+            yield start, first, flat, before, rise
+        if first < last:
+            yield first, last, flat, flat, None
+        if last < stop:
+            yield last, stop, flat, after, rise[::-1]
 
 
 def _mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
@@ -1913,10 +1944,13 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     an interpolated Raw copy.
 
     Whole-channel bads are repaired throughout the record. Local flat channels
-    are also repaired only in their intervals outside the global dropout intervals
-    that detect_flatline_inplace annotated as BAD_by_flatline.
-    Other BAD spans do not stop the local repair. Every configuration reads
-    its genuine donors from the original recording.
+    are repaired outside the global BAD_by_flatline dropouts; other BAD spans
+    do not stop local repair. Use the same configurations and internal 0.25-s
+    fades as interpolate_local_flatline_inplace. Each projection reconstructs
+    whole-channel bads and that configuration's flats together from the input
+    donors; fades blend complete reference projections, including changes to
+    the whole-channel bad estimates and contributions from the filled input
+    traces of channels entering or leaving a configuration.
     """
     # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
     sample_chunk = 8192
@@ -1931,14 +1965,26 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     for start in range(0, raw.n_times, sample_chunk):
         stop = min(start + sample_chunk, raw.n_times)
         reference[start:stop] = coefficients @ raw._data[donors, start:stop]
-    for start, stop, flat in _flatline_configurations(raw, flatlines, bads):
+    for start, stop, flat, other, weight in _flatline_interpolation_plan(raw, flatlines, bads):
         if flat:
             donors, coefficients = _mean_configuration(
                 geometry, np.union1d(np.asarray(bads, dtype=int), flat)
             )
+            if weight is not None and other:
+                other_donors, other_coefficients = _mean_configuration(
+                    geometry, np.union1d(np.asarray(bads, dtype=int), other)
+                )
             for first in range(start, stop, sample_chunk):
                 last = min(first + sample_chunk, stop)
-                reference[first:last] = coefficients @ raw._data[donors, first:last]
+                projected = coefficients @ raw._data[donors, first:last]
+                if weight is None:
+                    reference[first:last] = projected
+                else:
+                    # This disjoint piece still contains the baseline reference.
+                    previous = (other_coefficients @ raw._data[other_donors, first:last]
+                                if other else reference[first:last])
+                    part = weight[first - start:last - start]
+                    reference[first:last] = part * projected + (1 - part) * previous
     return reference
 
 
@@ -3227,8 +3273,10 @@ def bad_ch_under_robust_ref(
     (detect_flatline_inplace's segments_bridged). For each configuration,
     repair their union using genuine, nonflat donors. Cached weights combine
     repair and averaging into one projection without making reconstructed
-    channel traces. Subtract this mean from every EEG channel of another copy,
-    whose bad channels are not interpolated, and run bad_ch_by_voltage (no
+    channel traces; shared internal 0.25-s crossfades smooth configuration
+    changes, capped at half each configuration's duration. Subtract this mean
+    from every EEG channel of another copy, whose bad channels are not
+    interpolated, and run bad_ch_by_voltage (no
     plot), bad_ch_by_HFnoise, bad_ch_by_pop, bad_ch_by_std, bad_ch_by_BBnoise,
     and bad_ch_by_correlation on it in that order: the detectors that require
     average reference after the others, with correlation last. RANSAC is not
@@ -3451,15 +3499,16 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
     detect_flatline_inplace, whose alignment is validated. Repair its local
     segments_bridged, except inside the exact BAD_by_flatline annotation spans,
     which stay as they are. Channels in
-    raw.info["bads"] are neither repaired nor donors. Spherical splines
-    estimate each channel's interval from one set of donors: the good channels
-    with no local flat interval overlapping it, read from the input, so a
-    repaired trace is never a donor; on native data the all-zero reference is a
-    donor unless it is bad. A 0.25-s raised-cosine fade blends the estimate with
-    the input at both ends, including recording edges and global dropout
-    boundaries. The EEG data lose rank where the estimate replaces them
-    fully. Bad labels, annotations, non-EEG channels, and all other samples are
-    unchanged.
+    raw.info["bads"] are neither repaired nor donors. Share the active flat
+    configurations and fades with _robust_mean: each configuration uses the
+    remaining good channels, including channels valid in that interval, from
+    the input. The all-zero reference is a donor unless it is bad or locally
+    invalid. Internal 0.25-s raised-cosine fades, capped at half each
+    configuration's duration, blend full projections through their common
+    flat channels. Fades apply at recording and global dropout boundaries too.
+    Both projections are read before any target is written. The EEG data lose
+    rank where the estimate replaces them fully. Bad labels, annotations,
+    non-EEG channels, and all other samples are unchanged.
 
     Require the native reference: reference_channel, or by default the one
     that detect_flatline_inplace resolved, flatlines["reference_channel"], must
@@ -3475,13 +3524,35 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
     if reference_channel is None:
         reference_channel = flatlines["reference_channel"]
     reference_channel = _reference_channel(raw, "native", reference_channel)
-    local = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
-    targets = {name: segments for name, segments in local.items()
-               if name not in raw.info["bads"] and name != reference_channel}
-    global_segments = _merge_segments(list(zip(*_annotations_starts_stops(
-        raw, ["BAD_by_flatline"]
-    ))))
-    _interpolate_local_intervals_inplace(raw, targets, local, global_segments)
+    sample_chunk = 8192
+    geometry = _spline_geometry(raw)
+    bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
+    good = geometry["picks"][~np.isin(geometry["picks"], bads)]
+    reference = raw.ch_names.index(reference_channel)
+    for start, stop, flat, other, weight in _flatline_interpolation_plan(raw, flatlines, bads):
+        targets = tuple(i for i in flat if i != reference)
+        if not targets:
+            continue
+        donors = good[~np.isin(good, flat)]
+        weights = _spline_weights(geometry, donors, targets)
+        common_rows = [row for row, target in enumerate(targets) if target in other]
+        if weight is not None and common_rows:
+            other_donors = good[~np.isin(good, other)]
+            other_weights = _spline_weights(
+                geometry, other_donors, [targets[row] for row in common_rows]
+            )
+        for first in range(start, stop, sample_chunk):
+            last = min(first + sample_chunk, stop)
+            projected = weights @ raw._data[donors, first:last]
+            if weight is None:
+                raw._data[targets, first:last] = projected
+            else:
+                # Read both configurations before writing any target in this piece.
+                previous = raw._data[targets, first:last]
+                if common_rows:
+                    previous[common_rows] = other_weights @ raw._data[other_donors, first:last]
+                part = weight[first - start:last - start]
+                raw._data[targets, first:last] = part * projected + (1 - part) * previous
 
 
 def interpolate_local_pops_inplace(raw, flatlines):

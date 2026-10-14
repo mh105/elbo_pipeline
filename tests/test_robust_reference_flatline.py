@@ -13,7 +13,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
-from test_flatline_interpolation import flatlines_for, mne_reconstruction
+from test_flatline_interpolation import blended_reconstruction, flatlines_for, overlapping_parts
 from test_robust_average_reference import NAMES, make_native_raw
 
 
@@ -66,13 +66,7 @@ class TestRobustReferenceFlatlines(unittest.TestCase):
     def test_multiple_passes_reference_joint_invalid_sets_without_changing_data(self):
         raw, flatlines = native_with_flatlines(global_dropout=True)
         original = raw.copy()
-        expected = mne_reconstruction(original, ["T7", "F4"])
-        intervals = [(200, 400, ["F7"]), (400, 450, ["F7", "F3"]),
-                     (550, 600, ["F7", "F3"]), (600, 800, ["F3"])]
-        for start, stop, local in intervals:
-            repaired = mne_reconstruction(original, ["T7", "F4"] + local)
-            rows = [raw.ch_names.index(name) for name in ["T7", "F4"] + local]
-            expected._data[rows, start:stop] = repaired._data[rows, start:stop]
+        expected = blended_reconstruction(original, ["T7", "F4"], overlapping_parts(True))
 
         def flag_f4(referenced, **kwargs):
             referenced.info["bads"] = list(dict.fromkeys(referenced.info["bads"] + ["F4"]))
