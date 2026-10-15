@@ -129,6 +129,7 @@ class TestPopDetection(unittest.TestCase):
         raw = pop_raw(data)
         # Unbridged spans, as if the data had not been through detect_flatline_inplace.
         flatlines = step2.detect_flatline_inplace(raw.copy())
+        step2.mask_segment_by_flatline(raw.copy(), flatlines)
         self.assertEqual(flatlines["ch_names"], ["E5"])
         report, details = step2.bad_ch_by_pop(raw, return_details=True)
         row = details["ch_names"].index("E5")
@@ -156,6 +157,7 @@ class TestPopDetection(unittest.TestCase):
             for time_s in (10, 30, 50):
                 raw._data[raw.ch_names.index(name), (time_s - 1) * SFREQ:(time_s + 1) * SFREQ] = 0
         flatlines = step2.detect_flatline_inplace(raw.copy())
+        step2.mask_segment_by_flatline(raw.copy(), flatlines)
         self.assertEqual(sorted(flatlines["ch_names"]), sorted(others))
         self.assertEqual(flatlines["global_segments_exact"], [])
 

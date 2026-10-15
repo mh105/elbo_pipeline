@@ -156,7 +156,7 @@ class TestFlatlineGapJoining(unittest.TestCase):
         raw = native_raw()
         exact = [[100, 110], [310, 320], [521, 531]]
         flatlines = flatlines_for(exact)
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         starts, stops = step2._annotations_starts_stops(raw, ["BAD_by_flatline"])
         np.testing.assert_array_equal(np.column_stack([starts, stops]), exact)
         np.testing.assert_array_equal(bad_coverage_spans(raw), [[100, 320], [521, 531]])
@@ -167,7 +167,7 @@ class TestFlatlineGapJoining(unittest.TestCase):
         raw = native_raw()
         exact = [[100, 110], [350, 360]]  # 2.4-s gap before widening.
         flatlines = flatlines_for(exact)
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         starts, stops = step2._annotations_starts_stops(raw, ["BAD_by_flatline"])
         np.testing.assert_array_equal(np.column_stack([starts, stops]), exact)
         self.assertNotIn("BAD_by_close_gap", raw.annotations.description)
@@ -177,7 +177,7 @@ class TestFlatlineGapJoining(unittest.TestCase):
         raw = native_raw(n_times=600)
         # The middle 2-s window is clear before joining these two dropouts.
         flatlines = flatlines_for([[0, 200], [400, 600]])
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         np.testing.assert_array_equal(bad_coverage_spans(raw), [[0, 600]])
         self.assertEqual(flatlines["global_segments_exact"], [[0, 200], [400, 600]])
 
@@ -189,6 +189,7 @@ class TestFlatlineGapJoining(unittest.TestCase):
         raw._data[3, 200:220] = 1e-6
         before = raw.get_data().copy()
         flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(flatlines["global_segments_exact"], [[100, 110], [310, 320]])
         starts, stops = step2._annotations_starts_stops(raw, ["BAD_by_flatline"])
         np.testing.assert_array_equal(np.column_stack([starts, stops]), [[100, 110], [310, 320]])

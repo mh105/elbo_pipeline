@@ -104,6 +104,9 @@ class TestASRWrapper(unittest.TestCase):
                 patch.object(step2, "process_asr", side_effect=fake.process), \
                 patch.object(step2, "bad_ch_by_pop", side_effect=AssertionError(
                     "ASR must reuse stored pop intervals without redetection."
+                )), \
+                patch.object(step2, "mask_segment_by_voltage", side_effect=AssertionError(
+                    "Prepare voltage mask annotations explicitly before ASR."
                 )):
             return step2.apply_asr_inplace(raw, **kwargs)
 
@@ -118,7 +121,6 @@ class TestASRWrapper(unittest.TestCase):
         })
         original = raw.get_data()
         annotations = raw.annotations.copy()
-        annotations.append(raw.first_time + 2, 1, "BAD_by_close_gap")
         rejected = step2._rejected_samples(raw)
         rejected[1250:1400] = True
         rejected[1750:1850] = True
@@ -213,7 +215,7 @@ class TestASRWrapper(unittest.TestCase):
         np.testing.assert_array_equal(raw._data[unaffected, 500:530],
                                       fake.corrected[rows, 500:530])
 
-    def test_voltage_mask_preserves_existing_annotations_and_uses_final_good_channels(self):
+    def test_asr_uses_explicit_voltage_mask_and_preserves_annotations(self):
         raw = make_raw()
         raw.info["bads"] = ["F7"]
         # A newly excluded channel cannot contribute to the final denominator.
@@ -224,8 +226,11 @@ class TestASRWrapper(unittest.TestCase):
             [10, 12, 14], [1, 1, 0.25],
             ["BAD_voltage_mask", "bad_voltage_mask", "BAD_manual"],
         ))
+        step2.mask_segment_by_voltage(raw, reference_channel="Cz")
+        annotations = raw.annotations.copy()
         fake = FakeASR()
         details = self.run_fake(raw, fake, reference_channel="Cz")
+        self.assertEqual(raw.annotations, annotations)
         descriptions = list(raw.annotations.description)
         self.assertEqual(descriptions.count("BAD_voltage_mask"), 2)
         self.assertIn("bad_voltage_mask", descriptions)
@@ -492,6 +497,7 @@ class TestASRWrapper(unittest.TestCase):
             4e-3 * np.sin(2 * np.pi * 3 * np.arange(stop - start) / 250)
         )
         raw.set_annotations(mne.Annotations([5], [1], ["bad_acquisition"]))
+        step2.mask_segment_by_voltage(raw, reference_channel="Cz")
         original = raw.get_data()
         designer = _calibration._design_statistics_filter
         details = step2.apply_asr_inplace(raw, "Cz", flatlines=flatlines_for(raw, {}))

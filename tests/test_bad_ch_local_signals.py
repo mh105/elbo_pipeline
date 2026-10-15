@@ -18,6 +18,7 @@ from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
     bad_ch_by_std,
     detect_flatline_inplace,
+    mask_segment_by_flatline,
 )
 
 
@@ -27,6 +28,7 @@ def flatline(raw, **kwargs):
     Flatline intervals are gap-joined per channel without filter widening.
     """
     flatlines = detect_flatline_inplace(raw, kwargs.get("reference_channel"))
+    mask_segment_by_flatline(raw, flatlines)
     return bad_ch_by_flatline(raw, flatlines=flatlines, **kwargs)
 
 
@@ -233,6 +235,7 @@ class TestBadChByFlatline(unittest.TestCase):
                 variances[:flat_windows, 0] = 0
                 raw = make_raw(variances)
                 flatlines = detect_flatline_inplace(raw)
+                mask_segment_by_flatline(raw, flatlines)
                 bridged = raw.get_data().copy()  # Detection bridged E0's flat span.
                 self.assertEqual(bad_ch_by_flatline(raw, flatlines=flatlines),
                                  {"flatline": expected})
@@ -314,6 +317,7 @@ class TestWindowRules(unittest.TestCase):
                 kwargs = {}
                 if not average:  # Detect once, as the pipeline does, then score.
                     kwargs["flatlines"] = detect_flatline_inplace(raw)
+                    mask_segment_by_flatline(raw, kwargs["flatlines"])
                 raw.set_annotations(mne.Annotations([0], [2], ["BAD_test"]))
                 # Only one of four full windows violates the rule.
                 self.assertEqual(detector(raw, **kwargs), report_of(detector, []))

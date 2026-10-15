@@ -35,7 +35,7 @@ def native_raw(n_windows=4, n_nonreference=12, first_samp=0, tail=0, seed=17):
 
 def flatlines_for(raw, intervals):
     """Flatline metadata for raw with prescribed segments and no global
-    dropouts; tests that need dropouts call _mask_segment_by_flatline."""
+    dropouts; tests that need dropouts call mask_segment_by_flatline."""
     with patch.object(step2.mne.filter, "filter_data", side_effect=lambda data, *a, **k: data.copy()):
         result = step2.detect_flatline_inplace(raw.copy(), reference_channel="Cz")
     result["ch_names"] = list(intervals)
@@ -96,7 +96,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
                 flatlines = flatlines_for(raw, {name: [[150, 275]] for name in ("E0", "E1", "E2")})
                 raw.info["bads"] = ["E1", "E4", "E5"]
                 before = raw.get_data().copy()
-                self.assertIsNone(step2._mask_segment_by_flatline(raw, flatlines))
+                self.assertIsNone(step2.mask_segment_by_flatline(raw, flatlines))
                 mask = raw.annotations.description == "BAD_by_flatline"
                 np.testing.assert_allclose(raw.annotations.onset[mask], [raw.first_time + 0.6])
                 np.testing.assert_allclose(raw.annotations.duration[mask], [0.5])
@@ -135,6 +135,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
         raw._data[0, WINDOW:2 * WINDOW] = 3e-6  # E0 flat in window 1.
         raw._data[1:5, 100:105] += 600e-6  # 4 of 12 channels exceed 500 uV in window 0.
         flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
         annotations = raw.annotations.copy()
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
                                                    return_details=True)
@@ -146,6 +147,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
         raw = native_raw()
         raw._data[3] = 0  # A dead electrode besides the Cz reference.
         flatlines = step2.detect_flatline_inplace(raw, "Cz")
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(step2.bad_ch_by_flatline(raw, reference_channel="Cz",
                                                   flatlines=flatlines),
                          {"flatline": ["E3"]})
@@ -168,13 +170,13 @@ class TestPublicFlatlineStages(unittest.TestCase):
             with self.subTest(spans=spans):
                 raw = native_raw(n_nonreference=7)
                 flatlines = flatlines_for(raw, spans)
-                step2._mask_segment_by_flatline(raw, flatlines)
+                step2.mask_segment_by_flatline(raw, flatlines)
                 with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
                     step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
         # A 0.5-s window still fits at either edge of the joined annotation.
         raw = native_raw(n_nonreference=7)
         flatlines = flatlines_for(raw, every_window)
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         _, details = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines,
                                              window_length=0.5, return_details=True)
         self.assertEqual(int(details["retained"].sum()), 2)
@@ -185,6 +187,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
             for w in range(4):
                 raw._data[row, w * WINDOW + 200:w * WINDOW + 300] = 3e-6
         flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(len(flatlines["global_segments_exact"]), 4)
         self.assertEqual(len(raw.annotations), 7)  # Four events and three inserted gaps.
         with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
@@ -206,7 +209,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
                 })
                 voltage = raw.copy()
                 original = raw.copy()
-                step2._mask_segment_by_flatline(raw, flatlines)  # Cz, from detection.
+                step2.mask_segment_by_flatline(raw, flatlines)  # Cz, from detection.
                 step2.mask_segment_by_voltage(voltage, window_length=10 / SFREQ)
                 self.assertEqual(flatlines["global_ch_names"], [f"E{i}" for i in range(2, 9)])
                 self.assertEqual(flatlines["global_segments_exact"], [[20, 40]])  # 2/7 > 25%.
@@ -222,18 +225,18 @@ class TestPublicFlatlineStages(unittest.TestCase):
         flatlines = flatlines_for(raw, {"E0": [[20, 40]], "E1": [[20, 40]]})
         raw._data[:2, 20:40] = 600e-6
         voltage = raw.copy()
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         step2.mask_segment_by_voltage(voltage, window_length=10 / SFREQ)
         self.assertEqual(len(raw.annotations), 0)  # 2/8 is exactly 25%.
         self.assertEqual(len(voltage.annotations), 0)
         raw.info["bads"] = ["E6", "E7"]
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(flatlines["global_segments_exact"], [[20, 40]])  # 2/6 > 25%.
         only_bad = native_raw(n_nonreference=8)
         only_bad.info["bads"] = ["E0", "E1", "E2", "E3"]
         flatlines = flatlines_for(only_bad, {name: [[0, only_bad.n_times]]
                                             for name in only_bad.info["bads"]})
-        step2._mask_segment_by_flatline(only_bad, flatlines)
+        step2.mask_segment_by_flatline(only_bad, flatlines)
         self.assertEqual(len(only_bad.annotations), 0)
         self.assertEqual(flatlines["global_segments_exact"], [])
 
@@ -249,6 +252,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
         # A named reference makes the other all-zero channel an ordinary flat one,
         # which the mask then counts against the pool without the reference.
         flatlines = step2.detect_flatline_inplace(raw, reference_channel="Cz")
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(flatlines["reference_channel"], "Cz")
         self.assertEqual(flatlines["ch_names"], ["E0"])
         self.assertEqual(flatlines["global_ch_names"], [f"E{i}" for i in range(12)])
@@ -257,7 +261,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
         raw = native_raw()
         flatlines = flatlines_for(raw, {})
         raw.info["bads"] = raw.ch_names[:-1]
-        for mask, args in ((step2._mask_segment_by_flatline, (flatlines,)),
+        for mask, args in ((step2.mask_segment_by_flatline, (flatlines,)),
                            (step2.mask_segment_by_voltage, ())):
             with self.subTest(mask=mask.__name__), self.assertRaisesRegex(ValueError, "No usable EEG"):
                 mask(raw, *args)
@@ -266,7 +270,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
     def test_saved_global_intervals_survive_reference_and_bad_label_changes(self):
         raw = native_raw(n_nonreference=7)
         flatlines = flatlines_for(raw, {name: [[20, 40]] for name in ("E0", "E1", "E2")})
-        step2._mask_segment_by_flatline(raw, flatlines)
+        step2.mask_segment_by_flatline(raw, flatlines)
         raw.info["bads"] = ["E0", "E1", "E2"]
         average(raw)
         self.assertEqual(flatlines["global_segments_exact"], [[20, 40]])
@@ -277,7 +281,7 @@ class TestPublicFlatlineStages(unittest.TestCase):
                           (40, raw.n_times, (), (), False)])
         unmasked = native_raw(n_nonreference=12)
         flatlines = flatlines_for(unmasked, {"E0": [[20, 40]], "E1": [[20, 40]]})
-        step2._mask_segment_by_flatline(unmasked, flatlines)
+        step2.mask_segment_by_flatline(unmasked, flatlines)
         unmasked.info["bads"] = [f"E{i}" for i in range(2, 10)]
         self.assertEqual(flatlines["global_segments_exact"], [])
         targets = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
@@ -359,7 +363,7 @@ class TestLocalFlatlineMetricMasks(unittest.TestCase):
     def test_correlation_skips_exact_global_dropout_without_filter_widening(self):
         native = native_raw(n_windows=6)
         flatlines = flatlines_for(native, {name: [[1500, 1520]] for name in ("E0", "E1", "E2", "E3")})
-        step2._mask_segment_by_flatline(native, flatlines)
+        step2.mask_segment_by_flatline(native, flatlines)
         referenced = average(native)
         original_annotations = referenced.annotations.copy()
         _, details = step2.bad_ch_by_correlation(referenced, flatlines=flatlines, return_details=True)

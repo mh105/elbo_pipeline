@@ -45,7 +45,7 @@ def flatlines_for(raw, spans, channel_fraction_cutoff=0.25):
               "raw_ch_names": list(raw.ch_names), "sfreq": raw.info["sfreq"],
               "first_samp": raw.first_samp, "n_times": raw.n_times, "reference_channel": "Cz",
               "min_samples": 10, "tolerance_v": 1e-9, "highpass_hz": 1.0}
-    step2._mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
+    step2.mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
     return result
 
 

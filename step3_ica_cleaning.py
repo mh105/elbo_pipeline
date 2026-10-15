@@ -30,6 +30,7 @@ from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
     bad_ch_by_flatline,
     detect_flatline_inplace,
+    mask_segment_by_flatline,
     bad_ch_time_detection_inplace,
 )
 
@@ -202,7 +203,8 @@ if __name__ == "__main__":
     bad_ch_report = {}
     # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
     bad_ch_report.update(bad_ch_by_nan(raw))
-    flatlines = detect_flatline_inplace(raw)  # Also annotates global dropouts.
+    flatlines = detect_flatline_inplace(raw)
+    mask_segment_by_flatline(raw, flatlines)
     bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
 
     # %% Line noise removal

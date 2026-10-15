@@ -172,6 +172,7 @@ class TestVoltageDetection(unittest.TestCase):
         raw._data[0, :20] += 300e-6  # 20 exceeding samples...
         raw._data[0, 40:80] = 1e-6  # ...and a 0.4-s flat span on E0.
         flatlines = step2.detect_flatline_inplace(raw.copy())
+        step2.mask_segment_by_flatline(raw.copy(), flatlines)
         self.assertEqual(flatlines["segments_bridged"], [[[40, 80]]])
         # Counting the flat span as valid, in-range samples dilutes 20/60 to 20/100.
         report, details = step2.bad_ch_by_voltage(raw.copy(), plot=False, return_details=True)

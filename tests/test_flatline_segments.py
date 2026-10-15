@@ -34,17 +34,16 @@ def identity_filter(data, *args, **kwargs):
     return data.copy()
 
 
-def detect(raw, *args, **kwargs):
-    """Keep exact detections in segments_exact and disable global dropouts
-    by default (a cutoff of 100% of channels
-    is never strictly exceeded), since these recordings have only a few."""
-    kwargs.setdefault("channel_fraction_cutoff", 1.0)
-    return step2.detect_flatline_inplace(raw, *args, **kwargs)
+def detect(raw, *args, channel_fraction_cutoff=1.0, **kwargs):
+    """Detect and mask explicitly; suppress global dropouts by default."""
+    result = step2.detect_flatline_inplace(raw, *args, **kwargs)
+    step2.mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
+    return result
 
 
 def prescribed_segments(raw, by_name):
     """Flatline metadata for raw with prescribed segments; global dropouts are
-    decided later by the test, with _mask_segment_by_flatline."""
+    decided later by the test, with mask_segment_by_flatline."""
     with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
         result = detect(raw.copy(), "Cz")
     result["ch_names"] = list(by_name)
@@ -72,8 +71,8 @@ class TestFlatlineDetection(unittest.TestCase):
         self.assertEqual(result["min_samples"], 10)
         self.assertEqual(result["tolerance_v"], 1e-9)
         self.assertEqual(result["highpass_hz"], 1.0)
-        # Detection always ends with the global dropout decision; one flat
-        # channel of seven is not a dropout, so nothing is annotated.
+        # The explicit mask records the global decision; one flat channel of
+        # seven is not a dropout, so nothing is annotated.
         self.assertEqual(result["global_channel_fraction_cutoff"], 0.25)
         self.assertEqual(result["global_ch_names"], [f"E{i}" for i in range(7)])
         self.assertEqual(result["global_segments_exact"], [])
@@ -302,7 +301,9 @@ class TestFlatlineBridging(unittest.TestCase):
 
     def detect(self, **kwargs):
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-            return step2.detect_flatline_inplace(self.raw, "Cz", **kwargs)
+            result = step2.detect_flatline_inplace(self.raw, "Cz", **kwargs)
+        step2.mask_segment_by_flatline(self.raw, result)
+        return result
 
     def test_each_channels_local_and_global_spans_are_bridged_together(self):
         result = self.detect()
@@ -330,6 +331,7 @@ class TestFlatlineBridging(unittest.TestCase):
         original = raw._data.copy()
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
             result = step2.detect_flatline_inplace(raw, "Cz")
+        step2.mask_segment_by_flatline(raw, result)
         self.assertEqual(result["global_segments_exact"], [[2800, 3000]])
         np.testing.assert_array_equal(raw._data[0], original[0])
         np.testing.assert_array_equal(raw._data[1, 2000:], original[1, 1999])
@@ -370,12 +372,17 @@ class TestFlatlineBridging(unittest.TestCase):
 
 
 class TestFlatlineApplication(unittest.TestCase):
-    def test_detection_masks_global_dropouts_in_place(self):
+    def test_detection_and_global_mask_are_separate_stages(self):
         raw = make_raw(n_times=50, n_eeg=9)
         raw.info["bads"] = ["E7"]
         raw._data[:2, 10:20] = 2e-6  # E0 and E1: 2 of 7 eligible channels.
         with patch.object(step2.mne.filter, "filter_data", side_effect=identity_filter):
-            result = detect(raw, "Cz", channel_fraction_cutoff=0.2)
+            result = step2.detect_flatline_inplace(raw, "Cz")
+        self.assertNotIn("global_segments_exact", result)
+        self.assertEqual(len(raw.annotations), 0)
+        bridged = raw.get_data()
+        self.assertIsNone(step2.mask_segment_by_flatline(raw, result, 0.2))
+        np.testing.assert_array_equal(raw.get_data(), bridged)
         self.assertEqual(result["global_channel_fraction_cutoff"], 0.2)
         self.assertEqual(result["global_ch_names"], [f"E{i}" for i in range(7)])
         self.assertEqual(result["global_segments_exact"], [[10, 20]])
@@ -386,7 +393,7 @@ class TestFlatlineApplication(unittest.TestCase):
             with self.subTest(cutoff=cutoff), self.assertRaisesRegex(
                 ValueError, "channel_fraction_cutoff"
             ):
-                detect(raw.copy(), "Cz", channel_fraction_cutoff=cutoff)
+                step2.mask_segment_by_flatline(raw.copy(), result, cutoff)
 
     def test_window_overlap_half_open_boundaries_and_partial_tail(self):
         mask = step2._segments_to_windows([[19, 30], [40, 49]], 10, 4)
@@ -446,7 +453,7 @@ class TestFlatlineApplication(unittest.TestCase):
         result = prescribed_segments(raw, {
             "E0": [[4, 20]], "E1": [[10, 30]], "E2": [[12, 18]],
         })
-        step2._mask_segment_by_flatline(raw, result)  # Global dropout [10, 20).
+        step2.mask_segment_by_flatline(raw, result)  # Global dropout [10, 20).
         targets = dict(zip(result["ch_names"], result["segments_bridged"]))
         global_flat = list(zip(*step2._annotations_starts_stops(raw, ["BAD_by_flatline"])))
         expected = [(0, 4, (), (), False), (4, 10, (1,), (1,), False), (10, 20, (), (), True),

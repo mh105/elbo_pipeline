@@ -27,7 +27,9 @@ def native_raw(n_times=2000, sfreq=100, first_samp=0):
 
 def detect(raw):
     with patch.object(step2.mne.filter, "filter_data", side_effect=lambda x, *a, **k: x.copy()):
-        return step2.detect_flatline_inplace(raw, "Cz")
+        result = step2.detect_flatline_inplace(raw, "Cz")
+    step2.mask_segment_by_flatline(raw, result)
+    return result
 
 
 def annotation_spans(raw, label):
@@ -109,7 +111,8 @@ class TestFlatlineHandling(unittest.TestCase):
 
     def test_detection_does_not_require_a_complete_scoring_window(self):
         parameters = signature(step2.detect_flatline_inplace).parameters
-        for name in ("window_length", "highpass_hz", "downstream_highpass_hz"):
+        for name in ("window_length", "highpass_hz", "downstream_highpass_hz",
+                     "channel_fraction_cutoff"):
             self.assertNotIn(name, parameters)
         raw = native_raw(n_times=400)
         raw._data[:2, 150:160] = 5e-6

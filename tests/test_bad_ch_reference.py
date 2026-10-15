@@ -55,6 +55,7 @@ class TestReferenceRequirements(unittest.TestCase):
                         kwargs["flatlines"] = step2.detect_flatline_inplace(
                             raw, reference_channel
                         )
+                        step2.mask_segment_by_flatline(raw, kwargs["flatlines"])
                     result = method(raw, **kwargs)
                     self.assertEqual(result, {criterion(method): []})
 
@@ -68,9 +69,11 @@ class TestReferenceRequirements(unittest.TestCase):
                     original = raw.get_data().copy()
                     kwargs = {"reference_channel": reference_channel}
                     if method is step2.bad_ch_by_flatline:
+                        native = make_raw(average=False)
                         kwargs["flatlines"] = step2.detect_flatline_inplace(
-                            make_raw(average=False), reference_channel
+                            native, reference_channel
                         )
+                        step2.mask_segment_by_flatline(native, kwargs["flatlines"])
                     with self.assertRaisesRegex(ValueError, message):
                         method(raw, **kwargs)
                     self.assertEqual(raw.info["bads"], [])
@@ -84,6 +87,7 @@ class TestReferenceRequirements(unittest.TestCase):
             step2.detect_flatline_inplace(raw)
         self.assertEqual(step2.bad_ch_by_nan(raw, reference_channel="Cz"), {"nan": []})
         flatlines = step2.detect_flatline_inplace(raw, reference_channel="Cz")
+        step2.mask_segment_by_flatline(raw, flatlines)
         result = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
         self.assertEqual(result, {"flatline": ["E0"]})
         # With E0 now bad, the automatic search finds Cz again.
@@ -95,6 +99,7 @@ class TestReferenceRequirements(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             step2.detect_flatline_inplace(raw)
         flatlines = step2.detect_flatline_inplace(raw, reference_channel="Cz")
+        step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(step2.bad_ch_by_flatline(raw, reference_channel="Cz",
                                                   flatlines=flatlines),
                          {"flatline": []})

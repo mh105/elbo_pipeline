@@ -99,6 +99,7 @@ class TestWindowDetails(unittest.TestCase):
         # E0's final 2-s gap is closed in its channel span, independently of
         # the global dropout and existing BAD annotation.
         flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
         original = raw.copy()
         expected = step2.bad_ch_by_flatline(raw.copy(), flatlines=flatlines)
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,

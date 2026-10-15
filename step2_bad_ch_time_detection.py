@@ -6,12 +6,13 @@ criteria; iteration between bad-channel and
 bad-time detection remains to be developed.
 
 Flatlines come first. On the native data, right after bad_ch_by_nan,
-detect_flatline_inplace finds constant flatlines and exact ramps, annotates
-global dropouts (more than 25% of the eligible channels flat at once) as
-BAD_by_flatline. Per-channel detections remain in segments_exact; gaps of at
-most 2 s are joined in segments_bridged, which are filled linearly before
-filtering, including each channel's global-flat portions. No flatline span is
-widened by filter reach. Every later detector, bad_ch_under_robust_ref, and
+detect_flatline_inplace finds constant flatlines and exact ramps. Per-channel
+detections remain in segments_exact; gaps of at most 2 s are joined in
+segments_bridged, which are filled linearly before filtering, including each
+channel's global-flat portions. Then mask_segment_by_flatline annotates global
+dropouts (more than 25% of the eligible channels flat at once) as
+BAD_by_flatline, using the exact detections. No flatline span is widened by
+filter reach. Every later detector, bad_ch_under_robust_ref, and
 interpolate_local_artifacts_inplace take that dictionary. Global BAD
 annotations keep their original labels and bounds. A common policy fills gaps
 of at most 2 s between them with BAD_by_close_gap annotations; these
@@ -96,15 +97,16 @@ robust mean. Internal crossfades remove donors before their invalid spans and
 restore them afterwards; only targets' own outer fades blend with input. Fades
 last up to 0.25 s and stay inside each configuration.
 
-apply_asr_inplace adds the voltage mask and calibrates standard ASR on good EEG
-channels without the effective zero reference. Calibration omits BAD
-annotations, gap-joined local flat intervals, and repaired pop intervals, then
-uses automatic selection; at least 60 seconds must remain. Its statistics use a
-four-second minimum-phase FIR with ASR's intended amplitude gains and 100-ms
-covariance blocks. Correction processes the full timeline, including masked
-periods, at cutoff 20. Afterwards, the joint flat/pop targets are reconstructed
-again from corrected donors, including the effective reference's historical
-intervals. Subtract its reconstructed trace from every EEG channel to restore
+After reference validation, mask_segment_by_voltage adds the voltage mask.
+apply_asr_inplace calibrates standard ASR on good EEG channels without the
+effective zero reference. Calibration omits BAD annotations, gap-joined local
+flat intervals, and repaired pop intervals, then uses automatic selection; at
+least 60 seconds must remain. Its statistics use a four-second minimum-phase
+FIR with ASR's intended amplitude gains and 100-ms covariance blocks.
+Correction processes the full timeline, including masked periods, at cutoff
+20. Afterwards, the joint flat/pop targets are reconstructed again from
+corrected donors, including the effective reference's historical intervals.
+Subtract its reconstructed trace from every EEG channel to restore
 zero reference; this final refinement applies the edge fades again. Return one
 details dictionary with correction duration and percentage, component-rejection
 and applied-correction intervals on the original sample timeline, and
@@ -397,22 +399,14 @@ def detect_flatline_inplace(
     *,
     min_samples=10,
     tolerance_v=1e-9,
-    channel_fraction_cutoff=0.25,
 ):
-    """Detect native-reference flats, annotate global periods, and bridge each
-    channel's own gap-joined spans in place; return the flatline dictionary.
+    """Detect and bridge native-reference flats; return their dictionary.
 
     Run this on the preloaded native data right after bad_ch_by_nan,
-    before any other step 2 function: every later detector and the
-    robust reference rely on its mask and dictionary.
-
-    Global dropouts are intervals where strictly more than
-    channel_fraction_cutoff of the EEG channels not in raw.info["bads"] (the
-    native reference excluded) are flat at once, judged on the exact detections
-    (_mask_segment_by_flatline). Save global_segments_exact and annotate those
-    exact bounds as BAD_by_flatline. The common BAD annotation policy fills
-    gaps of at most 2 s with BAD_by_close_gap, regardless of the neighbouring
-    BAD labels. No annotation is widened by filter reach here.
+    then call mask_segment_by_flatline(raw, flatlines) before any other step 2
+    function. Every later detector and the robust reference rely on the saved
+    global mask decision and dictionary. This function leaves annotations
+    unchanged.
 
     Save the full per-channel detections as segments_exact, including
     portions classified global. Join each channel's gaps of at most 2 s
@@ -443,10 +437,10 @@ def detect_flatline_inplace(
     sampling/crop metadata for validation by later consumers.
     segments_on_subtypes stores exact detections as segments_on_raw,
     segments_on_highpass, and segments_on_ramp. All are aligned with
-    ch_names. The exact global dropouts are saved as global_segments_exact,
-    with global_ch_names and global_channel_fraction_cutoff. Run
-    bad_ch_by_nan first; the native zero reference is exempt. Include
-    finite existing bad EEG channels; skip already bad nonfinite channels.
+    ch_names. mask_segment_by_flatline adds global_segments_exact,
+    global_ch_names, and global_channel_fraction_cutoff. The native zero
+    reference is exempt. Include finite existing bad EEG channels; skip
+    already bad nonfinite channels.
     """
     # One sample always has zero range, so a block needs at least two.
     if (isinstance(min_samples, (bool, np.bool_))
@@ -456,11 +450,6 @@ def detect_flatline_inplace(
         raise ValueError("tolerance_v must be finite and nonnegative (volts).")
     if raw.info["sfreq"] <= 2:
         raise ValueError("sfreq must exceed 2 Hz for the fixed 1 Hz flatline filter.")
-    if (
-        not np.isfinite(channel_fraction_cutoff)
-        or not 0 <= channel_fraction_cutoff <= 1
-    ):
-        raise ValueError("channel_fraction_cutoff must be between 0 and 1.")
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
     min_samples = int(min_samples)
@@ -515,7 +504,6 @@ def detect_flatline_inplace(
             subtypes["segments_on_raw"].append(original)
             subtypes["segments_on_highpass"].append(filtered)
             subtypes["segments_on_ramp"].append(ramp)
-    _mask_segment_by_flatline(raw, result, channel_fraction_cutoff)
     for row, name in enumerate(result["ch_names"]):
         _bridge_flat_spans_inplace(
             raw._data[raw.ch_names.index(name)], result["segments_bridged"][row]
@@ -557,8 +545,8 @@ def _validate_flatlines(raw, flatlines):
         )
     if flatlines.get("global_segments_exact") is None:
         raise ValueError(
-            "Flatline dictionary has no global_segments_exact; create it with "
-            "detect_flatline_inplace."
+            "Flatline dictionary has no global_segments_exact; run "
+            "mask_segment_by_flatline after detect_flatline_inplace."
         )
     for intervals in [*exact, *segments, flatlines["global_segments_exact"]]:
         bounds = np.asarray(intervals)
@@ -736,19 +724,21 @@ def _iterate_interpolation_intervals(raw, targets, global_flat=(), *, invalid=No
             yield last, stop, repair, excluded, after[0], after[1], rise[::-1]
 
 
-def _mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
+def mask_segment_by_flatline(raw, flatlines, channel_fraction_cutoff=0.25):
     """Append BAD_by_flatline dropout annotations; return None.
 
-    Called by detect_flatline_inplace, on the native data whose reference it
-    resolved (flatlines["reference_channel"]), with the exact detections in
-    flatlines["segments_exact"]. Use only EEG channels not in raw.info["bads"],
-    excluding the native reference from both the flat count and the
-    denominator. A dropout has strictly more than channel_fraction_cutoff of
-    that pool simultaneously flat. Save global_segments_exact for provenance
-    and annotate the exact bounds with no filter widening. _add_bad_annotations
+    Call after detect_flatline_inplace, before other detectors and filtering.
+    Use its resolved native reference (flatlines["reference_channel"]) and
+    saved exact detections in flatlines["segments_exact"], even though the data
+    have already been bridged. Use only EEG channels not in raw.info["bads"],
+    excluding the native reference from both the flat count and denominator.
+    A dropout has strictly more than channel_fraction_cutoff of that pool
+    simultaneously flat. Save global_segments_exact for provenance and
+    annotate the exact bounds with no filter widening. _add_bad_annotations
     fills nearby global BAD gaps under their own BAD_by_close_gap label; this
     does not change any channel's replacement spans. Scoring consumers check
-    that enough unmasked data remain using their own window length.
+    that enough unmasked data remain using their own window length. Signal
+    data are unchanged.
     """
     picks = _mask_eeg_picks(raw, flatlines["reference_channel"])
     names = [raw.ch_names[i] for i in picks]
@@ -2109,14 +2099,14 @@ def bad_ch_by_flatline(
 
     Require native-reference data and exclude existing bads/reference/non-EEG
     channels. flatlines is required: the dictionary from
-    detect_flatline_inplace, which has already annotated this Raw's global
-    dropouts as BAD_by_flatline. Any overlap with one of its segments marks the
-    channel's complete window. Omit windows overlapping BAD annotations,
-    including those global dropouts, and the temporary 0.1-second voltage mask,
-    built from this native data with the resolved reference excluded, as in the
-    other detectors; ignore the partial tail. A channel flat in fewer windows
-    can still be flagged by bad_ch_by_RANSAC, which counts its flat windows as
-    failures to predict.
+    detect_flatline_inplace, followed by mask_segment_by_flatline to annotate
+    this Raw's global dropouts as BAD_by_flatline. Any overlap with one of its
+    segments marks the channel's complete window. Omit windows overlapping BAD
+    annotations, including global dropouts, and the temporary 0.1-second
+    voltage mask, built from this native data with the resolved reference
+    excluded, as in the other detectors; ignore the partial tail. A channel
+    flat in fewer windows can be flagged by bad_ch_by_RANSAC, which counts its
+    flat windows as failures to predict.
 
     Add detections to info['bads']; leave data/annotations unchanged. Details
     follow the other window detectors, with flat and violates equal to the
@@ -3928,17 +3918,16 @@ def _asr_filter_channels(data, b, a, zi=None):
 def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals=None):
     """Correct good EEG channels with ASR in place; return details.
 
-    Run after interpolate_local_artifacts_inplace and
-    validate_reference_inplace; pass the returned reference_channel if it
-    switched electrodes. Exclude raw.info["bads"] and the effective zero
-    reference from ASR. Append voltage mask annotations using this final pool,
-    preserving existing annotations. Calibration omits every case-insensitive
-    BAD* period, gap-joined local flat intervals, and pop_intervals of the
-    included channels and effective reference. Pass the pop_intervals
-    dictionary returned by interpolate_local_artifacts_inplace. Local intervals
-    retain their bounds without added padding or gap joining. Concatenate this
-    support for native automatic selection,
-    requiring at least 60 retained seconds.
+    Run after interpolate_local_artifacts_inplace, validate_reference_inplace,
+    and mask_segment_by_voltage. Pass the effective reference_channel returned
+    by validation if it switched electrodes. Exclude raw.info["bads"] and the
+    effective zero reference from ASR. Keep existing annotations unchanged.
+    Calibration omits every case-insensitive BAD* period, gap-joined local
+    flat intervals, and pop_intervals of the included channels and effective
+    reference. Pass the pop_intervals dictionary returned by
+    interpolate_local_artifacts_inplace. Local intervals retain their bounds
+    without added padding or gap joining. Concatenate this support for native
+    automatic selection, requiring at least 60 retained seconds.
 
     Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
     and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
@@ -3986,7 +3975,6 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
     names = [raw.ch_names[pick] for pick in picks]
     sfreq = float(raw.info["sfreq"])
 
-    mask_segment_by_voltage(raw, reference_channel=reference_channel)
     excluded = _rejected_samples(raw)
     calibration_channels = set(names) | {reference_channel}
     local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
@@ -4115,6 +4103,7 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
 
     pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines)
     reference_channel = validate_reference_inplace(raw, flatlines)
+    mask_segment_by_voltage(raw, reference_channel=reference_channel)
     asr_details = apply_asr_inplace(
         raw, reference_channel, flatlines, pop_intervals,
     )
@@ -4129,7 +4118,8 @@ if __name__ == "__main__":
     bad_ch_report = {}
     # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
     bad_ch_report.update(bad_ch_by_nan(raw))
-    flatlines = detect_flatline_inplace(raw)  # Also annotates global dropouts.
+    flatlines = detect_flatline_inplace(raw)
+    mask_segment_by_flatline(raw, flatlines)
     bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
 
     # %% Line noise removal
