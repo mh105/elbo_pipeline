@@ -3608,7 +3608,7 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
         )
         if final_reference == reference_channel:
             # The native reference is good and repaired, so re-reference to it.
-            re_reference_inplace(raw, reference_channel)
+            re_reference_inplace(raw, final_reference)
 
     # On the final reference, the other good channels' pops are local.
     detection = raw
