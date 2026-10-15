@@ -88,7 +88,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
 
-        self.assertIsNone(result)
+        self.assertEqual(result, {"C3": [[2250, 2750]]})
         expected, estimate = expected_repair(raw, original, "C3", 2250, 2750, {"C3"})
         row = raw.ch_names.index("C3")
         np.testing.assert_allclose(raw._data[row, 2250:2750], expected, rtol=0, atol=1e-15)
@@ -113,7 +113,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines)
 
-        self.assertIsNone(result)
+        self.assertEqual(result, {"C3": [[2250, 2750]], "C4": [[2350, 2850]]})
         expected = original.copy()
         for name, start, stop in [("C3", 2250, 2750), ("C4", 2350, 2850)]:
             row = raw.ch_names.index(name)
@@ -182,7 +182,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
             raw, flatlines_for(raw, global_segments=[(300, 350)]),
         )
 
-        self.assertIsNone(result)
+        self.assertEqual(result, {"C3": [[0, 300], [350, 450]]})
         row = raw.ch_names.index("C3")
         np.testing.assert_array_equal(raw._data[row, 300:350], original[row, 300:350])
         np.testing.assert_array_equal(raw._data[row, 450:], original[row, 450:])
@@ -200,7 +200,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
 
-        self.assertIsNone(result)
+        self.assertEqual(result, {"C3": [[750, 1250], [2250, 2750], [3750, 4250]]})
         self.assertEqual(raw.info["bads"], [])
         row = raw.ch_names.index("C3")
         for start, stop in [(750, 1250), (2250, 2750), (3750, 4250)]:
@@ -244,7 +244,10 @@ class TestLocalPopInterpolation(unittest.TestCase):
         add_pop(raw, "C3", 4000)
         popped = raw.get_data()
 
-        step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
+        result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
+
+        self.assertEqual(result, {"Cz": [[2250, 2750]], "FC1": [[2350, 2850]],
+                                  "C3": [[3750, 4250]]})
 
         # Cz uses FC1 only before FC1's repair interval, with the donor fade
         # completed at 2350. Its repaired trace is subtracted from every EEG
@@ -285,7 +288,9 @@ class TestLocalPopInterpolation(unittest.TestCase):
         _, on_cz = step2.bad_ch_by_pop(raw.copy(), flatlines=flatlines, return_details=True)
         self.assertEqual(len(on_cz["pop_times_s"]["C3"]), 0)
 
-        step2.interpolate_local_pops_inplace(raw, flatlines)
+        result = step2.interpolate_local_pops_inplace(raw, flatlines)
+
+        self.assertEqual(result, {replacement: [[750, 1250]], "C3": [[2250, 2750]]})
 
         # raw stays on the bad Cz; the replacement's pop and C3's are repaired.
         expected = native.copy()
@@ -306,8 +311,35 @@ class TestLocalPopInterpolation(unittest.TestCase):
         raw = make_raw()
         original = raw.get_data()
         result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
-        self.assertIsNone(result)
+        self.assertEqual(result, {})
         np.testing.assert_array_equal(raw.get_data(), original)
+
+    def test_returns_only_repaired_targets_with_merged_and_dropout_clipped_spans(self):
+        for bad_native_reference in (False, True):
+            with self.subTest(bad_native_reference=bad_native_reference):
+                raw = make_raw()
+                if bad_native_reference:
+                    raw.info["bads"] = ["Cz"]
+                    reference, _ = step2._candidate_reference_replacement(raw, "Cz")
+                else:
+                    reference = "Cz"
+                raw.set_annotations(mne.Annotations([2000 / 250], [50 / 250],
+                                                    ["BAD_by_flatline"]))
+                # The first pass repairs only the final reference. Its C4
+                # detection excludes donors but does not become a repair.
+                detections = [
+                    ([], {"pop_times_s": {reference: [1999 / 250], "C4": [2999 / 250]}}),
+                    ([], {"pop_times_s": {"C3": [999 / 250, 1499 / 250, 1899 / 250]}}),
+                ]
+                with patch.object(step2, "bad_ch_by_pop", side_effect=detections):
+                    result = step2.interpolate_local_pops_inplace(
+                        raw, flatlines_for(raw, global_segments=[(2000, 2050)]),
+                    )
+
+                self.assertEqual(result, {
+                    reference: [[1750, 2000], [2050, 2250]],
+                    "C3": [[750, 2000], [2050, 2150]],
+                })
 
 
 class TestPopRepairWidth(unittest.TestCase):
@@ -323,8 +355,8 @@ class TestPopRepairWidth(unittest.TestCase):
                     add_pop(raw, "C3", onset)
                     original = raw.get_data()
                     result = step2.interpolate_local_pops_inplace(raw, flatlines_for(raw), **kwargs)
-                    self.assertIsNone(result)
                     start, stop = onset - half_width, onset + half_width
+                    self.assertEqual(result, {"C3": [[start, stop]]})
                     expected, _ = expected_repair(raw, original, "C3", start, stop, {"C3"})
                     row = raw.ch_names.index("C3")
                     np.testing.assert_allclose(raw._data[row, start:stop], expected,

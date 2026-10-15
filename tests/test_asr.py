@@ -158,6 +158,45 @@ class TestASRWrapper(unittest.TestCase):
             self.assertTrue(all(type(start) is int and type(stop) is int
                                 for start, stop in segments))
 
+    def test_pop_calibration_exclusions_use_exact_local_and_reference_intervals(self):
+        raw = make_raw(sfreq=100, reference="F3")
+        raw.info["bads"] = ["F7", "Cz"]
+        raw.set_annotations(mne.Annotations([1], [1], ["BAD_manual"]))
+        flatlines = flatlines_for(raw, {
+            "Fp1": [[210, 230]], "F3": [[270, 280]],
+        })
+        pop_intervals = {
+            "Fp2": [(150, 220), (232, 240), (500, 520), (522, 530)],
+            "F3": [(275, 290), (600, 610)],
+            "F7": [(0, raw.n_times)], "Cz": [(0, raw.n_times)],
+        }
+        original = raw.get_data()
+        excluded = np.zeros(raw.n_times, dtype=bool)
+        for start, stop in [(100, 230), (232, 240), (270, 290),
+                            (500, 520), (522, 530), (600, 610)]:
+            excluded[start:stop] = True
+        expected_indices = np.flatnonzero(~excluded)
+        selected = [i for i, name in enumerate(raw.ch_names)
+                    if name in NAMES and name not in ["F7", "Cz", "F3"]]
+        fake = FakeASR()
+
+        details = self.run_fake(
+            raw, fake, reference_channel="F3", flatlines=flatlines,
+            pop_intervals=pop_intervals,
+        )
+
+        np.testing.assert_array_equal(details["calibration_input_sample_indices"],
+                                      expected_indices)
+        np.testing.assert_array_equal(fake.calibration_data,
+                                      original[np.ix_(selected, expected_indices)])
+        # Neither edges nor small gaps between local exclusions are expanded.
+        for sample in [99, 230, 231, 240, 269, 290, 499, 520, 521, 530, 599, 610]:
+            self.assertIn(sample, expected_indices)
+        np.testing.assert_array_equal(fake.processing_data, original[selected])
+        # Calibration rejection does not remove those times from correction.
+        np.testing.assert_array_equal(raw._data[selected, 500:530],
+                                      fake.corrected[:, 500:530])
+
     def test_voltage_mask_preserves_existing_annotations_and_uses_final_good_channels(self):
         raw = make_raw()
         raw.info["bads"] = ["F7"]

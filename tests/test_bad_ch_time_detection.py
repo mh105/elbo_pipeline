@@ -23,6 +23,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         )
         self.detected_flatlines = {"segments_exact": [], "segments_bridged": [],
                                   "global_segments_exact": []}
+        self.pop_intervals = {"C3": [(10, 15)], "Cz": [(20, 25)]}
         self.asr_details = {"corrected_duration_s": 0.01}
         results = {
             "bad_ch_by_nan": {"nan": []},
@@ -36,7 +37,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             "bad_ch_under_robust_ref": {"correlation": []},
             "interpolate_local_flatline_inplace": None,
             "validate_reference_inplace": "F3",
-            "interpolate_local_pops_inplace": None,
+            "interpolate_local_pops_inplace": self.pop_intervals,
             "apply_asr_inplace": self.asr_details,
         }
         stack = ExitStack()
@@ -66,6 +67,8 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             self.assertIs(call.args[0], self.raw)
             self.assertIs(call.kwargs["flatlines"], supplied_flatlines)
         self.assertIs(self.steps["apply_asr_inplace"].call_args.args[2], supplied_flatlines)
+        self.assertIs(self.steps["apply_asr_inplace"].call_args.kwargs["pop_intervals"],
+                      self.pop_intervals)
         self.filter.assert_not_called()
 
     def test_preserves_supplied_report_and_appends_robust_results_by_criterion(self):
@@ -124,6 +127,7 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             self.assertIs(spans, flatlines)
             np.testing.assert_array_equal(raw.get_data(picks=["Cz"]), 0)
             progression.append("pops")
+            return self.pop_intervals
 
         def validate(raw, spans):
             self.assertEqual(progression, ["interpolate", "pops"])
@@ -133,11 +137,12 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             progression.append("validate")
             return "F3"
 
-        def apply_asr(raw, reference, spans):
+        def apply_asr(raw, reference, spans, *, pop_intervals):
             self.assertEqual(progression, ["interpolate", "pops", "validate"])
             self.assertIs(raw, self.raw)
             self.assertEqual(reference, "F3")
             self.assertIs(spans, flatlines)
+            self.assertIs(pop_intervals, self.pop_intervals)
             self.assertEqual(raw.info["bads"], ["C3"])
             np.testing.assert_array_equal(raw.get_data(picks=[reference]), 0)
             raw._data[2] *= 0.5

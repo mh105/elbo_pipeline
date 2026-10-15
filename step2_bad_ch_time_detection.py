@@ -97,10 +97,11 @@ Fades last up to 0.25 s and stay inside each configuration.
 
 apply_asr_inplace adds the voltage mask and calibrates standard ASR on
 good EEG channels without the effective zero reference. Calibration omits BAD
-annotations and gap-joined local flat intervals, then uses automatic selection;
-at least 60 seconds must remain. Its statistics use a four-second minimum-phase
-FIR with ASR's intended amplitude gains and 100-ms covariance blocks. Correction
-processes the full timeline, including masked periods, at cutoff 20. Afterwards,
+annotations, gap-joined local flat intervals, and repaired pop intervals, then
+uses automatic selection; at least 60 seconds must remain. Its statistics use a
+four-second minimum-phase FIR with ASR's intended amplitude gains and 100-ms
+covariance blocks. Correction processes the full timeline, including masked
+periods, at cutoff 20. Afterwards,
 local flat spans are reconstructed again from corrected donors. Return one
 details dictionary with correction duration and percentage, component-rejection
 and applied-correction intervals on the original sample timeline, and
@@ -3508,7 +3509,7 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
 
 def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     """Repair the electrode pops of the good EEG channels in place from the
-    other good EEG channels, the final reference's first; return None.
+    other good EEG channels, the final reference's first; return repaired intervals.
 
     Run this after interpolate_local_flatline_inplace, once raw.info["bads"]
     lists the final bad channels, and before validate_reference_inplace and
@@ -3544,6 +3545,10 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     0.25-s raised-cosine outer fades stay inside its repair interval, including
     recording edges and global dropout boundaries. Bad labels,
     annotations, non-EEG channels, and all other samples are unchanged.
+
+    Return {channel_name: [[start, stop], ...]} with half-open sample bounds
+    relative to this Raw's beginning, including the final reference's repairs.
+    Merge overlaps per channel and omit protected global dropout portions.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3623,6 +3628,11 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
           f"reference {final_reference} "
           f"({sum(stop - start for start, stop in reference_pops) / sfreq:.1f} s), "
           f"{sum(n_pops.values())} on {len(intervals)} other good channels")
+    if reference_pops:
+        intervals[final_reference] = _merge_segments(
+            [*reference_pops, *intervals.get(final_reference, [])]
+        )
+    return intervals
 
 
 def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
@@ -3937,7 +3947,7 @@ def _asr_filter_channels(data, b, a, zi=None):
     return filtered, final_state
 
 
-def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
+def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_intervals=None):
     """Correct good EEG channels with ASR in place; return details.
 
     Run after local flatline interpolation, the pop repair, and
@@ -3945,9 +3955,12 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
     switched electrodes. Exclude raw.info["bads"] and the effective zero
     reference from ASR. Append voltage
     mask annotations using this final pool, preserving existing annotations.
-    Calibration omits every case-insensitive BAD* period and gap-joined local flat
-    intervals of the included channels and effective reference. Concatenate this
-    support for native automatic selection, requiring at least 60 retained seconds.
+    Calibration omits every case-insensitive BAD* period, gap-joined local flat
+    intervals, and pop_intervals of the included channels and effective reference.
+    Pass the pop_intervals dictionary returned by interpolate_local_pops_inplace.
+    Local intervals retain their bounds without added padding or gap joining.
+    Concatenate this support for native automatic selection, requiring at least
+    60 retained seconds.
 
     Use standard ASR at cutoff 20, a four-second minimum-phase statistics FIR,
     and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
@@ -3990,10 +4003,12 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None):
     mask_segment_by_voltage(raw, reference_channel=reference_channel)
     excluded = _rejected_samples(raw)
     calibration_channels = set(names) | {reference_channel}
-    for name, intervals in zip(flatlines["ch_names"], flatlines["segments_bridged"]):
-        if name in calibration_channels:
-            for start, stop in intervals:
-                excluded[start:stop] = True
+    local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
+    for record in (local_flat, {} if pop_intervals is None else pop_intervals):
+        for name, intervals in record.items():
+            if name in calibration_channels:
+                for start, stop in intervals:
+                    excluded[start:stop] = True
     calibration_input = np.flatnonzero(~excluded)
     minimum_samples = int(np.ceil(60 * sfreq))
 
@@ -4106,9 +4121,11 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
 
     interpolate_local_flatline_inplace(raw, flatlines)
-    interpolate_local_pops_inplace(raw, flatlines)
+    pop_intervals = interpolate_local_pops_inplace(raw, flatlines)
     reference_channel = validate_reference_inplace(raw, flatlines)
-    asr_details = apply_asr_inplace(raw, reference_channel, flatlines)
+    asr_details = apply_asr_inplace(
+        raw, reference_channel, flatlines, pop_intervals=pop_intervals,
+    )
 
     return bad_ch_report, asr_details, reference_channel
 
