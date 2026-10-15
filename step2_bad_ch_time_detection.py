@@ -3619,13 +3619,10 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     intervals, n_pops = pop_intervals(detection)
     del detection
     _interpolate_local_intervals_inplace(raw, intervals, local_flat, global_flat)
-    seconds = sum(stop - start for segments in intervals.values()
-                  for start, stop in segments) / sfreq
     print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
           f"reference {final_reference} "
           f"({sum(stop - start for start, stop in reference_pops) / sfreq:.1f} s), "
-          f"{sum(n_pops.values())} on {len(intervals)} other good channels "
-          f"({seconds:.1f} channel-seconds)")
+          f"{sum(n_pops.values())} on {len(intervals)} other good channels")
 
 
 def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
