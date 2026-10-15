@@ -101,7 +101,10 @@ class TestASRWrapper(unittest.TestCase):
     def run_fake(self, raw, fake, **kwargs):
         kwargs.setdefault("flatlines", flatlines_for(raw, {}))
         with patch.object(step2, "calibrate_asr", side_effect=fake.calibrate), \
-                patch.object(step2, "process_asr", side_effect=fake.process):
+                patch.object(step2, "process_asr", side_effect=fake.process), \
+                patch.object(step2, "bad_ch_by_pop", side_effect=AssertionError(
+                    "ASR must reuse stored pop intervals without redetection."
+                )):
             return step2.apply_asr_inplace(raw, **kwargs)
 
     def test_calibration_exclusions_mapping_and_full_timeline_correction(self):
@@ -144,9 +147,20 @@ class TestASRWrapper(unittest.TestCase):
         # Global exclusions affect calibration only: correction reaches them too.
         np.testing.assert_array_equal(raw._data[selected, 250:500],
                                       fake.corrected[:, 250:500])
-        for name in ["F7", "Cz", "F3", "EOG"]:
+        geometry = step2._spline_geometry(raw)
+        reference = raw.ch_names.index("F3")
+        weights = step2._spline_weights(geometry, selected, [reference])
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(50) + 0.5) / 50)
+        reference_correction = np.zeros(raw.n_times)
+        reference_correction[1750:1850] = (
+            np.r_[rise, rise[::-1]] * (weights @ fake.corrected[:, 1750:1850])[0]
+        )
+        for name in ["F7", "Cz"]:
             row = raw.ch_names.index(name)
-            np.testing.assert_array_equal(raw._data[row], original[row])
+            np.testing.assert_allclose(raw._data[row], original[row] - reference_correction,
+                                       rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw._data[reference], 0)
+        np.testing.assert_array_equal(raw._data[-1], original[-1])
         self.assertEqual(raw.annotations, annotations)
         self.assertEqual(raw.info["bads"], ["F7", "Cz"])
         self.assertEqual(details["component_segments"], [(100, 200), (300, 400)])
@@ -193,9 +207,11 @@ class TestASRWrapper(unittest.TestCase):
         for sample in [99, 230, 231, 240, 269, 290, 499, 520, 521, 530, 599, 610]:
             self.assertIn(sample, expected_indices)
         np.testing.assert_array_equal(fake.processing_data, original[selected])
-        # Calibration rejection does not remove those times from correction.
-        np.testing.assert_array_equal(raw._data[selected, 500:530],
-                                      fake.corrected[:, 500:530])
+        # Non-target channels still receive full-timeline ASR correction.
+        unaffected = [i for i in selected if raw.ch_names[i] != "Fp2"]
+        rows = [selected.index(i) for i in unaffected]
+        np.testing.assert_array_equal(raw._data[unaffected, 500:530],
+                                      fake.corrected[rows, 500:530])
 
     def test_voltage_mask_preserves_existing_annotations_and_uses_final_good_channels(self):
         raw = make_raw()
@@ -322,44 +338,143 @@ class TestASRWrapper(unittest.TestCase):
         self.assertEqual(details["corrected_segments"], [])
         self.assertEqual(details["component_segments"], [])
 
-    def test_post_asr_repair_uses_corrected_donors_and_protects_effective_reference(self):
+    def test_post_asr_joint_repair_uses_corrected_donors_and_restores_reference(self):
         raw = make_raw(reference="F3")
         raw.info["bads"] = ["Cz", "F7"]
-        flatlines = flatlines_for(raw, {"Fp1": [[1000, 1200]], "F3": [[1100, 1300]]})
+        raw.set_annotations(mne.Annotations([5], [0.4], ["BAD_by_flatline"]))
+        flatlines = flatlines_for(raw, {
+            "Fp1": [[1000, 1400]], "F3": [[1000, 1300]],
+            "F7": [[0, raw.n_times]],
+        })
+        pop_intervals = {
+            "Fp1": [[1300, 1600]], "Fp2": [[1000, 1600]],
+            "F3": [[1250, 1600]], "Cz": [[0, raw.n_times]],
+        }
         original = raw.get_data()
         fake = FakeASR()
-        self.run_fake(raw, fake, reference_channel="F3", flatlines=flatlines)
+        details = self.run_fake(
+            raw, fake, reference_channel="F3", flatlines=flatlines,
+            pop_intervals=pop_intervals,
+        )
 
         selected = [i for i, name in enumerate(raw.ch_names)
                     if name in NAMES and name not in ["Cz", "F7", "F3"]]
         corrected = original.copy()
         corrected[selected] = fake.corrected
         geometry = step2._spline_geometry(raw)
-        target = raw.ch_names.index("Fp1")
+        targets = [raw.ch_names.index(name) for name in ["Fp1", "Fp2", "F3"]]
         reference = raw.ch_names.index("F3")
-        # The effective reference fades out as a donor BEFORE its original
-        # flat span starts. Both 100-sample configurations cap fades at 50.
+        donors = [i for i in geometry["picks"]
+                  if raw.ch_names[i] not in raw.info["bads"] and i not in targets]
+        weights = step2._spline_weights(geometry, donors, targets)
+        expected = corrected.copy()
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(62) + 0.5) / 62)
+        # Flat/pop overlaps merge into the same target set on both sides of
+        # the protected global dropout; no target can donate to another.
+        for start, stop in [(1000, 1250), (1350, 1600)]:
+            blend = np.ones(stop - start)
+            blend[:62], blend[-62:] = rise, rise[::-1]
+            projected = weights @ corrected[donors, start:stop]
+            expected[targets, start:stop] = (
+                (1 - blend) * corrected[targets, start:stop] + blend * projected
+            )
+        reference_correction = expected[reference].copy()
+        expected[:len(NAMES)] -= reference_correction
+
+        np.testing.assert_allclose(raw.get_data(), expected, rtol=0, atol=1e-15)
+        self.assertGreater(np.max(np.abs(reference_correction)), 0)
+        np.testing.assert_array_equal(raw._data[reference], 0)
+        np.testing.assert_array_equal(raw._data[:, 1250:1350], corrected[:, 1250:1350])
+        for name in ["Cz", "F7"]:
+            row = raw.ch_names.index(name)
+            np.testing.assert_allclose(raw._data[row], original[row] - reference_correction,
+                                       rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw._data[-1], original[-1])
+        np.testing.assert_array_equal(raw._data[:, :1000], corrected[:, :1000])
+        np.testing.assert_array_equal(raw._data[:, 1600:], corrected[:, 1600:])
+        # These details describe ASR itself, before the joint local repair.
+        self.assertEqual(details["corrected_segments"], [(100, 250), (300, 450)])
+        self.assertEqual(details["component_segments"], [(100, 200), (300, 400)])
+        self.assertEqual(details["reference_channel"], "F3")
+
+    def test_post_asr_repairs_native_reference_pops_from_stored_intervals(self):
+        raw = make_raw()
+        raw.info["bads"] = ["F7"]
+        original = raw.get_data()
+        fake = FakeASR()
+        self.run_fake(
+            raw, fake, reference_channel="Cz", pop_intervals={"Cz": [[1000, 1400]]},
+        )
+
+        selected = [i for i, name in enumerate(raw.ch_names)
+                    if name in NAMES and name not in ["F7", "Cz"]]
+        reference = raw.ch_names.index("Cz")
+        weights = step2._spline_weights(step2._spline_geometry(raw), selected, [reference])
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(62) + 0.5) / 62)
+        blend = np.ones(400)
+        blend[:62], blend[-62:] = rise, rise[::-1]
+        reference_correction = np.zeros(raw.n_times)
+        reference_correction[1000:1400] = (
+            blend * (weights @ fake.corrected[:, 1000:1400])[0]
+        )
+        expected = original.copy()
+        expected[selected] = fake.corrected
+        expected[reference] = reference_correction
+        expected[:len(NAMES)] -= reference_correction
+
+        np.testing.assert_allclose(raw.get_data(), expected, rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw._data[reference], 0)
+        np.testing.assert_array_equal(raw._data[-1], original[-1])
+
+    def test_identity_asr_compounds_outer_fades_of_merged_flat_and_pop_intervals(self):
+        raw = make_raw()
+        raw.info["bads"] = ["F7"]
+        flatlines = flatlines_for(raw, {"Fp1": [[1000, 1400]]})
+        pop_intervals = {"Fp1": [[1300, 1600]]}
+        original = raw.get_data()
+        geometry = step2._spline_geometry(raw)
+        target = raw.ch_names.index("Fp1")
         donors = [i for i in geometry["picks"]
                   if raw.ch_names[i] not in raw.info["bads"] and i != target]
         weights = step2._spline_weights(geometry, donors, [target])
-        before = (weights @ corrected[donors, 1000:1200])[0]
-        donors = [i for i in donors if i != reference]
-        weights = step2._spline_weights(geometry, donors, [target])
-        after = (weights @ corrected[donors, 1000:1200])[0]
-        data = corrected[target, 1000:1200]
-        expected = data.copy()
-        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(50) + 0.5) / 50)
-        expected[:50] = (1 - rise) * data[:50] + rise * before[:50]
-        expected[50:100] = (1 - rise) * before[50:100] + rise * after[50:100]
-        expected[100:150] = after[100:150]
-        expected[150:] = (1 - rise) * after[150:] + rise * data[150:]
-        np.testing.assert_allclose(
-            raw._data[target, 1000:1200], expected,
-            rtol=0, atol=1e-15,
+        estimate = (weights @ original[donors, 1000:1600])[0]
+        rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(62) + 0.5) / 62)
+        blend = np.ones(600)
+        blend[:62], blend[-62:] = rise, rise[::-1]
+        source = original[target, 1000:1600]
+
+        step2.interpolate_local_artifacts_inplace(
+            raw, flatlines, pop_intervals=pop_intervals,
         )
-        np.testing.assert_array_equal(raw._data[reference], 0)
-        np.testing.assert_array_equal(raw._data[target, :1000], corrected[target, :1000])
-        np.testing.assert_array_equal(raw._data[target, 1200:], corrected[target, 1200:])
+        np.testing.assert_allclose(raw._data[target, 1000:1600],
+                                   (1 - blend) * source + blend * estimate,
+                                   rtol=0, atol=1e-15)
+        fake = FakeASR()
+        process = fake.process
+
+        def identity_process(X, sfreq, state, **kwargs):
+            _, diagnostics = process(X, sfreq, state, **kwargs)
+            diagnostics["n_components_reconstructed"][:] = 0
+            diagnostics["sample_mask"][:] = False
+            return X.copy(), diagnostics
+
+        fake.process = identity_process
+        details = self.run_fake(
+            raw, fake, reference_channel="Cz", flatlines=flatlines,
+            pop_intervals=pop_intervals,
+        )
+
+        effective_blend = 2 * blend - blend ** 2
+        expected = original.copy()
+        expected[target, 1000:1600] = (
+            (1 - effective_blend) * source + effective_blend * estimate
+        )
+        np.testing.assert_allclose(raw.get_data(), expected, rtol=0, atol=1e-15)
+        # The flat/pop overlap introduces no fades at either internal boundary.
+        np.testing.assert_allclose(raw._data[target, 1299:1401], estimate[299:401],
+                                   rtol=0, atol=1e-15)
+        self.assertEqual(details["corrected_duration_s"], 0.)
+        self.assertEqual(details["corrected_segments"], [])
 
     def test_real_asr_preserves_length_reference_and_excluded_channels(self):
         raw = make_raw(seconds=90)

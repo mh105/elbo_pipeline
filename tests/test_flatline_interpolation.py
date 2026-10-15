@@ -180,7 +180,7 @@ class TestSphericalSpline(unittest.TestCase):
         np.testing.assert_allclose(mean, reconstruction._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
         with patch.object(step2, "_spline_weights", wraps=step2._spline_weights) as spline:
-            step2.interpolate_local_flatline_inplace(raw, flatlines)
+            step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_array_equal(raw._data[-1], original._data[-1])
         self.assertEqual(raw.info["bads"], ["T7", "EOG"])
@@ -207,7 +207,7 @@ class TestSphericalSpline(unittest.TestCase):
                 mean = step2._robust_mean(raw, [], flatlines)
                 np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
                                            rtol=0, atol=1e-15)
-                step2.interpolate_local_flatline_inplace(raw, flatlines)
+                step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
                 np.testing.assert_allclose(raw.get_data(), expected.get_data(),
                                            rtol=0, atol=1e-15)
 
@@ -225,7 +225,7 @@ class TestSphericalSpline(unittest.TestCase):
                 np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
                                            rtol=0, atol=1e-15)
                 np.testing.assert_array_equal(raw.get_data(), original.get_data())
-                step2.interpolate_local_flatline_inplace(raw, flatlines)
+                step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
                 for name in ("F7", "F3"):
                     row = NAMES.index(name)
                     np.testing.assert_allclose(raw._data[row], expected._data[row],
@@ -255,7 +255,7 @@ class TestSphericalSpline(unittest.TestCase):
                              (1050, 1100, common, ([], common))]
                 expected = blended_reconstruction(original, [], parts)
                 mean = step2._robust_mean(raw, [], flatlines)
-                step2.interpolate_local_flatline_inplace(raw, flatlines)
+                step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
                 np.testing.assert_allclose(raw.get_data(), expected.get_data(),
                                            rtol=0, atol=1e-15)
                 np.testing.assert_allclose(mean, raw._data[:len(NAMES)].mean(axis=0),
@@ -279,7 +279,7 @@ class TestSphericalSpline(unittest.TestCase):
             (938, 1000, ["F7"], ([], ["F7"])),
         ])
         mean = step2._robust_mean(raw, [], flatlines)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
                                    rtol=0, atol=1e-15)
@@ -297,7 +297,7 @@ class TestSphericalSpline(unittest.TestCase):
             (650, 700, ["F3"], ([], ["F3"])),
         ])
         mean = step2._robust_mean(raw, [], flatlines)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
                                    rtol=0, atol=1e-15)
@@ -305,7 +305,7 @@ class TestSphericalSpline(unittest.TestCase):
         for key in ("ch_names", "segments_exact", "segments_bridged"):
             reordered[key] = list(reversed(flatlines[key]))
         np.testing.assert_array_equal(step2._robust_mean(original, [], reordered), mean)
-        step2.interpolate_local_flatline_inplace(original, reordered)
+        step2.interpolate_local_artifacts_inplace(original, reordered, pop_intervals={})
         np.testing.assert_array_equal(original.get_data(), raw.get_data())
 
     def test_local_repair_leaves_bad_channels_alone(self):
@@ -318,7 +318,7 @@ class TestSphericalSpline(unittest.TestCase):
         repaired = mne_reconstruction(raw, ["F7", "F3"])
         row = raw.ch_names.index("F3")
         expected._data[row, 200:400] = faded(raw._data[row], repaired._data[row], 200, 400)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         self.assertEqual(raw.info["bads"], ["F7", "EOG"])
 
@@ -345,7 +345,7 @@ class TestSphericalSpline(unittest.TestCase):
         flatlines = flatlines_for(raw, {name: [[450, 550]] for name in names})
         self.assertEqual(flatlines["global_segments_exact"], [[450, 550]])  # 8 of 29 > 25%.
         default = raw.copy()
-        step2.interpolate_local_flatline_inplace(default, flatlines)
+        step2.interpolate_local_artifacts_inplace(default, flatlines, pop_intervals={})
         np.testing.assert_array_equal(default.get_data(), raw.get_data())
 
         raw = unannotated
@@ -360,7 +360,7 @@ class TestSphericalSpline(unittest.TestCase):
         mean = step2._robust_mean(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         self.assertGreater(np.abs(raw._data[rows, 450:550]).max(), 0)
 
@@ -376,7 +376,7 @@ class TestSphericalSpline(unittest.TestCase):
         mean = step2._robust_mean(raw, [], flatlines, geometry)
         np.testing.assert_allclose(mean, expected._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
 
     def test_requires_the_native_reference(self):
@@ -393,13 +393,13 @@ class TestSphericalSpline(unittest.TestCase):
             with self.subTest(name=name):
                 original = data.get_data()
                 with self.assertRaisesRegex(ValueError, "not entirely zero"):
-                    step2.interpolate_local_flatline_inplace(data, flatlines)
+                    step2.interpolate_local_artifacts_inplace(data, flatlines, pop_intervals={})
                 np.testing.assert_array_equal(data.get_data(), original)
-        step2.interpolate_local_flatline_inplace(moved, flatlines, reference_channel="FC1")
+        step2.interpolate_local_artifacts_inplace(moved, flatlines, pop_intervals={}, reference_channel="FC1")
         np.testing.assert_array_equal(moved._data[raw.ch_names.index("FC1")], 0)
         # Before validation moves it, a bad native reference still qualifies.
         raw.info["bads"] = ["Cz"]
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         self.assertGreater(np.abs(raw._data[row, 150:250]).min(), 0)
         np.testing.assert_array_equal(raw._data[raw.ch_names.index("Cz")], 0)
 
@@ -426,7 +426,7 @@ class TestSphericalSpline(unittest.TestCase):
             (16900, 16950, ([], ["F7"]), []),
         ])
         mean = step2._robust_mean(raw, ["T7"], flatlines)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_allclose(mean, full_reconstruction._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
@@ -472,8 +472,8 @@ class TestSphericalSpline(unittest.TestCase):
         changed._data[NAMES.index("F3"), 400:800] -= 1
         flatlines = flatlines_for(raw, {"F7": [[200, 600]], "F3": [[400, 800]]})
         before = raw.get_data()
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
-        step2.interpolate_local_flatline_inplace(changed, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
+        step2.interpolate_local_artifacts_inplace(changed, flatlines, pop_intervals={})
         # A's own input legitimately contributes during its outer fades. After
         # that fade, changing either marked input cannot alter A, and likewise B.
         for name, start, stop in [("F7", 262, 538), ("F3", 462, 738)]:
@@ -528,12 +528,12 @@ class TestSphericalSpline(unittest.TestCase):
                 raw._data[row], reconstructed._data[row], start, stop,
             )
         mean = step2._robust_mean(raw, [], flatlines)
-        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={})
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
                                    rtol=0, atol=1e-15)
 
-    def test_zero_reference_flat_spans_exclude_donors_without_repairing_reference(self):
+    def test_zero_reference_flat_spans_are_repaired_before_rereferencing(self):
         raw = make_raw()
         flatlines = flatlines_for(raw, {"F7": [[200, 800]], "F3": [[400, 600]]})
         reference = raw._data[NAMES.index("F3")].copy()
@@ -541,11 +541,14 @@ class TestSphericalSpline(unittest.TestCase):
         a, excluded = ["F7"], ["F7", "F3"]
         expected = blended_reconstruction(raw, [], [
             (200, 262, ([], a), a), (262, 338, a, a),
-            (338, 400, a, (a, excluded)), (400, 600, (a, excluded), (a, excluded)),
+            (338, 400, a, (a, excluded)),
+            (400, 462, (a, excluded), excluded), (462, 538, excluded, excluded),
+            (538, 600, excluded, (a, excluded)),
             (600, 662, (a, excluded), a), (662, 738, a, a),
             (738, 800, a, ([], a)),
         ])
-        step2.interpolate_local_flatline_inplace(raw, flatlines, reference_channel="F3")
+        expected._data[:len(NAMES)] -= expected._data[NAMES.index("F3")].copy()
+        step2.interpolate_local_artifacts_inplace(raw, flatlines, pop_intervals={}, reference_channel="F3")
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
         np.testing.assert_array_equal(raw._data[NAMES.index("F3")], 0)
 

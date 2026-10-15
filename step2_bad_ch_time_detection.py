@@ -12,10 +12,10 @@ BAD_by_flatline. Per-channel detections remain in segments_exact; gaps of at
 most 2 s are joined in segments_bridged, which are filled linearly before
 filtering, including each channel's global-flat portions. No flatline span is
 widened by filter reach. Every later detector, bad_ch_under_robust_ref, and
-interpolate_local_flatline_inplace take that dictionary. Global BAD annotations
-keep their original labels and bounds. A common policy fills gaps of at most
-2 s between them with BAD_by_close_gap annotations; these recording-wide
-exclusions do not extend channel replacement spans.
+interpolate_local_artifacts_inplace take that dictionary. Global BAD
+annotations keep their original labels and bounds. A common policy fills gaps
+of at most 2 s between them with BAD_by_close_gap annotations; these
+recording-wide exclusions do not extend channel replacement spans.
 
 Each bad_ch_by_* function adds its detections to raw.info["bads"] without
 duplicates and returns {criterion: [channel names]} for that call's detections;
@@ -60,11 +60,11 @@ exactly zero, or a channel named with reference_channel, which must be entirely
 zero (other all-zero channels are then ordinary, dead channels). bad_ch_by_nan,
 detect_flatline_inplace, bad_ch_by_flatline, bad_ch_by_small,
 pca_cleaning_inplace, bad_ch_under_robust_ref,
-interpolate_local_flatline_inplace, interpolate_local_pops_inplace, and
-validate_reference_inplace require it; bad_ch_by_std, bad_ch_by_BBnoise,
-bad_ch_by_correlation, and bad_ch_by_RANSAC require re-referenced data, with no
-entirely zero EEG channel, bad or not; bad_ch_by_voltage, bad_ch_by_HFnoise,
-and bad_ch_by_pop accept either and exclude the native reference if present.
+interpolate_local_artifacts_inplace, and validate_reference_inplace require it;
+bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
+require re-referenced data, with no entirely zero EEG channel, bad or not;
+bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
+exclude the native reference if present.
 mask_segment_by_voltage accepts either by default, requires re-referenced data
 with require_average=True, and takes a named native reference.
 
@@ -81,12 +81,13 @@ average reference (the mean with bad channels and local flat intervals
 interpolated) and adds the final flags to raw.info["bads"]; the data keep the
 native reference, and the robust mean is returned in its details. RANSAC
 remains available separately and is not used in this iteration. With the bad
-channels final, interpolate_local_flatline_inplace repairs the local flat
-intervals of the good channels from the other good channels.
-interpolate_local_pops_inplace then repairs the electrode pops that
-bad_ch_by_pop detects on the good channels, within repair_width seconds (2 s by
-default) centered on each jump: first those of the final reference, found on a
-robust-average copy, then the others, found on the final reference. The final
+channels final, interpolate_local_artifacts_inplace discovers pops on copies:
+first those of the final reference, found on a robust-average copy, then the
+others, found on a temporary copy with the reference's flats and pops repaired
+and referenced to that electrode. The temporary repairs are discarded. Repair
+the joint flat/pop targets once on the unchanged production input, with pop
+windows of repair_width seconds (2 s by default) centered on each jump, and
+subtract the reconstructed current reference from every EEG channel. The final
 reference is the native one if it is good; if it is bad,
 validate_reference_inplace then re-references the data to the nearest good one
 of its five nearest electrodes, or raises if all five are bad. Flatline repair
@@ -101,10 +102,13 @@ annotations, gap-joined local flat intervals, and repaired pop intervals, then
 uses automatic selection; at least 60 seconds must remain. Its statistics use a
 four-second minimum-phase FIR with ASR's intended amplitude gains and 100-ms
 covariance blocks. Correction processes the full timeline, including masked
-periods, at cutoff 20. Afterwards, local flat spans are reconstructed again
-from corrected donors. Return one details dictionary with correction duration
-and percentage, component-rejection and applied-correction intervals on the
-original sample timeline, and calibration and window diagnostics.
+periods, at cutoff 20. Afterwards, the joint flat/pop targets are reconstructed
+again from corrected donors, including the effective reference's historical
+intervals. Subtract its reconstructed trace from every EEG channel to restore
+zero reference; this final refinement applies the edge fades again. Return one
+details dictionary with correction duration and percentage, component-rejection
+and applied-correction intervals on the original sample timeline, and
+calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 plot_asr_calibration shows accepted support, a channel trace and spectrogram,
 and the calibrated covariance before correction.
@@ -1961,7 +1965,7 @@ def _robust_mean(raw, bads, flatlines=None, geometry=None):
     Whole-channel bads are repaired throughout the record. Local flat channels
     are repaired outside the global BAD_by_flatline dropouts; other BAD spans
     do not stop local repair. Use the same configurations and internal 0.25-s
-    fades as interpolate_local_flatline_inplace. Each projection reconstructs
+    fades as interpolate_local_artifacts_inplace. Each projection reconstructs
     whole-channel bads and its local targets together from eligible input
     donors. Donors fade out before their invalid spans and return afterwards;
     only a target's own outer fades use its input. Mean coefficients include
@@ -3321,9 +3325,9 @@ def bad_ch_under_robust_ref(
     without the bads: band-power topomaps in dB of the median Welch PSD up to
     45 Hz, also without the all-zero reference, and plot_voltage_traces. The
     data and annotations are unchanged: raw keeps the native reference, and bad
-    channels keep their recorded traces. Run interpolate_local_flatline_inplace
-    afterwards to repair the local flat
-    intervals of the channels that stay good.
+    channels keep their recorded traces. Run
+    interpolate_local_artifacts_inplace afterwards to jointly repair local
+    flats and pops of the channels that stay good.
 
     Return robust_bad_ch_report, the last pass's {criterion: names} (after a
     cycle, each criterion's channels across the cycling passes).
@@ -3464,33 +3468,49 @@ def bad_ch_under_robust_ref(
     return robust_bad_ch_report
 
 
-def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None):
-    """Interpolate the local flat intervals of the good EEG channels in place
-    from the other good EEG channels; return None.
+def interpolate_local_artifacts_inplace(
+    raw, flatlines, *, pop_intervals=None, reference_channel=None,
+    repair_width=2.0,
+):
+    """Jointly repair local flats and pops; return detected pop intervals.
 
-    Run this once raw.info["bads"] lists the final bad channels (after
-    bad_ch_under_robust_ref), before ASR. flatlines is the dictionary from
-    detect_flatline_inplace, whose alignment is validated. Repair its local
-    segments_bridged, except inside the exact BAD_by_flatline annotation spans,
-    which stay as they are. Channels in raw.info["bads"] are neither repaired
-    nor donors. Share the interpolation plan with pop repair and _robust_mean.
-    Each configuration excludes its targets and invalid channels from both
-    crossfade projections. Donors fade out before their invalid spans and
-    return afterwards; a target's own outer fades stay inside its repair
-    interval. The all-zero reference is a donor unless it is bad or locally
-    invalid. Raised-cosine fades last up to 0.25 s, capped at half the
-    configuration duration, including recording and global dropout boundaries.
-    Both projections are read before any target is written. The EEG data lose
-    rank where the estimate replaces them fully. Bad labels, annotations,
-    non-EEG channels, and all other samples are unchanged.
+    Run after bad_ch_under_robust_ref, before validate_reference_inplace and
+    ASR. Require an entirely zero reference_channel, defaulting to the native
+    reference saved in flatlines. Whole-channel bads are neither targets nor
+    donors. Keep their labels, annotations, and non-EEG samples unchanged.
 
-    Require the native reference: reference_channel, or by default the one that
-    detect_flatline_inplace resolved, flatlines["reference_channel"], must be
-    entirely zero, bad or not; its zero trace is never repaired. After ASR,
-    pass the effective reference_channel if validation switched electrodes: the
-    default then raises, as the original reference is no longer zero. The
-    effective reference's original flat intervals
-    still exclude it from the donors.
+    With pop_intervals=None, detect pops using bad_ch_by_pop's defaults. First
+    find the final reference's pops on a robust-average copy. The final
+    reference is the current one if good, otherwise the nearest good one of
+    its five nearest electrodes, as in validate_reference_inplace. On a
+    temporary native-reference copy, repair that electrode's flat and pop
+    spans, excluding other flat and average-detected pop samples from donors.
+    Reference the temporary data to it and detect the other channels' pops.
+    Discard the temporary data; no provisional repairs reach raw.
+
+    Jointly repair the union of segments_bridged and the discovered pop
+    windows on raw, including the reference's intervals. Pop windows span
+    repair_width seconds (2 s by default), centered on each detected jump.
+    Apply one repair to the production input, then subtract the reconstructed
+    current reference from every EEG channel, including bads, to make it zero
+    again. A bad current reference stays zero until validation replaces it.
+
+    Supply pop_intervals, including {}, to reuse known intervals without
+    detection after ASR; pass the effective reference_channel if it changed.
+    This refinement uses the ASR output and applies the edge fades again.
+    Donors exclude all active targets in both crossfade projections. Donors
+    fade out before their invalid spans and return afterwards; only a
+    target's own outer fades use its input. Raised-cosine fades last up to
+    0.25 s, capped at half each configuration's duration. Global
+    BAD_by_flatline spans are protected. No extra padding or gap filling is
+    applied to the union of repair intervals.
+
+    Return discovered pops as {channel_name: [[start, stop], ...]} with
+    half-open sample bounds relative to this Raw's beginning, including the
+    final reference's pops and omitting protected global dropout portions.
+    Return None when pop_intervals is supplied; leave that dictionary and
+    flatlines unchanged. Other channels can change within the current
+    reference's repair spans through the common subtraction.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3498,73 +3518,18 @@ def interpolate_local_flatline_inplace(raw, flatlines, *, reference_channel=None
     if reference_channel is None:
         reference_channel = flatlines["reference_channel"]
     reference_channel = _reference_channel(raw, "native", reference_channel)
-    local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
-    invalid = {reference_channel: local_flat.pop(reference_channel, [])}
-    global_flat = _merge_segments(list(zip(*_annotations_starts_stops(
-        raw, ["BAD_by_flatline"]
-    ))))
-    _interpolate_local_intervals_inplace(raw, local_flat, invalid, global_flat)
-
-
-def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
-    """Repair the electrode pops of the good EEG channels in place from the
-    other good EEG channels, the final reference's first;
-    return repaired intervals.
-
-    Run this after interpolate_local_flatline_inplace, once raw.info["bads"]
-    lists the final bad channels, and before validate_reference_inplace and
-    ASR, which can keep or rebuild a pop on a channel that shares a large
-    calibration component. The native reference,
-    flatlines["reference_channel"], must still be entirely zero, bad or not.
-    The final reference is the native one if it is good, else the electrode
-    that validate_reference_inplace will re-reference the data to; raise, as it
-    does, if all five candidates are bad.
-
-    Detect pops with bad_ch_by_pop's default criteria; the bad labels stay as
-    they are. Only local pops are detectable: a reference's own pops appear in
-    every channel and hide the local steps that occur with them (on sub-26, the
-    Cz-referenced data showed 39 of the 74 pops found after moving the
-    reference to E7). First find the final reference's pops on a robust-average
-    copy (_robust_mean, with the bads and local flat intervals repaired), where
-    the final reference's own pops are local and a bad native reference's pops
-    cancel. Check the other good channels on this copy too, to exclude popping
-    donors; repair only the final reference, on raw's native reference. A good
-    native reference repaired this way is then re-referenced to: subtracting
-    its repaired trace from every EEG channel, bads included, makes it zero
-    again and takes its pops out of every channel. Then detect the other good
-    channels' pops on the final reference, on a re-referenced copy if
-    validation will move it, and repair them. raw keeps the native reference.
-
-    Repair a window of repair_width seconds (2 s by default) centered on each
-    pop's jump, rounded to samples and merged per channel, except inside global
-    dropouts, which stay as they are. Share the interpolation plan with local
-    flatline repair: spline donors are the good EEG channels, including a good
-    zero reference, outside their active pop and local flat intervals. Donors
-    fade out before invalid spans and return afterwards. A target's own 0.25-s
-    raised-cosine outer fades stay inside its repair interval, including
-    recording edges and global dropout boundaries. Bad labels, annotations,
-    non-EEG channels, and all other samples are unchanged.
-
-    Return {channel_name: [[start, stop], ...]} with half-open sample bounds
-    relative to this Raw's beginning, including the final reference's repairs.
-    Merge overlaps per channel and omit protected global dropout portions.
-    """
-    if not raw.preload:
-        raise ValueError("raw must be preloaded.")
-    if not np.isfinite(repair_width) or repair_width <= 0:
-        raise ValueError("repair_width must be finite and greater than 0 (seconds).")
-    _validate_flatlines(raw, flatlines)
-    reference_channel = _reference_channel(
-        raw, "native", flatlines["reference_channel"]
-    )
-    if reference_channel in raw.info["bads"]:
-        final_reference, _ = _candidate_reference_replacement(raw, reference_channel)
-    else:
-        final_reference = reference_channel
+    detect_pops = pop_intervals is None
     sfreq = raw.info["sfreq"]
-    half_width = int(round(repair_width * sfreq / 2))
-    if half_width < 1:
-        raise ValueError("repair_width must cover at least two samples.")
+    if detect_pops:
+        if not np.isfinite(repair_width) or repair_width <= 0:
+            raise ValueError("repair_width must be finite and greater than 0 (seconds).")
+        half_width = int(round(repair_width * sfreq / 2))
+        if half_width < 1:
+            raise ValueError("repair_width must cover at least two samples.")
+        if reference_channel in raw.info["bads"]:
+            final_reference, _ = _candidate_reference_replacement(raw, reference_channel)
+        else:
+            final_reference = reference_channel
     local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
     global_flat = _merge_segments(list(zip(*_annotations_starts_stops(
         raw, ["BAD_by_flatline"]
@@ -3581,7 +3546,7 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
         for i in mne.pick_types(raw.info, eeg=True, exclude=[]):
             raw._data[i] -= reference
 
-    def pop_intervals(raw_pop):
+    def detect_pop_intervals(raw_pop):
         """Map channels to the repair intervals of the pops bad_ch_by_pop finds
         on raw_pop, and to their numbers of pops.
         """
@@ -3599,42 +3564,51 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
                 intervals[name], counts[name] = segments, len(times)
         return intervals, counts
 
-    # Find the final reference's own pops on the robust average, where a bad
-    # native reference's pops cancel; other channels' pops only exclude donors.
-    average = raw.copy()
-    re_reference_inplace(average, "avg")
-    intervals_avg, n_pops_avg = pop_intervals(average)
-    del average
-    reference_pops = intervals_avg.get(final_reference, [])
-    if reference_pops:
-        # Channels popping with it are not its donors either.
-        invalid = {name: [*local_flat.get(name, []), *intervals_avg.get(name, [])]
-                   for name in {*local_flat, *intervals_avg}}
-        _interpolate_local_intervals_inplace(
-            raw, {final_reference: reference_pops}, invalid, global_flat
-        )
-        if final_reference == reference_channel:
-            # The native reference is good and repaired, so re-reference to it.
-            re_reference_inplace(raw, final_reference)
-
-    # On the final reference, the other good channels' pops are local.
-    detection = raw
-    if final_reference != reference_channel:
-        # The native reference is bad, so re-reference to repaired final reference.
+    if detect_pops:
+        # Find final reference pops without modifying the input used for final repair.
+        average = raw.copy()
+        re_reference_inplace(average, "avg")
+        intervals_avg, n_pops_avg = detect_pop_intervals(average)
+        del average
+        reference_pops = intervals_avg.get(final_reference, [])
+        reference_spans = _merge_segments([
+            tuple(span) for span in
+            [*local_flat.get(final_reference, []), *reference_pops]
+        ])
+        # Fix final reference's flat and pop intervals, excluding other channels' pops.
         detection = raw.copy()
+        if reference_spans:
+            invalid = {name: [*local_flat.get(name, []), *intervals_avg.get(name, [])]
+                       for name in {*local_flat, *intervals_avg}}
+            _interpolate_local_intervals_inplace(
+                detection, {final_reference: reference_spans}, invalid, global_flat
+            )
+        # Re-reference to the final reference and detect the other channels' pops.
         re_reference_inplace(detection, final_reference)
-    intervals, n_pops = pop_intervals(detection)
-    del detection
-    _interpolate_local_intervals_inplace(raw, intervals, local_flat, global_flat)
-    print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
-          f"reference {final_reference} "
-          f"({sum(stop - start for start, stop in reference_pops) / sfreq:.1f} s), "
-          f"{sum(n_pops.values())} on {len(intervals)} other good channels")
-    if reference_pops:
-        intervals[final_reference] = _merge_segments(
-            [*reference_pops, *intervals.get(final_reference, [])]
-        )
-    return intervals
+        intervals, n_pops = detect_pop_intervals(detection)
+        del detection
+        # Add the final reference's pops to the returned intervals for later repair.
+        if reference_pops:
+            intervals[final_reference] = _merge_segments(
+                [*reference_pops, *intervals.get(final_reference, [])]
+            )
+        pop_intervals = intervals
+
+    targets = {
+        name: _merge_segments([
+            tuple(span) for span in
+            [*local_flat.get(name, []), *pop_intervals.get(name, [])]
+        ])
+        for name in {*local_flat, *pop_intervals}
+    }
+    _interpolate_local_intervals_inplace(raw, targets, {}, global_flat)
+    re_reference_inplace(raw, reference_channel)
+    if detect_pops:
+        print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
+              f"reference {final_reference} "
+              f"({sum(stop - start for start, stop in reference_pops) / sfreq:.1f} s), "
+              f"{sum(n_pops.values())} on {len(n_pops)} other good channels")
+        return pop_intervals
 
 
 def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
@@ -3704,14 +3678,14 @@ def validate_reference_inplace(raw, flatlines):
     nearest good electrode among its five nearest.
     Return the reference channel name in effect.
 
-    Run this after interpolate_local_flatline_inplace and
-    interpolate_local_pops_inplace, once raw.info["bads"] lists the final bad
-    channels, so that a new reference's own flat spans and pops are repaired
-    before every channel is referenced to it. The native reference is the one
-    that detect_flatline_inplace resolved, flatlines["reference_channel"], and
-    must still be entirely zero. A bad reference puts its artifacts into every
-    native-referenced channel; subtracting a good electrode's trace from every
-    EEG channel, bads included, cancels them and makes that electrode the
+    Run this after interpolate_local_artifacts_inplace, once raw.info["bads"]
+    lists the final bad channels, so that a new reference's own flat spans and
+    pops are repaired before every channel is referenced to it. The native
+    reference is the one that detect_flatline_inplace resolved,
+    flatlines["reference_channel"], and must still be entirely zero. A bad
+    reference puts its artifacts into every native-referenced channel;
+    subtracting a good electrode's trace from every EEG channel, bads included,
+    cancels them and makes that electrode the
     all-zero reference. The candidates are the five EEG channels, bad or not,
     nearest the reference on the fitted unit sphere (_spline_geometry; ties
     keep Raw order). Re-reference to the nearest good one and warn, or raise
@@ -3951,17 +3925,17 @@ def _asr_filter_channels(data, b, a, zi=None):
     return filtered, final_state
 
 
-def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_intervals=None):
+def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals=None):
     """Correct good EEG channels with ASR in place; return details.
 
-    Run after local flatline interpolation, the pop repair, and
+    Run after interpolate_local_artifacts_inplace and
     validate_reference_inplace; pass the returned reference_channel if it
     switched electrodes. Exclude raw.info["bads"] and the effective zero
     reference from ASR. Append voltage mask annotations using this final pool,
     preserving existing annotations. Calibration omits every case-insensitive
     BAD* period, gap-joined local flat intervals, and pop_intervals of the
     included channels and effective reference. Pass the pop_intervals
-    dictionary returned by interpolate_local_pops_inplace. Local intervals
+    dictionary returned by interpolate_local_artifacts_inplace. Local intervals
     retain their bounds without added padding or gap joining. Concatenate this
     support for native automatic selection,
     requiring at least 60 retained seconds.
@@ -3971,8 +3945,10 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     their native defaults. Initialize the statistics filter from reflected
     sequence starts rather than calibration-ending history. Correction sees the
     full original timeline, including global BAD periods; their existing
-    annotations remain for later rejection. Re-interpolate local flat spans
-    from corrected good, nonflat donors, protecting the effective reference.
+    annotations remain for later rejection. Jointly re-interpolate the stored
+    flat/pop intervals from corrected donors, including the effective
+    reference's intervals. Subtract its reconstructed trace from all EEG to
+    restore its zero signal. This refinement applies the edge fades again.
     Show plot_asr_effect after this repair, comparing the original ASR input
     with the final output on shared full-range axes, then show a median Welch
     PSD topomap through 45 Hz in dB, excluding
@@ -3983,13 +3959,14 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     blending). Duration and percentage use the whole original timeline,
     including annotated periods processed by ASR. Correction support records
     where reconstruction is applied, rather than exact samplewise voltage
-    changes or later flatline repair. corrected_segments contains half-open
+    changes or later local repair. corrected_segments contains half-open
     (start, stop) Python-int sample bounds relative to this Raw's beginning;
     flatlines retains interpolation provenance. No ASR annotations are added.
-    Bads, reference, and non-EEG data are unchanged. Details also include
-    component_segments (output intervals whose current update rejects
-    components), original calibration sample indices, filter coefficients,
-    settings, and native calibration and processing diagnostics.
+    Bad labels and non-EEG data are unchanged; bad EEG channels receive only
+    the common reference correction, and the reference finishes exactly zero.
+    Details also include component_segments (output intervals whose current
+    update rejects components), original calibration sample indices, filter
+    coefficients, settings, and native calibration and processing diagnostics.
     component_segments uses the same sample-bound convention as
     corrected_segments. Insufficient calibration raises before any corrected
     voltages are written back. Show plot_asr_calibration
@@ -3997,6 +3974,8 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
+    if pop_intervals is None:
+        pop_intervals = {}
     if flatlines is None:
         raise ValueError("Pass the flatlines dictionary from detect_flatline_inplace.")
     _validate_flatlines(raw, flatlines)
@@ -4011,7 +3990,7 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     excluded = _rejected_samples(raw)
     calibration_channels = set(names) | {reference_channel}
     local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
-    for record in (local_flat, {} if pop_intervals is None else pop_intervals):
+    for record in (local_flat, pop_intervals):
         for name, intervals in record.items():
             if name in calibration_channels:
                 for start, stop in intervals:
@@ -4069,7 +4048,11 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
         corrected, processing = process_asr(data, sfreq, state)
     raw._data[picks] = corrected
-    interpolate_local_flatline_inplace(raw, flatlines, reference_channel=reference_channel)
+    interpolate_local_artifacts_inplace(
+        raw, flatlines,
+        pop_intervals=pop_intervals,
+        reference_channel=reference_channel,
+    )
     plot_asr_effect(raw, data, names)
     raw.compute_psd(
         fmax=45.0, average="median", verbose=False,
@@ -4130,11 +4113,10 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     for criterion, names in robust_bad_ch_report.items():
         bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
 
-    interpolate_local_flatline_inplace(raw, flatlines)
-    pop_intervals = interpolate_local_pops_inplace(raw, flatlines)
+    pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines)
     reference_channel = validate_reference_inplace(raw, flatlines)
     asr_details = apply_asr_inplace(
-        raw, reference_channel, flatlines, pop_intervals=pop_intervals,
+        raw, reference_channel, flatlines, pop_intervals,
     )
 
     return bad_ch_report, asr_details, reference_channel
