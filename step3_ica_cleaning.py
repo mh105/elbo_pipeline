@@ -223,8 +223,8 @@ if __name__ == "__main__":
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
     # %% Bad-channel detection and ASR correction in validated native reference
-    bad_ch_report, asr_details, reference_channel = bad_ch_time_detection_inplace(
-        raw_bads, bad_ch_report=bad_ch_report, flatlines=flatlines,
+    asr_details, reference_channel = bad_ch_time_detection_inplace(
+        raw_bads, bad_ch_report, flatlines,
     )
 
     # %% Fit ICA and select artifact components

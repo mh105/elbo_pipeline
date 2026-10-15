@@ -4083,8 +4083,7 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
 
 def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     """Detect bad channels, repair the good channels' electrode pops, and apply
-    ASR in place; return report, ASR details,
-    and the effective reference channel.
+    ASR in place; return ASR details and the effective reference channel.
 
     Supply preloaded native-reference data. Line-noise removal and filtering
     remain the caller's responsibility. Require the initial bad_ch_report and
@@ -4107,7 +4106,7 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     asr_details = apply_asr_inplace(
         raw, reference_channel, flatlines, pop_intervals,
     )
-    return bad_ch_report, asr_details, reference_channel
+    return asr_details, reference_channel
 
 
 if __name__ == "__main__":
@@ -4138,6 +4137,6 @@ if __name__ == "__main__":
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
     # %% Bad-channel detection and ASR correction in validated native reference
-    bad_ch_report, asr_details, reference_channel = bad_ch_time_detection_inplace(
-        raw_bads, bad_ch_report=bad_ch_report, flatlines=flatlines,
+    asr_details, reference_channel = bad_ch_time_detection_inplace(
+        raw_bads, bad_ch_report, flatlines,
     )

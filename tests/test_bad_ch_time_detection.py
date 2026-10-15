@@ -51,14 +51,13 @@ class TestBadChannelTimeDetection(unittest.TestCase):
     def test_supplied_inputs_are_reused_without_initial_detection(self):
         supplied_report = {"flatline": ["P3"]}
         supplied_flatlines = self.detected_flatlines
-        report, details, reference = step2.bad_ch_time_detection_inplace(
+        details, reference = step2.bad_ch_time_detection_inplace(
             self.raw, supplied_report, supplied_flatlines,
         )
-        self.assertIs(report, supplied_report)
         self.assertIs(details, self.asr_details)
         self.assertEqual(reference, "F3")
-        self.assertEqual(report["flatline"], ["P3"])
-        self.assertNotIn("nan", report)
+        self.assertEqual(supplied_report["flatline"], ["P3"])
+        self.assertNotIn("nan", supplied_report)
         for name in ("bad_ch_by_nan", "detect_flatline_inplace", "bad_ch_by_flatline"):
             self.steps[name].assert_not_called()
         for name in ("bad_ch_by_voltage", "bad_ch_by_HFnoise",
@@ -90,9 +89,8 @@ class TestBadChannelTimeDetection(unittest.TestCase):
             )
         )
 
-        returned_report, _, _ = step2.bad_ch_time_detection_inplace(self.raw, report, flatlines)
+        step2.bad_ch_time_detection_inplace(self.raw, report, flatlines)
 
-        self.assertIs(returned_report, report)
         self.assertEqual(report["impedance"], ["P3"])
         self.assertEqual(report["nan"], ["C3", "F3"])
         self.assertEqual(report["voltage"], ["C3", "P3"])
@@ -162,11 +160,10 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.steps["validate_reference_inplace"].side_effect = validate
         self.steps["mask_segment_by_voltage"].side_effect = mask_voltage
         self.steps["apply_asr_inplace"].side_effect = apply_asr
-        returned_report, details, reference = step2.bad_ch_time_detection_inplace(
+        details, reference = step2.bad_ch_time_detection_inplace(
             self.raw, report, flatlines,
         )
 
-        self.assertIs(returned_report, report)
         self.assertIs(details, self.asr_details)
         self.assertEqual(reference, "F3")
         self.assertEqual(progression, ["artifacts", "validate", "mask", "asr"])
