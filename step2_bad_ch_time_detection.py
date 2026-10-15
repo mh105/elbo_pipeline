@@ -3561,15 +3561,17 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     half_width = int(round(repair_width * sfreq / 2))
     if half_width < 1:
         raise ValueError("repair_width must cover at least two samples.")
-    eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
     local_flat = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
     global_flat = _merge_segments(list(zip(*_annotations_starts_stops(
         raw, ["BAD_by_flatline"]
     ))))
 
     def re_reference_inplace(raw, new_reference):
-        """Subtract the named reference from all EEG channels in place."""
-        reference = raw._data[raw.ch_names.index(new_reference)].copy()
+        """Subtract a channel or robust-average reference from all EEG channels."""
+        if new_reference == "avg":
+            reference = _robust_mean(raw, raw.info["bads"], flatlines)
+        else:
+            reference = raw._data[raw.ch_names.index(new_reference)].copy()
         for i in mne.pick_types(raw.info, eeg=True, exclude=[]):
             raw._data[i] -= reference
 
@@ -3593,9 +3595,7 @@ def interpolate_local_pops_inplace(raw, flatlines, repair_width=2.0):
     # Find the final reference's own pops on the robust average, where a bad
     # native reference's pops cancel; other channels' pops only exclude donors.
     average = raw.copy()
-    mean = _robust_mean(raw, raw.info["bads"], flatlines)
-    for i in eeg:
-        average._data[i] -= mean
+    re_reference_inplace(average, "avg")
     intervals_avg, n_pops_avg = pop_intervals(average)
     del average
     reference_pops = intervals_avg.get(final_reference, [])
