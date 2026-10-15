@@ -119,8 +119,11 @@ class TestFlatlineHandling(unittest.TestCase):
         raw._data[:2, 360:370] = 5e-6
         result = detect(raw)
         self.assertEqual(result["global_segments_exact"], [[150, 160], [360, 370]])
-        with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
-            step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=result)
+        report, details = step2.bad_ch_by_flatline(
+            raw, reference_channel="Cz", flatlines=result, return_details=True,
+        )
+        self.assertEqual(report, {"flatline": []})
+        np.testing.assert_array_equal(details["flat_fraction"], 0)
 
 
 class TestBadAnnotationGapPolicy(unittest.TestCase):

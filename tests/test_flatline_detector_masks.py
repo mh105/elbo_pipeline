@@ -105,18 +105,35 @@ class TestPublicFlatlineStages(unittest.TestCase):
                 self.assertEqual(raw.info["bads"], ["E1", "E4", "E5"])
                 report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
                 self.assertEqual(report, {"flatline": []})
-                np.testing.assert_array_equal(details["retained"], [False, True, True])
+                np.testing.assert_array_equal(details["flat_fraction"], 0)
 
-    def test_bad_flatline_any_overlap_strict_cutoff_and_partial_tail(self):
+    def test_bad_flatline_counts_exact_samples_with_strict_cutoff_and_partial_tail(self):
         raw = native_raw(tail=100)
         flatlines = flatlines_for(raw, {
-            "E0": [[40, 50], [540, 550]], "E1": [[1040, 1050]], "E2": [[2040, 2050]],
+            "E0": [[0, 526]], "E1": [[500, 1025]], "E2": [[2000, 2100]],
         })
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
         self.assertEqual(report, {"flatline": ["E0"]})
-        row = details["ch_names"].index("E1")
-        np.testing.assert_array_equal(details["flat"][row], [0, 0, 1, 0])
+        np.testing.assert_allclose(details["flat_fraction"][:3],
+                                   np.array([526, 525, 100]) / 2100)
+        self.assertNotIn("E1", raw.info["bads"])  # Exactly 25% is retained.
         self.assertNotIn("E2", raw.info["bads"])
+
+    def test_small_fragments_and_joined_gaps_do_not_expand_flat_sample_counts(self):
+        raw = native_raw()
+        flatlines = flatlines_for(raw, {"E0": [[40, 50], [540, 550]]})
+        flatlines["segments_bridged"] = [[[40, 550]]]
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
+        self.assertEqual(report, {"flatline": []})
+        self.assertEqual(details["flat_fraction"][0], 20 / raw.n_times)
+
+    def test_flatline_scoring_accepts_one_channel_and_less_than_one_complete_window(self):
+        raw = native_raw(n_windows=0, n_nonreference=1, tail=20)
+        flatlines = flatlines_for(raw, {"E0": [[0, 6]]})
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
+        self.assertEqual(report, {"flatline": ["E0"]})
+        self.assertEqual(details["ch_names"], ["E0"])
+        np.testing.assert_array_equal(details["flat_fraction"], [0.3])
 
     def test_flatline_reference_checks_share_one_zero_scan(self):
         raw = native_raw()
@@ -139,9 +156,20 @@ class TestPublicFlatlineStages(unittest.TestCase):
         annotations = raw.annotations.copy()
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
                                                    return_details=True)
-        np.testing.assert_array_equal(details["retained"], [False, True, True, True])
-        self.assertEqual(report, {"flatline": ["E0"]})  # 1 of 3 windows, not 1 of 4.
+        self.assertEqual(details["flat_fraction"][0], WINDOW / (raw.n_times - 25))
+        self.assertEqual(report, {"flatline": ["E0"]})  # 500/1975 > 25%.
         self.assertEqual(raw.annotations, annotations)
+
+    def test_partial_bad_and_voltage_masks_remove_only_their_samples(self):
+        raw = native_raw()
+        raw.set_annotations(mne.Annotations([0.4], [0.1], ["BAD_manual"]))
+        raw._data[1:5, 1100:1105] += 600e-6
+        flatlines = flatlines_for(raw, {"E0": [[50, 150], [1000, 1200]]})
+        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
+        self.assertEqual(report, {"flatline": []})
+        # The 25-sample BAD period and 25-sample voltage block each intersect
+        # E0's exact flats. Valid samples elsewhere in both 2-s windows remain.
+        self.assertEqual(details["flat_fraction"][0], 250 / 1950)
 
     def test_flatline_mask_accepts_another_all_zero_channel_with_a_named_reference(self):
         raw = native_raw()
@@ -161,25 +189,24 @@ class TestPublicFlatlineStages(unittest.TestCase):
                 raw, [0], WINDOW, raw.n_times // WINDOW, rejected_samples
             ))
 
-    def test_scoring_consumers_enforce_their_own_window_requirements(self):
+    def test_flatline_scoring_needs_retained_samples_rather_than_complete_windows(self):
         everything = {name: [[0, 4 * WINDOW]] for name in ("E0", "E1", "E2")}
         # Every 2-s window overlaps a dropout, but 1600 of 2000 samples are not flat.
         every_window = {name: [[w * WINDOW + 200, w * WINDOW + 300] for w in range(4)]
                         for name in ("E0", "E1", "E2")}
-        for spans in (everything, every_window):
-            with self.subTest(spans=spans):
-                raw = native_raw(n_nonreference=7)
-                flatlines = flatlines_for(raw, spans)
-                step2.mask_segment_by_flatline(raw, flatlines)
-                with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
-                    step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
-        # A 0.5-s window still fits at either edge of the joined annotation.
+        raw = native_raw(n_nonreference=7)
+        flatlines = flatlines_for(raw, everything)
+        step2.mask_segment_by_flatline(raw, flatlines)
+        with self.assertRaisesRegex(ValueError, "No unmasked samples"):
+            step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
+        # Gap annotations leave 200 samples at each edge, neither a 2-s window.
         raw = native_raw(n_nonreference=7)
         flatlines = flatlines_for(raw, every_window)
         step2.mask_segment_by_flatline(raw, flatlines)
-        _, details = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines,
-                                             window_length=0.5, return_details=True)
-        self.assertEqual(int(details["retained"].sum()), 2)
+        report, details = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines,
+                                                  return_details=True)
+        self.assertEqual(report, {"flatline": []})
+        np.testing.assert_array_equal(details["flat_fraction"], 0)
 
     def test_detection_records_spans_without_a_scoring_window_parameter(self):
         raw = native_raw(n_nonreference=7)
@@ -190,8 +217,10 @@ class TestPublicFlatlineStages(unittest.TestCase):
         step2.mask_segment_by_flatline(raw, flatlines)
         self.assertEqual(len(flatlines["global_segments_exact"]), 4)
         self.assertEqual(len(raw.annotations), 7)  # Four events and three inserted gaps.
-        with self.assertRaisesRegex(ValueError, "No complete unmasked windows"):
-            step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
+        report, details = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines,
+                                                  return_details=True)
+        self.assertEqual(report, {"flatline": []})
+        np.testing.assert_array_equal(details["flat_fraction"], 0)
 
     def test_masks_share_good_eeg_pool_excluding_native_reference_and_auxiliary_bads(self):
         for reference_is_bad in (False, True):

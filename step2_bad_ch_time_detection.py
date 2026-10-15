@@ -28,16 +28,17 @@ bad_ch_by_std, bad_ch_by_HFnoise, bad_ch_by_BBnoise, and bad_ch_by_correlation
 flag a channel violating in more than 25% of its scorable 2-s windows: the
 windows clear of BAD annotations (BAD_by_flatline included) and of the
 temporary BAD_voltage_mask, without the channel's local flat intervals. Other
-criteria treat flat time differently: bad_ch_by_flatline counts local flat
-windows as violations within the shared retained-window denominator;
-bad_ch_by_RANSAC counts them as failures to predict within that denominator;
-and bad_ch_by_small excludes flat donors but scores flat targets using their
-actual input MAD, including linearly filled samples. bad_ch_by_voltage counts
-scorable samples, not windows, since every sample beyond its threshold matters;
-bad_ch_by_pop counts pops per scorable minute.
+criteria treat flat time differently: bad_ch_by_flatline counts exact flat
+samples within the shared retained-sample denominator; bad_ch_by_RANSAC counts
+local flat windows as failures to predict within the retained-window
+denominator; and bad_ch_by_small excludes flat donors but scores flat targets
+using their actual input MAD, including linearly filled samples.
+bad_ch_by_voltage counts scorable samples, not windows, since every sample
+beyond its threshold matters; bad_ch_by_pop counts pops per scorable minute.
 
 The 2-second window detectors accept return_details=True to return (report,
 details), including window metrics and original flagged waveforms.
+bad_ch_by_flatline and bad_ch_by_voltage return per-channel sample fractions.
 bad_ch_by_small returns observed/predicted MAD ratios and their robust
 z-scores; bad_ch_by_pop counts individual electrode pops instead; its details
 include each channel's pop times and step sizes.
@@ -2087,31 +2088,34 @@ def bad_ch_by_nan(raw, reference_channel=None):
 
 def bad_ch_by_flatline(
     raw,
-    window_length=2.0,
     occurrence_cutoff=0.25,
     reference_channel=None,
     *,
     flatlines,
     return_details=False,
 ):
-    """Return {"flatline": names} for channels flat in more than
-    occurrence_cutoff of retained windows.
+    """Return {"flatline": names} for channels whose exact flat samples exceed
+    occurrence_cutoff of retained samples.
 
     Require native-reference data and exclude existing bads/reference/non-EEG
     channels. flatlines is required: the dictionary from
     detect_flatline_inplace, followed by mask_segment_by_flatline to annotate
-    this Raw's global dropouts as BAD_by_flatline. Any overlap with one of its
-    segments marks the channel's complete window. Omit windows overlapping BAD
-    annotations, including global dropouts, and the temporary 0.1-second
-    voltage mask, built from this native data with the resolved reference
-    excluded, as in the other detectors; ignore the partial tail. A channel
-    flat in fewer windows can be flagged by bad_ch_by_RANSAC, which counts its
-    flat windows as failures to predict.
+    this Raw's global dropouts as BAD_by_flatline. Count samples in
+    segments_exact, without including joined channel gaps or filter padding.
+    Exclude samples in BAD annotations, including global dropouts, and the
+    temporary 0.1-second voltage mask, built from this native data with the
+    resolved reference excluded, as in bad_ch_by_voltage. Keep local flat
+    samples in both the count and denominator. Score all retained samples,
+    including a partial tail, and flag only when the fraction is strictly
+    greater than occurrence_cutoff.
 
-    Add detections to info['bads']; leave data/annotations unchanged. Details
-    follow the other window detectors, with flat and violates equal to the
-    mapped segment mask in retained windows and NaN in excluded windows.
+    Add detections to info['bads']; leave data/annotations unchanged. With
+    return_details=True, return (report, details): ch_names of the evaluated
+    channels and flat_fraction, each one's fraction of retained samples in
+    exact flatline intervals.
     """
+    if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
+        raise ValueError("occurrence_cutoff must be between 0 and 1.")
     if flatlines is None:
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
@@ -2123,30 +2127,27 @@ def bad_ch_by_flatline(
     spans, _ = _temporary_voltage_mask(
         raw, reference_channel=reference_channel, shared=shared
     )
-    picks, window_samples, n_windows = _prepare_channel_windows(
-        raw, window_length, occurrence_cutoff, "native", reference_channel,
-        known_zeros=shared["zeros"],
-    )
-    rejected_samples = _rejected_samples(raw, spans)
-    retained_windows = _retained_windows(rejected_samples, window_samples, n_windows)
-    flat = _flatline_windows(raw, flatlines, picks, window_samples, n_windows)
-    counts = flat[:, retained_windows].sum(axis=1)
-    n_retained = int(retained_windows.sum())
-    if return_details:
-        details = _init_window_details(raw, picks, window_samples, n_windows, ("flat",))
-        for start, data in _iterate_retained_windows(
-            raw, picks, window_samples, n_windows, rejected_samples, return_start=True
-        ):
-            violates = flat[:, start // window_samples]
-            index = _record_window_details(
-                details, start, window_samples, data, violates
-            )
-            details["flat"][:, index] = violates
-    bad_names = _noisy_window_bads(raw, picks, counts, n_retained, occurrence_cutoff)
+    _validate_flatlines(raw, flatlines)
+    picks = _mask_eeg_picks(raw, reference_channel)
+    retained_samples = ~_rejected_samples(raw, spans)
+    n_retained = np.count_nonzero(retained_samples)
+    if not n_retained:
+        raise ValueError("No unmasked samples remain for channel detection.")
+    exact = dict(zip(flatlines["ch_names"], flatlines["segments_exact"]))
+    flat_fraction = np.zeros(len(picks))
+    for row, pick in enumerate(picks):
+        count = sum(np.count_nonzero(retained_samples[start:stop])
+                    for start, stop in exact.get(raw.ch_names[pick], []))
+        flat_fraction[row] = count / n_retained
+    bad_names = [raw.ch_names[pick] for pick in picks[flat_fraction > occurrence_cutoff]]
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"flatline": bad_names}
     if return_details:
-        return report, _finish_window_details(details, window_samples)
+        details = {
+            "ch_names": [raw.ch_names[pick] for pick in picks],
+            "flat_fraction": flat_fraction,
+        }
+        return report, details
     return report
 
 

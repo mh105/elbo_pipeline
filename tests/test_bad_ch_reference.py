@@ -59,6 +59,18 @@ class TestReferenceRequirements(unittest.TestCase):
                     result = method(raw, **kwargs)
                     self.assertEqual(result, {criterion(method): []})
 
+    def test_flatline_accepts_one_eligible_channel_and_less_than_two_seconds(self):
+        raw = make_raw(average=False).pick(["E0", "Cz"])
+        raw.crop(tmax=0.396)  # 100 samples at 250 Hz.
+        flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
+        result, details = step2.bad_ch_by_flatline(
+            raw, flatlines=flatlines, return_details=True,
+        )
+        self.assertEqual(result, {"flatline": []})
+        self.assertEqual(details["ch_names"], ["E0"])
+        np.testing.assert_array_equal(details["flat_fraction"], [0])
+
     def test_native_only_methods_reject_re_referenced_data(self):
         methods = NATIVE_ONLY + (step2.detect_flatline_inplace, step2.pca_cleaning_inplace,
                                  step2.bad_ch_under_robust_ref)

@@ -96,8 +96,8 @@ class TestWindowDetails(unittest.TestCase):
         raw.info["bads"] = ["E5"]
         raw.set_channel_types({"E6": "eog"})
         raw.set_annotations(mne.Annotations([2.1], [0.1], ["BAD_excluded"]))
-        # E0's final 2-s gap is closed in its channel span, independently of
-        # the global dropout and existing BAD annotation.
+        # E0's final 2-s gap is closed for bridging, but its valid samples
+        # remain in the scoring denominator rather than the flat numerator.
         flatlines = step2.detect_flatline_inplace(raw)
         step2.mask_segment_by_flatline(raw, flatlines)
         original = raw.copy()
@@ -106,11 +106,15 @@ class TestWindowDetails(unittest.TestCase):
                                                    return_details=True)
         self.assertEqual(report, expected)
         self.assertEqual(report, {"flatline": ["E0"]})
-        self.assert_window_details(original, raw, report["flatline"], details, 200,
-                                   [False, False, True, True])
+        self.assertEqual(list(details), ["ch_names", "flat_fraction"])
         self.assertEqual(details["ch_names"], [f"E{i}" for i in range(5)])
-        np.testing.assert_array_equal(details["flat"][0], [np.nan, np.nan, 1, 1])
-        np.testing.assert_array_equal(details["violates"][0], [np.nan, np.nan, 1, 1])
+        self.assertIsInstance(details["flat_fraction"], np.ndarray)
+        # The global dropout and nearby BAD period exclude samples [0, 220).
+        # E0 is exactly flat on [0, 600) and [800, 900), including the tail.
+        np.testing.assert_allclose(details["flat_fraction"], [480 / 680, 0, 0, 0, 0])
+        self.assertEqual(raw.info["bads"], ["E5", "E0"])
+        self.assertEqual(raw.annotations, original.annotations)
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
 
     def test_noise_details_preserve_mask_gaps_metrics_and_channel_order(self):
         for detector, factory in ((step2.bad_ch_by_std, std_raw),
