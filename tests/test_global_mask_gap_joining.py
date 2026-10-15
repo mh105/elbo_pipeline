@@ -195,7 +195,9 @@ class TestFlatlineGapJoining(unittest.TestCase):
         np.testing.assert_array_equal(bad_coverage_spans(raw), [[100, 320]])
         expected = before[3, 199] + (before[3, 220] - before[3, 199]) * np.arange(1, 21) / 21
         np.testing.assert_allclose(raw._data[3, 200:220], expected, rtol=0, atol=1e-18)
-        self.assertIn((200, 220, (0, 1, 2, 3)), list(step2._flatline_configurations(raw, flatlines)))
+        targets = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
+        self.assertIn((200, 220, (0, 1, 2, 3), (0, 1, 2, 3), False),
+                      list(step2._interpolation_configurations(raw, targets, list(zip(starts, stops)))))
         for row in range(3):
             expected = before[row, 99] + (before[row, 320] - before[row, 99]) * np.arange(1, 221) / 221
             np.testing.assert_allclose(raw._data[row, 100:320], expected, rtol=0, atol=1e-18)

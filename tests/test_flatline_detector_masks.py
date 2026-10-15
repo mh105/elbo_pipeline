@@ -13,7 +13,7 @@ if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
 import step2_bad_ch_time_detection as step2
-from step2_bad_ch_time_detection import _flatline_configurations
+from step2_bad_ch_time_detection import _interpolation_configurations
 from test_bad_ch_local_signals import set_sphere_positions
 
 
@@ -270,14 +270,21 @@ class TestPublicFlatlineStages(unittest.TestCase):
         raw.info["bads"] = ["E0", "E1", "E2"]
         average(raw)
         self.assertEqual(flatlines["global_segments_exact"], [[20, 40]])
-        self.assertEqual(list(_flatline_configurations(raw, flatlines)), [(0, raw.n_times, ())])
+        targets = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
+        global_flat = list(zip(*step2._annotations_starts_stops(raw, ["BAD_by_flatline"])))
+        self.assertEqual(list(_interpolation_configurations(raw, targets, global_flat)),
+                         [(0, 20, (), (), False), (20, 40, (), (), True),
+                          (40, raw.n_times, (), (), False)])
         unmasked = native_raw(n_nonreference=12)
         flatlines = flatlines_for(unmasked, {"E0": [[20, 40]], "E1": [[20, 40]]})
         step2._mask_segment_by_flatline(unmasked, flatlines)
         unmasked.info["bads"] = [f"E{i}" for i in range(2, 10)]
         self.assertEqual(flatlines["global_segments_exact"], [])
-        self.assertEqual(list(_flatline_configurations(unmasked, flatlines)),
-                         [(0, 20, ()), (20, 40, (0, 1)), (40, unmasked.n_times, ())])
+        targets = dict(zip(flatlines["ch_names"], flatlines["segments_bridged"]))
+        global_flat = list(zip(*step2._annotations_starts_stops(unmasked, ["BAD_by_flatline"])))
+        self.assertEqual(list(_interpolation_configurations(unmasked, targets, global_flat)),
+                         [(0, 20, (), (), False), (20, 40, (0, 1), (0, 1), False),
+                          (40, unmasked.n_times, (), (), False)])
 
 
 class TestLocalFlatlineMetricMasks(unittest.TestCase):

@@ -71,8 +71,15 @@ def faded(original, repaired, start, stop, sfreq=250):
 def blended_reconstruction(raw, bads, parts):
     """Full MNE reconstructions blended over explicitly specified test intervals."""
     def reconstruct(local):
-        invalid = sorted(set(bads).union(local))
-        return mne_reconstruction(raw, invalid) if invalid else raw.copy()
+        targets, excluded = local if isinstance(local, tuple) else (local, local)
+        targets = set(bads).union(targets)
+        excluded = sorted(set(bads).union(excluded))
+        projected = mne_reconstruction(raw, excluded) if excluded else raw.copy()
+        # Donor-only exclusions retain their own input in the full projection.
+        for name in set(excluded).difference(targets):
+            row = raw.ch_names.index(name)
+            projected._data[row] = raw._data[row]
+        return projected
 
     expected = reconstruct([])
     for start, stop, before, after in parts:
@@ -92,21 +99,38 @@ def blended_reconstruction(raw, bads, parts):
 
 def overlapping_parts(global_dropout=False):
     """Expected 250-Hz transitions for F7 [200, 600), F3 [400, 800)."""
+    a, b, ab = ["F7"], ["F3"], ["F7", "F3"]
     middle = (
-        [(400, 425, ["F7"], ["F7", "F3"]),
-         (425, 450, ["F7", "F3"], []),
-         (550, 575, [], ["F7", "F3"]),
-         (575, 600, ["F7", "F3"], ["F3"])]
+        [(400, 425, (a, ab), ab),
+         (425, 450, ab, ([], ab)),
+         (550, 575, ([], ab), ab),
+         (575, 600, ab, (b, ab))]
         if global_dropout else
-        [(400, 462, ["F7"], ["F7", "F3"]),
-         (462, 538, ["F7", "F3"], ["F7", "F3"]),
-         (538, 600, ["F7", "F3"], ["F3"])]
+        [(400, 462, (a, ab), ab),
+         (462, 538, ab, ab),
+         (538, 600, ab, (b, ab))]
     )
-    return [(200, 262, [], ["F7"]), (262, 400, ["F7"], ["F7"]),
-            *middle, (600, 738, ["F3"], ["F3"]), (738, 800, ["F3"], [])]
+    return [(138, 200, [], ([], a)),
+            (200, 262, ([], a), a), (262, 338, a, a),
+            (338, 400, a, (a, ab)),
+            *middle, (600, 662, (b, ab), b), (662, 738, b, b),
+            (738, 800, b, ([], b)), (800, 862, ([], b), [])]
 
 
 class TestSphericalSpline(unittest.TestCase):
+    def test_iterator_omits_baseline_but_retains_empty_target_transitions(self):
+        raw = make_raw()
+        for bads in [(), (raw.ch_names.index("T7"),)]:
+            with self.subTest(bads=bads):
+                self.assertEqual(list(step2._iterate_interpolation_intervals(
+                    raw, {}, bads=bads,
+                )), [])
+                intervals = list(step2._iterate_interpolation_intervals(
+                    raw, {"F7": [[200, 600]]}, bads=bads,
+                ))
+                self.assertEqual([(start, stop) for start, stop, targets, *_ in intervals
+                                  if not targets], [(138, 200), (600, 662)])
+
     def test_weights_match_mne_for_original_indices_and_float64(self):
         raw = make_raw()
         geometry = step2._spline_geometry(raw)
@@ -206,9 +230,6 @@ class TestSphericalSpline(unittest.TestCase):
                     row = NAMES.index(name)
                     np.testing.assert_allclose(raw._data[row], expected._data[row],
                                                rtol=0, atol=1e-15)
-                reconstructed = mne_reconstruction(raw, bads) if bads else raw
-                np.testing.assert_allclose(mean, reconstructed._data[:len(NAMES)].mean(axis=0),
-                                           rtol=0, atol=1e-15)
 
     def test_simultaneous_changes_pass_through_common_flat_channels(self):
         for persistent in (False, True):
@@ -220,15 +241,18 @@ class TestSphericalSpline(unittest.TestCase):
                     spans["Fz"] = [[100, 1100]]
                 flatlines = flatlines_for(raw, spans)
                 original = raw.copy()
-                parts = [(200, 262, common, common + ["F7"]),
+                ab = common + ["F7", "F3"]
+                parts = [(200, 262, (common, common + ["F7"]), common + ["F7"]),
                          (262, 538, common + ["F7"], common + ["F7"]),
-                         (538, 600, common + ["F7"], common),
-                         (600, 662, common, common + ["F3"]),
+                         (538, 600, common + ["F7"], (common, ab)),
+                         (600, 662, (common, ab), common + ["F3"]),
                          (662, 938, common + ["F3"], common + ["F3"]),
-                         (938, 1000, common + ["F3"], common)]
+                         (938, 1000, common + ["F3"], (common, common + ["F3"]))]
                 if persistent:
-                    parts = [(100, 150, [], common), (150, 200, common, common),
-                             *parts, (1000, 1050, common, common), (1050, 1100, common, [])]
+                    parts = [(100, 150, ([], common), common),
+                             (150, 200, common, (common, common + ["F7"])),
+                             *parts, (1000, 1050, (common, common + ["F3"]), common),
+                             (1050, 1100, common, ([], common))]
                 expected = blended_reconstruction(original, [], parts)
                 mean = step2._robust_mean(raw, [], flatlines)
                 step2.interpolate_local_flatline_inplace(raw, flatlines)
@@ -245,10 +269,14 @@ class TestSphericalSpline(unittest.TestCase):
         raw = make_raw()
         flatlines = flatlines_for(raw, {"F7": [[200, 1000]], "F3": [[500, 512]]})
         expected = blended_reconstruction(raw, [], [
-            (200, 262, [], ["F7"]), (262, 500, ["F7"], ["F7"]),
-            (500, 506, ["F7"], ["F7", "F3"]),
-            (506, 512, ["F7", "F3"], ["F7"]),
-            (512, 938, ["F7"], ["F7"]), (938, 1000, ["F7"], []),
+            (200, 262, ([], ["F7"]), ["F7"]),
+            (262, 438, ["F7"], ["F7"]),
+            (438, 500, ["F7"], (["F7"], ["F7", "F3"])),
+            (500, 506, (["F7"], ["F7", "F3"]), ["F7", "F3"]),
+            (506, 512, ["F7", "F3"], (["F7"], ["F7", "F3"])),
+            (512, 574, (["F7"], ["F7", "F3"]), ["F7"]),
+            (574, 938, ["F7"], ["F7"]),
+            (938, 1000, ["F7"], ([], ["F7"])),
         ])
         mean = step2._robust_mean(raw, [], flatlines)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
@@ -262,10 +290,11 @@ class TestSphericalSpline(unittest.TestCase):
         original = raw.copy()
         expected = blended_reconstruction(raw, [], [
             (500, 501, ["F7"], ["F7"]),
-            (501, 550, ["F7"], ["F7", "F3"]),
+            (501, 550, (["F7"], ["F7", "F3"]), ["F7", "F3"]),
             (550, 551, ["F7", "F3"], ["F7", "F3"]),
-            (551, 600, ["F7", "F3"], ["F3"]),
-            (600, 650, ["F3"], ["F3"]), (650, 700, ["F3"], []),
+            (551, 600, ["F7", "F3"], (["F3"], ["F7", "F3"])),
+            (600, 650, (["F3"], ["F7", "F3"]), ["F3"]),
+            (650, 700, ["F3"], ([], ["F3"])),
         ])
         mean = step2._robust_mean(raw, [], flatlines)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
@@ -389,11 +418,17 @@ class TestSphericalSpline(unittest.TestCase):
         expected = raw.copy()
         repaired = mne_reconstruction(raw, ["T7", "F7"])
         expected._data[row, 100:16900] = faded(raw._data[row], repaired._data[row], 100, 16900)
+        full_reconstruction = blended_reconstruction(raw, ["T7"], [
+            (50, 100, [], ([], ["F7"])),
+            (100, 162, ([], ["F7"]), ["F7"]),
+            (162, 16838, ["F7"], ["F7"]),
+            (16838, 16900, ["F7"], ([], ["F7"])),
+            (16900, 16950, ([], ["F7"]), []),
+        ])
         mean = step2._robust_mean(raw, ["T7"], flatlines)
         step2.interpolate_local_flatline_inplace(raw, flatlines)
         np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
-        reconstructed = mne_reconstruction(raw, ["T7"])
-        np.testing.assert_allclose(mean, reconstructed._data[geometry["picks"]].mean(axis=0),
+        np.testing.assert_allclose(mean, full_reconstruction._data[geometry["picks"]].mean(axis=0),
                                    rtol=0, atol=1e-15)
 
     def test_invalid_sensor_position_and_missing_donors_raise(self):
@@ -404,6 +439,136 @@ class TestSphericalSpline(unittest.TestCase):
         geometry = step2._spline_geometry(make_raw())
         with self.assertRaisesRegex(ValueError, "genuine EEG donor"):
             step2._spline_weights(geometry, [], [0])
+
+    def test_invalid_samples_never_influence_another_target_during_fades(self):
+        targets = {"F7": [[200, 1000]]}
+        invalid = {"F3": [[450, 650]], "F4": [[600, 700]]}
+        original = make_raw()
+        perturbed = original.copy()
+        for name, spans in invalid.items():
+            for start, stop in spans:
+                perturbed._data[NAMES.index(name), start:stop] += 1
+        repaired, changed = original.copy(), perturbed.copy()
+        step2._interpolate_local_intervals_inplace(repaired, targets, invalid, [])
+        step2._interpolate_local_intervals_inplace(changed, targets, invalid, [])
+        row = NAMES.index("F7")
+        np.testing.assert_array_equal(repaired._data[row], changed._data[row])
+        # Donors return outside their invalid spans, rather than being excluded
+        # for the target's entire interval.
+        expected = mne_reconstruction(original, ["F7"])
+        np.testing.assert_allclose(repaired._data[row, 300:350],
+                                   expected._data[row, 300:350], rtol=0, atol=1e-15)
+        expected = mne_reconstruction(original, ["F7", "F3"])
+        np.testing.assert_allclose(repaired._data[row, 500:538],
+                                   expected._data[row, 500:538], rtol=0, atol=1e-15)
+        unchanged = [i for i in range(len(original.ch_names)) if i != row]
+        np.testing.assert_array_equal(repaired._data[unchanged], original._data[unchanged])
+        np.testing.assert_array_equal(changed._data[unchanged], perturbed._data[unchanged])
+
+    def test_target_samples_never_influence_an_overlapping_target(self):
+        raw = make_raw()
+        changed = raw.copy()
+        changed._data[NAMES.index("F7"), 200:600] += 1
+        changed._data[NAMES.index("F3"), 400:800] -= 1
+        flatlines = flatlines_for(raw, {"F7": [[200, 600]], "F3": [[400, 800]]})
+        before = raw.get_data()
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        step2.interpolate_local_flatline_inplace(changed, flatlines)
+        # A's own input legitimately contributes during its outer fades. After
+        # that fade, changing either marked input cannot alter A, and likewise B.
+        for name, start, stop in [("F7", 262, 538), ("F3", 462, 738)]:
+            row = NAMES.index(name)
+            np.testing.assert_array_equal(raw._data[row, start:stop],
+                                          changed._data[row, start:stop])
+        self.assertGreater(np.abs(raw._data[NAMES.index("F7"), 200:262]
+                                  - before[NAMES.index("F7"), 200:262]).max(), 0)
+
+    def test_target_invalid_role_changes_preserve_exclusion_and_input(self):
+        for repair, donor_only in [([400, 600], [600, 800]),
+                                   ([600, 800], [400, 600])]:
+            with self.subTest(repair=repair):
+                raw = make_raw()
+                original = raw.copy()
+                targets = {"F7": [[200, 1000]], "F3": [repair]}
+                invalid = {"F3": [donor_only]}
+                expected = mne_reconstruction(raw, ["F7", "F3"])
+                step2._interpolate_local_intervals_inplace(raw, targets, invalid, [])
+                np.testing.assert_allclose(raw._data[NAMES.index("F7"), 462:738],
+                                           expected._data[NAMES.index("F7"), 462:738],
+                                           rtol=0, atol=1e-15)
+                outside = np.r_[0:repair[0], repair[1]:raw.n_times]
+                np.testing.assert_array_equal(raw._data[NAMES.index("F3"), outside],
+                                              original._data[NAMES.index("F3"), outside])
+                reversed_targets = dict(reversed(list(targets.items())))
+                step2._interpolate_local_intervals_inplace(original, reversed_targets, invalid, [])
+                np.testing.assert_array_equal(raw.get_data(), original.get_data())
+
+    def test_overlapping_target_and_invalid_spans_are_normalized(self):
+        raw = make_raw()
+        merged = raw.copy()
+        step2._interpolate_local_intervals_inplace(
+            raw, {"F7": [[200, 600], [500, 800]]},
+            {"F3": [[300, 550], [450, 650]]}, [],
+        )
+        step2._interpolate_local_intervals_inplace(
+            merged, {"F7": [[200, 800]]}, {"F3": [[300, 650]]}, [],
+        )
+        np.testing.assert_array_equal(raw.get_data(), merged.get_data())
+
+    def test_multiple_numpy_flat_spans_on_one_channel(self):
+        raw = make_raw()
+        intervals = [[200, 400], [600, 800]]
+        flatlines = flatlines_for(raw, {"F7": intervals})
+        self.assertIsInstance(flatlines["segments_bridged"][0], np.ndarray)
+        expected = raw.copy()
+        reconstructed = mne_reconstruction(raw, ["F7"])
+        row = NAMES.index("F7")
+        for start, stop in intervals:
+            expected._data[row, start:stop] = faded(
+                raw._data[row], reconstructed._data[row], start, stop,
+            )
+        mean = step2._robust_mean(raw, [], flatlines)
+        step2.interpolate_local_flatline_inplace(raw, flatlines)
+        np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
+        np.testing.assert_allclose(mean, expected._data[:len(NAMES)].mean(axis=0),
+                                   rtol=0, atol=1e-15)
+
+    def test_zero_reference_flat_spans_exclude_donors_without_repairing_reference(self):
+        raw = make_raw()
+        flatlines = flatlines_for(raw, {"F7": [[200, 800]], "F3": [[400, 600]]})
+        reference = raw._data[NAMES.index("F3")].copy()
+        raw._data[:len(NAMES)] -= reference
+        a, excluded = ["F7"], ["F7", "F3"]
+        expected = blended_reconstruction(raw, [], [
+            (200, 262, ([], a), a), (262, 338, a, a),
+            (338, 400, a, (a, excluded)), (400, 600, (a, excluded), (a, excluded)),
+            (600, 662, (a, excluded), a), (662, 738, a, a),
+            (738, 800, a, ([], a)),
+        ])
+        step2.interpolate_local_flatline_inplace(raw, flatlines, reference_channel="F3")
+        np.testing.assert_allclose(raw.get_data(), expected.get_data(), rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw._data[NAMES.index("F3")], 0)
+
+    def test_mean_coefficients_preserve_donor_only_channels_direct_contribution(self):
+        raw = make_raw()
+        raw._data[NAMES.index("T7")] = np.nan
+        geometry = step2._spline_geometry(raw)
+        for targets, excluded in [(["T7"], ["T7", "F7"]),
+                                  (["T7"], ["T7", "F7", "F3"]),
+                                  (["T7", "F3"], ["T7", "F3", "F7"])]:
+            with self.subTest(targets=targets):
+                expected = blended_reconstruction(raw, [], [
+                    (0, raw.n_times, (targets, excluded), (targets, excluded)),
+                ])
+                rows, coefficients = step2._mean_configuration(
+                    geometry, [NAMES.index(name) for name in targets],
+                    [NAMES.index(name) for name in excluded],
+                )
+                self.assertNotIn(NAMES.index("T7"), rows)
+                self.assertIn(NAMES.index("F7"), rows)
+                np.testing.assert_allclose(coefficients @ raw._data[rows],
+                                           expected._data[geometry["picks"]].mean(axis=0),
+                                           rtol=0, atol=1e-15)
 
 
 if __name__ == "__main__":

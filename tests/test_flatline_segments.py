@@ -447,13 +447,16 @@ class TestFlatlineApplication(unittest.TestCase):
             "E0": [[4, 20]], "E1": [[10, 30]], "E2": [[12, 18]],
         })
         step2._mask_segment_by_flatline(raw, result)  # Global dropout [10, 20).
-        expected = [(0, 4, ()), (4, 10, (1,)), (10, 20, ()),
-                    (20, 30, (2,)), (30, 50, ())]
-        self.assertEqual(list(step2._flatline_configurations(raw, result)), expected)
-        self.assertEqual(list(step2._flatline_configurations(raw, None)), [(0, 50, ())])
+        targets = dict(zip(result["ch_names"], result["segments_bridged"]))
+        global_flat = list(zip(*step2._annotations_starts_stops(raw, ["BAD_by_flatline"])))
+        expected = [(0, 4, (), (), False), (4, 10, (1,), (1,), False), (10, 20, (), (), True),
+                    (20, 30, (2,), (2,), False), (30, 50, (), (), False)]
+        self.assertEqual(list(step2._interpolation_configurations(raw, targets, global_flat)), expected)
+        self.assertEqual(list(step2._interpolation_configurations(raw, {})),
+                         [(0, 50, (), (), False)])
         del result["global_segments_exact"]
         with self.assertRaisesRegex(ValueError, "global_segments_exact"):
-            list(step2._flatline_configurations(raw, result))
+            step2._validate_flatlines(raw, result)
 
 
 if __name__ == "__main__":

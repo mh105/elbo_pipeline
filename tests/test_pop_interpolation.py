@@ -48,15 +48,26 @@ def add_pop(raw, name, onset, step_uv=500.0):
     raw._data[raw.ch_names.index(name), onset:] += step_uv * 1e-6
 
 
-def expected_repair(raw, original, name, start, stop, invalid):
-    """Spline estimate from the good donors, blended in by 0.25-s raised cosines
-    at both ends."""
+def spline_estimate(raw, original, name, start, stop, invalid):
+    """Project the prescribed good donor set without changing its samples."""
     geometry = step2._spline_geometry(raw)
     donors = [i for i in geometry["picks"] if raw.ch_names[i] not in raw.info["bads"]
               and raw.ch_names[i] not in invalid]
     target = raw.ch_names.index(name)
-    estimate = (step2._spline_weights(geometry, donors, [target])
-                @ original[donors, start:stop])[0]
+    return (step2._spline_weights(geometry, donors, [target])
+            @ original[donors, start:stop])[0]
+
+
+def crossfade(before, after):
+    rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(len(before)) + 0.5) / len(before))
+    return (1 - rise) * before + rise * after
+
+
+def expected_repair(raw, original, name, start, stop, invalid):
+    """Spline estimate from the good donors, blended in by 0.25-s raised cosines
+    at both ends."""
+    estimate = spline_estimate(raw, original, name, start, stop, invalid)
+    target = raw.ch_names.index(name)
     fade = min(int(round(0.25 * raw.info["sfreq"])), (stop - start) // 2)
     weight = np.ones(stop - start)
     rise = 0.5 - 0.5 * np.cos(np.pi * (np.arange(fade) + 0.5) / fade)
@@ -97,17 +108,69 @@ class TestLocalPopInterpolation(unittest.TestCase):
         add_pop(raw, "C3", 2500)
         add_pop(raw, "C4", 2600, step_uv=-400.0)
         original = raw.get_data()
-        # P3 is flat inside both intervals; O1 only outside them, so it donates.
+        # P3 is unavailable only inside its flat span; O1 donates throughout.
         flatlines = flatlines_for(raw, {"P3": [[2700, 2800]], "O1": [[4000, 4100]]})
 
         result = step2.interpolate_local_pops_inplace(raw, flatlines)
 
         self.assertIsNone(result)
+        expected = original.copy()
         for name, start, stop in [("C3", 2250, 2750), ("C4", 2350, 2850)]:
-            expected, _ = expected_repair(raw, original, name, start, stop,
-                                          {"C3", "C4", "P3"})
-            np.testing.assert_allclose(raw._data[raw.ch_names.index(name), start:stop],
-                                       expected, rtol=0, atol=1e-15)
+            row = raw.ch_names.index(name)
+            alone = spline_estimate(raw, original, name, start, stop, {name})
+            both = spline_estimate(raw, original, name, start, stop, {"C3", "C4"})
+            no_flat = spline_estimate(raw, original, name, start, stop,
+                                      {"C3", "C4", "P3"})
+            if name == "C3":
+                expected[row, start:stop] = both
+                expected[row, 2250:2300] = crossfade(original[row, 2250:2300], alone[:50])
+                # C4 fades out as a donor BEFORE its repair interval starts.
+                expected[row, 2300:2350] = crossfade(alone[50:100], both[50:100])
+                expected[row, 2638:2700] = crossfade(both[388:450], no_flat[388:450])
+                expected[row, 2700:2725] = no_flat[450:475]
+                expected[row, 2725:2750] = crossfade(no_flat[475:],
+                                                    original[row, 2725:2750])
+            else:
+                after_c3 = spline_estimate(raw, original, name, start, stop, {name, "P3"})
+                expected[row, start:stop] = both
+                expected[row, 2350:2412] = crossfade(original[row, 2350:2412], both[:62])
+                expected[row, 2638:2700] = crossfade(both[288:350], no_flat[288:350])
+                expected[row, 2700:2750] = no_flat[350:400]
+                # C3 returns only after its target span, P3 after its invalid span.
+                expected[row, 2750:2775] = crossfade(no_flat[400:425], after_c3[400:425])
+                expected[row, 2775:2800] = after_c3[425:450]
+                expected[row, 2800:2825] = crossfade(after_c3[450:475], alone[450:475])
+                expected[row, 2825:2850] = crossfade(alone[475:], original[row, 2825:2850])
+        np.testing.assert_allclose(raw._data, expected, rtol=0, atol=1e-15)
+
+    def test_invalid_only_samples_never_donate_and_are_not_repaired(self):
+        raw = make_raw()
+        original = raw.get_data()
+        changed = raw.copy()
+        invalid_row = raw.ch_names.index("P3")
+        changed._data[invalid_row, 800:1100] += 1e6
+        changed_input = changed.get_data()
+        for data in (raw, changed):
+            step2._interpolate_local_intervals_inplace(
+                data, {"C3": [[500, 1500]]}, {"P3": [[800, 1100]]}, [],
+            )
+
+        row = raw.ch_names.index("C3")
+        with_p3 = spline_estimate(raw, original, "C3", 500, 1500, {"C3"})
+        without_p3 = spline_estimate(raw, original, "C3", 500, 1500, {"C3", "P3"})
+        expected = with_p3.copy()
+        expected[:62] = crossfade(original[row, 500:562], with_p3[:62])
+        expected[238:300] = crossfade(with_p3[238:300], without_p3[238:300])
+        expected[300:600] = without_p3[300:600]
+        expected[600:662] = crossfade(without_p3[600:662], with_p3[600:662])
+        expected[938:] = crossfade(with_p3[938:], original[row, 1438:1500])
+        np.testing.assert_allclose(raw._data[row, 500:1500], expected, rtol=0, atol=1e-15)
+        np.testing.assert_array_equal(raw._data[row], changed._data[row])
+        others = [i for i in range(len(raw.ch_names)) if i != row]
+        np.testing.assert_array_equal(raw._data[others], original[others])
+        np.testing.assert_array_equal(changed._data[others], changed_input[others])
+        np.testing.assert_array_equal(raw._data[row, :500], original[row, :500])
+        np.testing.assert_array_equal(raw._data[row, 1500:], original[row, 1500:])
 
     def test_global_dropouts_and_recording_edges_bound_the_intervals(self):
         raw = make_raw()
@@ -183,10 +246,15 @@ class TestLocalPopInterpolation(unittest.TestCase):
 
         step2.interpolate_local_pops_inplace(raw, flatlines_for(raw))
 
-        # Cz's estimate, without FC1 as a donor and faded in and out, becomes
-        # the reference: it is subtracted from every EEG channel, and Cz stays
-        # zero. The other pops are then repaired on it.
-        reference, _ = expected_repair(raw, popped, "Cz", 2250, 2750, {"Cz", "FC1"})
+        # Cz uses FC1 only before FC1's repair interval, with the donor fade
+        # completed at 2350. Its repaired trace is subtracted from every EEG
+        # channel, keeping Cz zero; the other pops are then repaired on it.
+        with_fc1 = spline_estimate(raw, popped, "Cz", 2250, 2750, {"Cz"})
+        without_fc1 = spline_estimate(raw, popped, "Cz", 2250, 2750, {"Cz", "FC1"})
+        reference = without_fc1.copy()
+        reference[:50] = crossfade(popped[cz, 2250:2300], with_fc1[:50])
+        reference[50:100] = crossfade(with_fc1[50:100], without_fc1[50:100])
+        reference[-62:] = crossfade(without_fc1[-62:], popped[cz, 2688:2750])
         expected = popped.copy()
         expected[:len(NAMES), 2250:2750] -= reference
         expected[cz] = 0
