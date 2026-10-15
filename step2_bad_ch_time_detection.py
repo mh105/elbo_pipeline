@@ -596,7 +596,7 @@ def _flatline_windows(raw, flatlines, picks, window_samples, n_windows):
     return mask
 
 
-def _mask_eeg_picks(raw, reference_channel):
+def _mask_eeg_picks(raw, reference_channel=None):
     """Select mask numerator/denominator
     channels, excluding bads and reference.
     """
@@ -4004,8 +4004,8 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, *, pop_interv
     if reference_channel in raw.info["bads"]:
         raise ValueError("The reference is bad; run validate_reference_inplace first.")
     picks = _mask_eeg_picks(raw, reference_channel)
-    sfreq = float(raw.info["sfreq"])
     names = [raw.ch_names[pick] for pick in picks]
+    sfreq = float(raw.info["sfreq"])
 
     mask_segment_by_voltage(raw, reference_channel=reference_channel)
     excluded = _rejected_samples(raw)
