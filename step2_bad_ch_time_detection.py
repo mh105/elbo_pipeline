@@ -4118,7 +4118,6 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     asr_details = apply_asr_inplace(
         raw, reference_channel, flatlines, pop_intervals,
     )
-
     return bad_ch_report, asr_details, reference_channel
 
 
