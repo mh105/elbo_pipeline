@@ -105,12 +105,10 @@ flat intervals, and repaired pop intervals, then uses automatic selection; at
 least 60 seconds must remain. Its statistics use a four-second minimum-phase
 FIR with ASR's intended amplitude gains and 100-ms covariance blocks.
 Correction processes the full timeline, including masked periods, at cutoff
-20. Afterwards, the joint flat/pop targets are reconstructed again from
-corrected donors, including the effective reference's historical intervals.
-Subtract its reconstructed trace from every EEG channel to restore
-zero reference; this final refinement applies the edge fades again. Return one
-details dictionary with correction duration and percentage, component-rejection
-and applied-correction intervals on the original sample timeline, and
+20. Keep the ASR output without another local interpolation pass; the excluded
+reference stays zero. Return one details dictionary with correction duration
+and percentage, component-rejection and applied-correction intervals on the
+original sample timeline, and
 calibration and window diagnostics.
 plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
 plot_asr_calibration shows accepted support, a channel trace and spectrogram,
@@ -3486,10 +3484,9 @@ def interpolate_local_artifacts_inplace(
     current reference from every EEG channel, including bads, to make it zero
     again. A bad current reference stays zero until validation replaces it.
 
-    Supply pop_intervals, including {}, to reuse known intervals without
-    detection after ASR; pass the effective reference_channel if it changed.
-    This refinement uses the ASR output and applies the edge fades again.
-    Donors exclude all active targets in both crossfade projections. Donors
+    Supply pop_intervals, including {}, to repair known intervals without
+    detection; pass the effective reference_channel if it changed. Donors
+    exclude all active targets in both crossfade projections. Donors
     fade out before their invalid spans and return afterwards; only a
     target's own outer fades use its input. Raised-cosine fades last up to
     0.25 s, capped at half each configuration's duration. Global
@@ -3935,13 +3932,10 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
     their native defaults. Initialize the statistics filter from reflected
     sequence starts rather than calibration-ending history. Correction sees the
     full original timeline, including global BAD periods; their existing
-    annotations remain for later rejection. Jointly re-interpolate the stored
-    flat/pop intervals from corrected donors, including the effective
-    reference's intervals. Subtract its reconstructed trace from all EEG to
-    restore its zero signal. This refinement applies the edge fades again.
-    Show plot_asr_effect after this repair, comparing the original ASR input
-    with the final output on shared full-range axes, then show a median Welch
-    PSD topomap through 45 Hz in dB, excluding
+    annotations remain for later rejection. Keep the ASR output without
+    re-interpolating local flat/pop intervals. Show plot_asr_effect comparing
+    the original ASR input with the corrected output on shared full-range
+    axes, then show a median Welch PSD topomap through 45 Hz in dB, excluding
     bads and the effective reference.
 
     Return one details dictionary with duration_s, corrected_duration_s,
@@ -3949,11 +3943,11 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
     blending). Duration and percentage use the whole original timeline,
     including annotated periods processed by ASR. Correction support records
     where reconstruction is applied, rather than exact samplewise voltage
-    changes or later local repair. corrected_segments contains half-open
+    changes. corrected_segments contains half-open
     (start, stop) Python-int sample bounds relative to this Raw's beginning;
     flatlines retains interpolation provenance. No ASR annotations are added.
-    Bad labels and non-EEG data are unchanged; bad EEG channels receive only
-    the common reference correction, and the reference finishes exactly zero.
+    Bad labels, bad channels, and non-EEG data are unchanged; the excluded
+    reference stays exactly zero.
     Details also include component_segments (output intervals whose current
     update rejects components), original calibration sample indices, filter
     coefficients, settings, and native calibration and processing diagnostics.
@@ -4037,11 +4031,6 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
         corrected, processing = process_asr(data, sfreq, state)
     raw._data[picks] = corrected
-    interpolate_local_artifacts_inplace(
-        raw, flatlines,
-        pop_intervals=pop_intervals,
-        reference_channel=reference_channel,
-    )
     plot_asr_effect(raw, data, names)
     raw.compute_psd(
         fmax=45.0, average="median", verbose=False,
