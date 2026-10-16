@@ -88,7 +88,7 @@ first those of the final reference, found on a robust-average copy, then the
 others, found on a temporary copy with the reference's flats and pops repaired
 and referenced to that electrode. The temporary repairs are discarded. Repair
 the joint flat/pop targets once on the unchanged production input, with pop
-windows of repair_width seconds (2 s by default) centered on each jump, and
+windows of repair_width seconds (4 s by default) centered on each jump, and
 subtract the reconstructed current reference from every EEG channel. The final
 reference is the native one if it is good; if it is bad,
 validate_reference_inplace then re-references the data to the nearest good one
@@ -3459,7 +3459,7 @@ def bad_ch_under_robust_ref(
 
 def interpolate_local_artifacts_inplace(
     raw, flatlines, *, pop_intervals=None, reference_channel=None,
-    repair_width=2.0,
+    repair_width=4.0,
 ):
     """Jointly repair local flats and pops; return detected pop intervals.
 
@@ -3479,7 +3479,7 @@ def interpolate_local_artifacts_inplace(
 
     Jointly repair the union of segments_bridged and the discovered pop
     windows on raw, including the reference's intervals. Pop windows span
-    repair_width seconds (2 s by default), centered on each detected jump.
+    repair_width seconds (4 s by default), centered on each detected jump.
     Apply one repair to the production input, then subtract the reconstructed
     current reference from every EEG channel, including bads, to make it zero
     again. A bad current reference stays zero until validation replaces it.

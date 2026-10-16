@@ -86,7 +86,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         original = raw.get_data()
         annotations = raw.annotations.copy()
 
-        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw))
+        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw), repair_width=2.0)
 
         self.assertEqual(result, {"C3": [[2250, 2750]]})
         expected, estimate = expected_repair(raw, original, "C3", 2250, 2750, {"C3"})
@@ -111,7 +111,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         # Flat spans are repaired jointly and exclude their input as donors.
         flatlines = flatlines_for(raw, {"P3": [[2700, 2800]], "O1": [[4000, 4100]]})
 
-        result = step2.interpolate_local_artifacts_inplace(raw, flatlines)
+        result = step2.interpolate_local_artifacts_inplace(raw, flatlines, repair_width=2.0)
 
         self.assertEqual(result, {"C3": [[2250, 2750]], "C4": [[2350, 2850]]})
         expected = original.copy()
@@ -190,7 +190,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         original = raw.get_data()
 
         result = step2.interpolate_local_artifacts_inplace(
-            raw, flatlines_for(raw, global_segments=[(300, 350)]),
+            raw, flatlines_for(raw, global_segments=[(300, 350)]), repair_width=2.0,
         )
 
         self.assertEqual(result, {"C3": [[0, 300], [350, 450]]})
@@ -209,7 +209,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
             add_pop(raw, "C3", onset)
         original = raw.get_data()
 
-        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw))
+        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw), repair_width=2.0)
 
         self.assertEqual(result, {"C3": [[750, 1250], [2250, 2750], [3750, 4250]]})
         self.assertEqual(raw.info["bads"], [])
@@ -255,7 +255,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         add_pop(raw, "C3", 4000)
         popped = raw.get_data()
 
-        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw))
+        result = step2.interpolate_local_artifacts_inplace(raw, flatlines_for(raw), repair_width=2.0)
 
         self.assertEqual(result, {"Cz": [[2250, 2750]], "FC1": [[2350, 2850]],
                                   "C3": [[3750, 4250]]})
@@ -303,7 +303,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         _, on_cz = step2.bad_ch_by_pop(raw.copy(), flatlines=flatlines, return_details=True)
         self.assertEqual(len(on_cz["pop_times_s"]["C3"]), 0)
 
-        result = step2.interpolate_local_artifacts_inplace(raw, flatlines)
+        result = step2.interpolate_local_artifacts_inplace(raw, flatlines, repair_width=2.0)
 
         self.assertEqual(result, {replacement: [[750, 1250]], "C3": [[2250, 2750]]})
 
@@ -364,7 +364,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
             return [], {"pop_times_s": pops}
 
         with patch.object(step2, "bad_ch_by_pop", side_effect=detect):
-            result = step2.interpolate_local_artifacts_inplace(raw, flatlines)
+            result = step2.interpolate_local_artifacts_inplace(raw, flatlines, repair_width=2.0)
 
         self.assertEqual(calls, 2)
         self.assertEqual(result, {"C3": [[300, 800]]})
@@ -417,7 +417,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
         ]
         for data in (raw, changed):
             with patch.object(step2, "bad_ch_by_pop", side_effect=detections):
-                result = step2.interpolate_local_artifacts_inplace(data, flatlines_for(data))
+                result = step2.interpolate_local_artifacts_inplace(data, flatlines_for(data), repair_width=2.0)
             self.assertEqual(result, {"Cz": [[1000, 1500]], "C3": [[1100, 1600]]})
             np.testing.assert_array_equal(data._data[data.ch_names.index("Cz")], 0)
         # An untouched channel exposes only the reconstructed reference's
@@ -445,7 +445,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
                 ]
                 with patch.object(step2, "bad_ch_by_pop", side_effect=detections):
                     result = step2.interpolate_local_artifacts_inplace(
-                        raw, flatlines_for(raw, global_segments=[(2000, 2050)]),
+                        raw, flatlines_for(raw, global_segments=[(2000, 2050)]), repair_width=2.0,
                     )
 
                 self.assertEqual(result, {
@@ -457,7 +457,7 @@ class TestLocalPopInterpolation(unittest.TestCase):
 class TestPopRepairWidth(unittest.TestCase):
     def test_default_and_custom_widths_are_independent_of_filters(self):
         for sfreq in (250, 500, 1000):
-            for half_seconds, kwargs in [(1, {}), (2, {"repair_width": 4.0})]:
+            for half_seconds, kwargs in [(2, {}), (1, {"repair_width": 2.0})]:
                 with self.subTest(sfreq=sfreq, half_seconds=half_seconds), patch.object(
                     step2.mne.filter, "create_filter",
                     side_effect=AssertionError("Pop repair must not construct a filter."),
