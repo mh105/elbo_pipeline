@@ -1,3 +1,4 @@
+import pickle
 import sys
 import unittest
 import warnings
@@ -6,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import mne
 import numpy as np
+from mne_icalabel.iclabel.features import _eeg_autocorr_fftw, _eeg_rpsd
 
 
 pipeline_dir = Path(__file__).resolve().parents[1]
@@ -131,27 +133,35 @@ class TestICAPreparation(unittest.TestCase):
 
 
 class TestICLabelMaps(unittest.TestCase):
-    def test_restores_reference_before_centering_and_preserves_time_features(self):
+    def test_restores_reference_and_scales_activations_before_time_features(self):
         raw = make_raw().pick(["E14", "E126", "F3", "Cz"])
         epochs = mne.make_fixed_length_epochs(raw.copy().drop_channels(["Cz"]),
                                              duration=2, preload=True, verbose=False)
         ica = FakeICA(3)
+        ica.maps = np.array([[2, 0.3, -0.7], [0.1, 0.8, -0.2], [0, 0, 3]])
         original_maps = ica.maps.copy()
         original_data = epochs.get_data().copy()
-        old_topo = np.full((32, 32, 1, 3), -0.2, dtype=np.float32)
+        activations = np.arange(3 * len(epochs.times) * len(epochs), dtype=float).reshape(
+            3, len(epochs.times), len(epochs),
+        )
+        original_activations = activations.copy()
         psd = np.full((1, 100, 1, 3), 0.1, dtype=np.float32)
         autocorr = np.full((1, 100, 1, 3), 0.2, dtype=np.float32)
         psd_original, autocorr_original = psd.copy(), autocorr.copy()
-        new_topo = np.full_like(old_topo, 0.5)
+        new_topo = np.full((32, 32, 1, 3), 0.5, dtype=np.float32)
         probabilities = np.zeros((3, 7))
         probabilities[:, 0] = 1
-        with patch.object(step3, "get_iclabel_features", return_value=(old_topo, psd, autocorr)) as features, \
+        with patch.object(step3, "_compute_ica_activations",
+                          side_effect=lambda *_: activations.copy()) as compute, \
+                patch.object(step3, "_eeg_rpsd", return_value=psd) as rpsd, \
+                patch.object(step3, "_eeg_autocorr_fftw",
+                             return_value=autocorr) as ac, \
                 patch.object(step3, "_eeg_topoplot", return_value=new_topo) as topoplot, \
                 patch.object(step3, "run_iclabel", return_value=probabilities) as infer:
             result = step3.label_ica_components(raw, epochs, ica, "Cz")
 
         self.assertIs(result, probabilities)
-        features.assert_called_once_with(epochs, ica)
+        compute.assert_called_once_with(epochs, ica)
         map_raw, maps, names = topoplot.call_args.args
         self.assertEqual(names, ica.ch_names + ["Cz"])
         expected = np.vstack([original_maps, np.zeros((1, 3))])
@@ -165,14 +175,103 @@ class TestICLabelMaps(unittest.TestCase):
                 raw.info["chs"][raw.ch_names.index(name)]["loc"],
             )
         np.testing.assert_allclose(infer.call_args.args[0], new_topo * 0.99)
-        self.assertIs(infer.call_args.args[1], psd)
-        self.assertIs(infer.call_args.args[2], autocorr)
+        for extractor in (rpsd, ac):
+            extractor.assert_called_once()
+            self.assertIs(extractor.call_args.args[0], epochs)
+            self.assertIs(extractor.call_args.args[1], ica)
+            np.testing.assert_allclose(
+                extractor.call_args.args[2],
+                original_activations * np.sqrt(np.mean(expected ** 2, axis=0))[:, None, None],
+            )
+        np.testing.assert_array_equal(infer.call_args.args[1], psd * 0.99)
+        np.testing.assert_array_equal(infer.call_args.args[2], autocorr * 0.99)
         self.assertEqual(infer.call_args.kwargs, {"backend": None})
         np.testing.assert_array_equal(psd, psd_original)
         np.testing.assert_array_equal(autocorr, autocorr_original)
         np.testing.assert_array_equal(ica.maps, original_maps)
         np.testing.assert_array_equal(epochs.get_data(), original_data)
         self.assertEqual(ica.exclude, [99])
+
+
+class TestICLabelFeatureScaling(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = make_raw(seconds=8, sfreq=250).pick(NAMES[:7])
+        cls.epochs = mne.make_fixed_length_epochs(
+            cls.raw.copy().drop_channels(["Cz"]), duration=2, preload=True, verbose=False,
+        )
+        cls.ica = mne.preprocessing.ICA(
+            n_components=6, method="infomax", fit_params={"extended": True},
+            max_iter=32, rng=518,
+        )
+        with warnings.catch_warnings(), mne.use_log_level("ERROR"):
+            warnings.simplefilter("ignore", RuntimeWarning)
+            cls.ica.fit(cls.epochs, picks="eeg")
+        cls.ica.exclude = [1]
+
+    def features(self, ica):
+        with warnings.catch_warnings(), patch.object(
+            step3, "run_iclabel", side_effect=lambda *args, **_: args,
+        ):
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return step3.label_ica_components(self.raw, self.epochs, ica, "Cz")
+
+    def test_time_features_match_independent_physical_car_inversion(self):
+        # Normalize physical CAR mixing columns as eeg_checkset does, then
+        # invert those maps against CAR data in microvolts independently.
+        physical_maps = np.vstack([
+            self.ica.get_components() * self.ica.pre_whitener_ * 1e6,
+            np.zeros((1, self.ica.n_components_)),
+        ])
+        physical_maps -= physical_maps.mean(axis=0, keepdims=True)
+        physical_maps /= np.sqrt(np.mean(physical_maps ** 2, axis=0))
+        data = np.concatenate([
+            self.epochs.get_data() * 1e6,
+            np.zeros((len(self.epochs), 1, len(self.epochs.times))),
+        ], axis=1)
+        data -= data.mean(axis=1, keepdims=True)
+        activations = (np.linalg.pinv(physical_maps) @ data).transpose(1, 2, 0)
+        _, psd, autocorr = self.features(self.ica)
+        np.testing.assert_allclose(
+            psd, _eeg_rpsd(self.epochs, self.ica, activations) * 0.99, atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            autocorr, _eeg_autocorr_fftw(self.epochs, self.ica, activations) * 0.99,
+            atol=2e-6,
+        )
+
+    def test_features_are_invariant_to_inverse_map_and_source_rescaling(self):
+        baseline = self.features(self.ica)
+        sources = self.ica.get_sources(self.epochs).get_data()
+        for gains in (np.geomspace(0.01, 100, 6), np.array([1, -10, 1, 1, 1, 1])):
+            with self.subTest(gains=gains):
+                rescaled = self.ica.copy()
+                rescaled.mixing_matrix_ *= gains[None, :]
+                rescaled.unmixing_matrix_ /= gains[:, None]
+                np.testing.assert_allclose(
+                    rescaled.get_components(), self.ica.get_components() * gains[None, :],
+                )
+                np.testing.assert_allclose(
+                    rescaled.get_sources(self.epochs).get_data() * gains[None, :, None],
+                    sources, atol=1e-12,
+                )
+                topo, psd, autocorr = self.features(rescaled)
+                np.testing.assert_allclose(
+                    topo * np.sign(gains)[None, None, None, :], baseline[0], atol=2e-6,
+                )
+                np.testing.assert_allclose(psd, baseline[1], atol=2e-6)
+                np.testing.assert_allclose(autocorr, baseline[2], atol=2e-6)
+
+    def test_labeling_preserves_fitted_ica_and_inputs(self):
+        ica_state = pickle.dumps(self.ica)
+        raw_data, epochs_data = self.raw.get_data().copy(), self.epochs.get_data().copy()
+        raw_info, epochs_info = pickle.dumps(self.raw.info), pickle.dumps(self.epochs.info)
+        self.features(self.ica)
+        self.assertEqual(pickle.dumps(self.ica), ica_state)
+        np.testing.assert_array_equal(self.raw.get_data(), raw_data)
+        np.testing.assert_array_equal(self.epochs.get_data(), epochs_data)
+        self.assertEqual(pickle.dumps(self.raw.info), raw_info)
+        self.assertEqual(pickle.dumps(self.epochs.info), epochs_info)
 
 
 class TestICASelection(unittest.TestCase):

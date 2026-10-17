@@ -3,7 +3,8 @@
 Fit on an internal 1-100 Hz copy, using annotation-clean 2-second epochs at
 250 Hz. Locally interpolated and ASR-corrected data remain eligible. The zero
 reference is omitted from fitting and restored only in ICLabel's mixing maps,
-which are average-referenced without changing the native component traces.
+which are average-referenced. ICLabel's private activations use EEGLAB's
+RMS-microvolt scaling without changing the fitted ICA or native source traces.
 
 The input Raw is not modified. Apply the returned ICA directly to the original
 0.3 Hz, native-rate data, preserving its reference, bad channels and annotations::
@@ -18,8 +19,13 @@ from IPython.display import display
 import mne
 import numpy as np
 import pandas as pd
-from mne_icalabel.iclabel import get_iclabel_features, run_iclabel
-from mne_icalabel.iclabel.features import _eeg_topoplot
+from mne_icalabel.iclabel import run_iclabel
+from mne_icalabel.iclabel.features import (
+    _compute_ica_activations,
+    _eeg_autocorr_fftw,
+    _eeg_rpsd,
+    _eeg_topoplot,
+)
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (
     ZapLine_notch,
@@ -105,23 +111,20 @@ def prepare_ica_epochs(raw, reference_channel=None):
 
 
 def label_ica_components(raw_ica, fit_epochs, ica, reference_channel):
-    """Return seven ICLabel probabilities using CAR maps and native time features.
+    """Return seven ICLabel probabilities using CAR maps and EEGLAB RMS scaling.
 
     Restore the effective reference's zero map row before centering electrode
-    values. Use ICLabel's private topoplot routine to preserve its interpolation
-    and normalization (mne-icalabel 0.9.0); leave the fitted ICA unchanged.
+    values. For the EEG-only fit, scale private activations by each CAR map's
+    spatial RMS before PSD and autocorrelation extraction. Use ICLabel's private
+    feature routines (mne-icalabel 0.9.0); leave the fitted ICA unchanged.
     """
-    with warnings.catch_warnings():
-        # Our replacement map feature supplies the CAR representation explicitly.
-        warnings.filterwarnings(
-            "ignore", category=RuntimeWarning,
-            message="The provided Epochs instance does not seem to be referenced "
-                    "to a common average reference.*",
-        )
-        _, psd, autocorr = get_iclabel_features(fit_epochs, ica)
-
     maps = np.vstack([ica.get_components(), np.zeros((1, ica.n_components_))])
     maps -= maps.mean(axis=0, keepdims=True)
+    map_rms = np.sqrt(np.mean(maps ** 2, axis=0))
+    activations = _compute_ica_activations(fit_epochs, ica)
+    activations *= map_rms[:, None, None]
+    psd = _eeg_rpsd(fit_epochs, ica, activations) * 0.99
+    autocorr = _eeg_autocorr_fftw(fit_epochs, ica, activations) * 0.99
     map_names = ica.ch_names + [reference_channel]
     # Only positions are needed; avoid the topoplot routine copying a full Raw.
     map_info = mne.pick_info(raw_ica.info, [raw_ica.ch_names.index(name) for name in map_names])
