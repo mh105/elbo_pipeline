@@ -129,14 +129,30 @@ class TestRobustAverageReference(unittest.TestCase):
         self.assertEqual(spectrum.ch_names,
                          [name for name in NAMES if name not in ("T7", "O1", "Cz")])
 
+    def test_positional_report_is_updated_without_changing_the_default_return(self):
+        raw = make_native_raw(noisy="O1")
+        bad_ch_report = {}
+        report = step2.bad_ch_under_robust_ref(raw, bad_ch_report)
+        self.assertIsInstance(report, dict)
+        self.assertEqual(report["std"], ["O1"])
+        self.assertEqual(bad_ch_report, report)
+        self.assertIsNot(bad_ch_report, report)
+
     def test_details_describe_each_pass_without_changing_the_result(self):
         raw = make_native_raw(noisy="O1")
         raw.info["bads"] = ["T7", "EOG"]
         expected = raw.copy()
         expected_report = step2.bad_ch_under_robust_ref(expected)
-        report, details = step2.bad_ch_under_robust_ref(raw, return_details=True)
+        bad_ch_report = {"impedance": ["T7"], "std": ["T7"]}
+        report, details = step2.bad_ch_under_robust_ref(
+            raw, bad_ch_report=bad_ch_report, return_details=True,
+        )
         self.assertIsInstance(expected_report, dict)
         self.assertEqual(report, expected_report)
+        self.assertEqual(bad_ch_report, {
+            "impedance": ["T7"], "std": ["T7", "O1"], "voltage": [],
+            "HFnoise": [], "pop": [], "BBnoise": [], "correlation": [],
+        })
         self.assertNotIn("initial", report)
         self.assertNotIn("initial_bads", report)
         self.assertEqual(details["initial_bads"], ["T7"])
@@ -227,13 +243,19 @@ class TestRobustAverageReference(unittest.TestCase):
         # mean used, so passes 2 and 3 cycle. Pass 1's std label is outside the cycle.
         std, _ = scheduled_detector([["F3"], [], []], criterion="std")
         hf, calls = scheduled_detector([[], ["F3", "F4"], ["F3"]])
+        bad_ch_report = {"impedance": ["T7"]}
         with patch.object(step2, "bad_ch_by_std", std), patch.object(
             step2, "bad_ch_by_HFnoise", hf
         ), self.assertWarnsRegex(UserWarning, r"pass 4 would repeat pass 2, with \['F4'\]"):
-            report = step2.bad_ch_under_robust_ref(make_native_raw())
+            report = step2.bad_ch_under_robust_ref(
+                make_native_raw(), bad_ch_report=bad_ch_report,
+            )
         self.assertEqual(len(calls), 3)
         self.assertEqual(report["HFnoise"], ["F3", "F4"])
         self.assertEqual(report["std"], [])
+        self.assertEqual(bad_ch_report["impedance"], ["T7"])
+        self.assertEqual(bad_ch_report["HFnoise"], ["F3", "F4"])
+        self.assertEqual(bad_ch_report["std"], [])
 
     def test_raises_without_changes_if_passes_neither_converge_nor_cycle(self):
         raw = make_native_raw()

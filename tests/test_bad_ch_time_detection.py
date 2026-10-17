@@ -58,6 +58,9 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         self.assertEqual(reference, "F3")
         self.assertEqual(supplied_report["flatline"], ["P3"])
         self.assertNotIn("nan", supplied_report)
+        self.steps["bad_ch_under_robust_ref"].assert_called_once_with(
+            self.raw, supplied_report, flatlines=supplied_flatlines,
+        )
         for name in ("bad_ch_by_nan", "detect_flatline_inplace", "bad_ch_by_flatline"):
             self.steps[name].assert_not_called()
         for name in ("bad_ch_by_voltage", "bad_ch_by_HFnoise",
@@ -76,12 +79,19 @@ class TestBadChannelTimeDetection(unittest.TestCase):
         )
         self.filter.assert_not_called()
 
-    def test_preserves_supplied_report_and_appends_robust_results_by_criterion(self):
+    def test_robust_detection_updates_report_without_wrapper_using_its_return(self):
         report = {"impedance": ["P3"], "nan": ["C3"]}
         flatlines = {}
-        self.steps["bad_ch_under_robust_ref"].return_value = {
-            "nan": ["F3"], "voltage": ["P3"], "correlation": ["C3"],
-        }
+
+        def robust_reference(raw, bad_ch_report, *, flatlines):
+            self.assertIs(raw, self.raw)
+            self.assertIs(bad_ch_report, report)
+            bad_ch_report.update({
+                "nan": ["C3", "F3"], "voltage": ["C3", "P3"],
+                "correlation": ["C3"],
+            })
+
+        self.steps["bad_ch_under_robust_ref"].side_effect = robust_reference
         plotted = []
         self.steps["plot_bad_ch_report"].side_effect = (
             lambda raw, current_report: plotted.append(

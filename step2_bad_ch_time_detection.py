@@ -105,7 +105,7 @@ flat intervals, and repaired pop intervals, then uses automatic selection; at
 least 60 seconds must remain. Its statistics use a four-second minimum-phase
 FIR with ASR's intended amplitude gains and 100-ms covariance blocks.
 Correction processes the full timeline, including masked periods, at the
-calibration_cutoff (default 5). Keep the ASR output without another local
+calibration_cutoff (default 20). Keep the ASR output without another local
 interpolation pass; the excluded reference stays zero. Return one details
 dictionary with correction duration
 and percentage, component-rejection and applied-correction intervals on the
@@ -3275,8 +3275,8 @@ def bad_ch_by_RANSAC(
 # %% Robust average reference
 
 def bad_ch_under_robust_ref(
-    raw, reference_channel=None, max_iterations=10, *, flatlines=None,
-    return_details=False,
+    raw, bad_ch_report=None, reference_channel=None, max_iterations=10,
+    *, flatlines=None, return_details=False,
 ):
     """Detect bad channels under a robust average reference, add them to
     raw.info["bads"], and return their bad-channel report.
@@ -3320,7 +3320,9 @@ def bad_ch_under_robust_ref(
     flats and pops of the channels that stay good.
 
     Return robust_bad_ch_report, the last pass's {criterion: names} (after a
-    cycle, each criterion's channels across the cycling passes).
+    cycle, each criterion's channels across the cycling passes). If
+    bad_ch_report is supplied, append these names to its existing lists by
+    criterion in place.
 
     With return_details=True, return (robust_bad_ch_report, details).
     details["initial_bads"] contains existing bad EEG channels in Raw order.
@@ -3447,6 +3449,10 @@ def bad_ch_under_robust_ref(
         exclude=raw.info["bads"] + [reference_channel],
     ).plot_topomap(dB=True)
     plot_voltage_traces(raw)
+
+    if bad_ch_report is not None:
+        for criterion, names in robust_bad_ch_report.items():
+            bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
 
     if return_details:
         details = {
@@ -3916,7 +3922,7 @@ def _asr_filter_channels(data, b, a, zi=None):
 
 def apply_asr_inplace(
     raw, reference_channel=None, flatlines=None, pop_intervals=None,
-    *, calibration_cutoff=5.0,
+    *, calibration_cutoff=20.0,
 ):
     """Correct good EEG channels with ASR in place; return details.
 
@@ -3931,7 +3937,7 @@ def apply_asr_inplace(
     without added padding or gap joining. Concatenate this support for native
     automatic selection, requiring at least 60 retained seconds.
 
-    Use standard ASR at calibration_cutoff (default 5), a four-second
+    Use standard ASR at calibration_cutoff (default 20), a four-second
     minimum-phase statistics FIR, and 100-ms covariance blocks rounded to
     samples. Other ASR parameters keep
     their native defaults. Initialize the statistics filter from reflected
@@ -4091,9 +4097,7 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
     bad_ch_report.update(bad_ch_by_small(raw, flatlines=flatlines))
     plot_bad_ch_report(raw, bad_ch_report)
 
-    robust_bad_ch_report = bad_ch_under_robust_ref(raw, flatlines=flatlines)
-    for criterion, names in robust_bad_ch_report.items():
-        bad_ch_report[criterion] = bad_ch_report.get(criterion, []) + names
+    bad_ch_under_robust_ref(raw, bad_ch_report, flatlines=flatlines)
 
     pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines)
     reference_channel = validate_reference_inplace(raw, flatlines)
