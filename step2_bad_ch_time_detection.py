@@ -2,8 +2,8 @@
 
 Bad-channel criteria may be local or cross-channel, and time invariant or time
 dependent. ASR corrects bad time periods after the initial bad-channel
-criteria; iteration between bad-channel and
-bad-time detection remains to be developed.
+criteria; iteration between bad-channel and bad-time detection
+remains to be developed.
 
 Flatlines come first. On the native data, right after bad_ch_by_nan,
 detect_flatline_inplace finds constant flatlines and exact ramps. Per-channel
@@ -48,8 +48,8 @@ before bad_ch_under_robust_ref. It predicts each channel from all other valid
 EEG channels, including the known-zero reference, using cached spherical
 splines. Locally flat channels remain scored targets but are not donors. In
 each window, score log(observed MAD / predicted MAD) against the cross-channel
-median and MAD. Robust z below -5 in more than 25%
-of a channel's scorable windows flags smallness.
+median and MAD. Robust z below -5 in more than 25% of a channel's scorable
+windows flags smallness.
 
 bad_ch_by_correlation and bad_ch_by_RANSAC compare each channel with the others
 on a copy band-limited to 1-45 Hz. The first flags channels that frequently
@@ -66,9 +66,9 @@ interpolate_local_artifacts_inplace, and validate_reference_inplace require it;
 bad_ch_by_std, bad_ch_by_BBnoise, bad_ch_by_correlation, and bad_ch_by_RANSAC
 require re-referenced data, with no entirely zero EEG channel, bad or not;
 bad_ch_by_voltage, bad_ch_by_HFnoise, and bad_ch_by_pop accept either and
-exclude the native reference if present.
-mask_segment_by_voltage accepts either by default, requires re-referenced data
-with require_average=True, and takes a named native reference.
+exclude the native reference if present. mask_segment_by_voltage accepts either
+by default, requires re-referenced data with require_average=True, and takes a
+named native reference.
 
 pca_cleaning_inplace (currently disabled in __main__) modifies the data in
 place: after the initial bad-channel pass, it removes the PC1 of each 1-second
@@ -107,13 +107,11 @@ FIR with ASR's intended amplitude gains and 100-ms covariance blocks.
 Correction processes the full timeline, including masked periods, at the
 calibration_cutoff (default 20). Keep the ASR output without another local
 interpolation pass; the excluded reference stays zero. Return one details
-dictionary with correction duration
-and percentage, component-rejection and applied-correction intervals on the
-original sample timeline, and
-calibration and window diagnostics.
-plot_asr_effect shows before/after voltage envelopes on shared full-range axes.
-plot_asr_calibration shows accepted support, a channel trace and spectrogram,
-and the calibrated covariance before correction.
+dictionary with correction duration and percentage, component-rejection and
+applied-correction intervals on the original sample timeline, and calibration
+and window diagnostics. plot_asr_effect shows before/after voltage envelopes on
+shared full-range axes. plot_asr_calibration shows accepted support, a channel
+trace and spectrogram, and the calibrated covariance before correction.
 """
 
 from collections import defaultdict
@@ -229,8 +227,8 @@ def _prepare_channel_windows(
     """Select eligible EEG channels and
     complete, non-overlapping sample windows.
 
-    reference, reference_channel, and known_zeros
-    are passed to _reference_channel.
+    reference, reference_channel, and known_zeros are passed
+    to _reference_channel.
     """
     if not np.isfinite(window_length) or window_length <= 0:
         raise ValueError("window_length must be finite and greater than 0 (seconds).")
@@ -417,8 +415,8 @@ def detect_flatline_inplace(
     replacement spans. Later consumers use segments_bridged; scoring-window
     requirements belong to those consumers rather than detection.
 
-    Detect with the union of three kinds of
-    block, each judged against tolerance_v volts:
+    Detect with the union of three kinds of block, each judged
+    against tolerance_v volts:
     - raw: min_samples consecutive samples whose range is at most tolerance_v,
       i.e. constant flatlines;
     - highpass: the same on a full-record copy filtered with a fixed 1 Hz
@@ -1209,8 +1207,8 @@ def _lowpass_45_hz(data, sfreq):
             - block[:, np.arange(n_times - 2, n_times - width - 2, -1) % n_times]
         )
         padded = np.concatenate([left, block, right], axis=1)
-        # FFT convolution truncated to the causal output, as lfilter,
-        # but faster for long kernels
+        # FFT convolution truncated to the causal output, as lfilter, but
+        # faster for long kernels
         forward = fftconvolve(padded, kernel[None], axes=1)[:, :padded.shape[1]]
         backward = fftconvolve(forward[:, ::-1], kernel[None], axes=1)[
             :, : padded.shape[1]
@@ -1223,9 +1221,9 @@ def _prep_hf_ratio(data, lowpass, *, return_mads=False):
     """PREP's MAD(residual)/MAD(lowpass) of data (channels, samples), given its
     low-pass from _lowpass_45_hz; like PREP's, the filter is low-pass only.
 
-    Floor zero low-pass MAD at machine epsilon to keep
-    flat signals finite. With return_mads=True, also
-    return the HF and LF MAD arrays, in input units.
+    Floor zero low-pass MAD at machine epsilon to keep flat signals finite.
+    With return_mads=True, also return the HF and LF MAD
+    arrays, in input units.
     """
     hf_mad = _mad(data - lowpass, axis=1)
     lf_mad = _mad(lowpass, axis=1)
@@ -1256,8 +1254,8 @@ def _band_limit(data, sfreq):
     _lowpass_45_hz. An output sample depends on input samples up to the
     returned reach away on either side, in samples: about 2.3 s at any rate.
     """
-    # Rows are independent; blocks of them bound the transient memory, and
-    # only a block is copied for the high-pass.
+    # Rows are independent; blocks of them bound the transient memory, and only
+    # a block is copied for the high-pass.
     block_rows = 16
     highpass = mne.filter.create_filter(
         None, sfreq, l_freq=1.0, h_freq=None, verbose=False
@@ -1724,8 +1722,8 @@ def pca_cleaning_inplace(
         for name, data in (("input", raw._data[picks, start:stop]),
                            ("highpass", highpassed[:, start:stop])):
             # PC1 is the top eigenvector of the centred data's scatter matrix,
-            # and its variance fraction the top eigenvalue over the trace: no
-            # full SVD is needed.
+            # and its variance fraction the top eigenvalue over the trace:
+            # no full SVD is needed.
             centered = data - data.mean(axis=1, keepdims=True)
             scatter = centered @ centered.T
             top, pc1 = eigh(scatter, subset_by_index=[len(scatter) - 1] * 2)
@@ -1760,8 +1758,8 @@ def pca_cleaning_inplace(
         )
 
     # Runs are separated by at least one uncleaned window, so their fades never
-    # overlap and each run can be cleaned from its own copy of
-    # the original data.
+    # overlap and each run can be cleaned from its own copy
+    # of the original data.
     edges = np.flatnonzero(np.diff(np.r_[False, cleaned, False])).reshape(-1, 2)
     for first, last in edges - [0, 1]:
         span_start = max(starts[first] - fade, 0)
@@ -2567,8 +2565,8 @@ def bad_ch_by_BBnoise(
         raw, picks, window_samples, n_windows, rejected_samples, return_start=True
     ):
         valid = ~flat[:, start // window_samples]
-        # Welch needs a row to define its frequency grid even when
-        # none are scorable.
+        # Welch needs a row to define its frequency grid even
+        # when none are scorable.
         psds, freqs = mne.time_frequency.psd_array_welch(
             data[valid] if valid.any() else np.zeros((1, window_samples)),
             sfreq=raw.info["sfreq"], fmin=0, fmax=45,
@@ -2714,8 +2712,8 @@ def bad_ch_by_pop(
     )
 
     names = [raw.ch_names[pick] for pick in picks]
-    # Samples each channel does not score: unretained, or in its local
-    # flat intervals.
+    # Samples each channel does not score: unretained, or in its
+    # local flat intervals.
     excluded = {}
     for name in names:
         excluded[name] = rejected_samples
@@ -3305,8 +3303,8 @@ def bad_ch_under_robust_ref(
     mean interpolated. If a pass instead flags the set an earlier robust mean
     interpolated (none for the first), the passes would cycle: warn, treat
     every channel flagged within the cycle as bad, and recompute the robust
-    mean with them interpolated. Raise if neither
-    has happened within max_iterations passes.
+    mean with them interpolated. Raise if neither has happened within
+    max_iterations passes.
 
     Plot the final report and the native-referenced traces, including existing
     bads as a gray category. Then add the channels flagged in the last pass
@@ -3406,8 +3404,8 @@ def bad_ch_under_robust_ref(
             (p for p, earlier in enumerate(used[:-1]) if set(earlier) == set(new)), None
         )
         if start is not None:
-            # The next pass would repeat pass start + 1, so used[start:]
-            # keeps recurring.
+            # The next pass would repeat pass start + 1, so
+            # used[start:] keeps recurring.
             cycle = used[start:]
             flagged = [
                 name for name in eeg_names if any(name in names for names in cycle)
@@ -3415,8 +3413,8 @@ def bad_ch_under_robust_ref(
             flipping = [
                 name for name in flagged if not all(name in names for names in cycle)
             ]
-            # reports[p] comes from the mean of used[p], so the cycling
-            # passes are reports[start:].
+            # reports[p] comes from the mean of used[p], so the cycling passes
+            # are reports[start:].
             cycle_reports = reports[start:]
             robust_bad_ch_report = {
                 criterion: [name for name in eeg_names
@@ -3547,7 +3545,8 @@ def interpolate_local_artifacts_inplace(
         """
         bads = list(raw_pop.info["bads"])
         _, pops = bad_ch_by_pop(raw_pop, flatlines=flatlines, return_details=True)
-        raw_pop.info["bads"] = bads  # The bad labels are final; pops are only repaired.
+        # The bad labels are final; pops are only repaired.
+        raw_pop.info["bads"] = bads
         intervals, counts = {}, {}
         for name, times in pops["pop_times_s"].items():
             # A pop's time is the sample before its first confirmed jump.
@@ -3560,7 +3559,8 @@ def interpolate_local_artifacts_inplace(
         return intervals, counts
 
     if detect_pops:
-        # Find final reference pops without modifying the input used for final repair.
+        # Find final reference pops without modifying the input
+        # used for final repair.
         average = raw.copy()
         re_reference_inplace(average, "avg")
         intervals_avg, n_pops_avg = detect_pop_intervals(average)
@@ -3570,7 +3570,8 @@ def interpolate_local_artifacts_inplace(
             tuple(span) for span in
             [*local_flat.get(final_reference, []), *reference_pops]
         ])
-        # Fix final reference's flat and pop intervals, excluding other channels' pops.
+        # Fix final reference's flat and pop intervals, excluding
+        # other channels' pops.
         detection = raw.copy()
         if reference_spans:
             invalid = {name: [*local_flat.get(name, []), *intervals_avg.get(name, [])]
@@ -3578,11 +3579,13 @@ def interpolate_local_artifacts_inplace(
             _interpolate_local_intervals_inplace(
                 detection, {final_reference: reference_spans}, invalid, global_flat
             )
-        # Re-reference to the final reference and detect the other channels' pops.
+        # Re-reference to the final reference and detect the
+        # other channels' pops.
         re_reference_inplace(detection, final_reference)
         intervals, n_pops = detect_pop_intervals(detection)
         del detection
-        # Add the final reference's pops to the returned intervals for later repair.
+        # Add the final reference's pops to the returned
+        # intervals for later repair.
         if reference_pops:
             intervals[final_reference] = _merge_segments(
                 [*reference_pops, *intervals.get(final_reference, [])]
@@ -3680,13 +3683,13 @@ def validate_reference_inplace(raw, flatlines):
     flatlines["reference_channel"], and must still be entirely zero. A bad
     reference puts its artifacts into every native-referenced channel;
     subtracting a good electrode's trace from every EEG channel, bads included,
-    cancels them and makes that electrode the
-    all-zero reference. The candidates are the five EEG channels, bad or not,
-    nearest the reference on the fitted unit sphere (_spline_geometry; ties
-    keep Raw order). Re-reference to the nearest good one and warn, or raise
-    without changing raw if all five are bad. Bad labels, annotations, non-EEG
-    channels, and flatlines are unchanged, so flatlines["reference_channel"]
-    keeps the original reference.
+    cancels them and makes that electrode the all-zero reference. The
+    candidates are the five EEG channels, bad or not, nearest the reference on
+    the fitted unit sphere (_spline_geometry; ties keep Raw order).
+    Re-reference to the nearest good one and warn, or raise without changing
+    raw if all five are bad. Bad labels, annotations, non-EEG channels, and
+    flatlines are unchanged, so flatlines["reference_channel"] keeps
+    the original reference.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -3723,8 +3726,8 @@ def plot_asr_calibration(raw, data, ch_names, state, calibration_indices):
     unshaped-input spectrogram through 100 Hz using Step 1's SOMATA multitaper
     settings. The lower panels show the ASR-filtered robust covariance in
     microvolts squared and its diagonal power in dB re 1 microvolt squared at
-    the recorded EEG locations. Raw data, labels,
-    annotations, and calibration state are unchanged.
+    the recorded EEG locations. Raw data, labels, annotations, and calibration
+    state are unchanged.
     """
     sfreq = float(raw.info["sfreq"])
     covariance_uv2 = state.cov * 1e12
@@ -3829,8 +3832,8 @@ def plot_asr_effect(raw, before, ch_names):
     pre-ASR 99.9th percentile. Plot the same channels and colors in both
     panels, with exact min/max envelopes in 20-ms bins and shared, unclipped
     axes. Include the full timeline and final partial bin; times are
-    Raw-relative. Input arrays, Raw data,
-    labels, and annotations are unchanged.
+    Raw-relative. Input arrays, Raw data, labels, and
+    annotations are unchanged.
     """
     pooled_abs = np.abs(before)
     cutoff_uv = np.percentile(pooled_abs, 99.9, overwrite_input=True) * 1e6
@@ -3939,33 +3942,31 @@ def apply_asr_inplace(
 
     Use standard ASR at calibration_cutoff (default 20), a four-second
     minimum-phase statistics FIR, and 100-ms covariance blocks rounded to
-    samples. Other ASR parameters keep
-    their native defaults. Initialize the statistics filter from reflected
-    sequence starts rather than calibration-ending history. Correction sees the
-    full original timeline, including global BAD periods; their existing
-    annotations remain for later rejection. Keep the ASR output without
-    re-interpolating local flat/pop intervals. Show plot_asr_effect comparing
-    the original ASR input with the corrected output on shared full-range
-    axes, then show a median Welch PSD topomap through 45 Hz in dB, excluding
-    bads and the effective reference.
+    samples. Other ASR parameters keep their native defaults. Initialize the
+    statistics filter from reflected sequence starts rather than
+    calibration-ending history. Correction sees the full original timeline,
+    including global BAD periods; their existing annotations remain for later
+    rejection. Keep the ASR output without re-interpolating local flat/pop
+    intervals. Show plot_asr_effect comparing the original ASR input with the
+    corrected output on shared full-range axes, then show a median Welch PSD
+    topomap through 45 Hz in dB, excluding bads and the effective reference.
 
     Return one details dictionary with duration_s, corrected_duration_s,
     corrected_percent, and corrected_segments (full applied support, including
     blending). Duration and percentage use the whole original timeline,
     including annotated periods processed by ASR. Correction support records
     where reconstruction is applied, rather than exact samplewise voltage
-    changes. corrected_segments contains half-open
-    (start, stop) Python-int sample bounds relative to this Raw's beginning;
-    flatlines retains interpolation provenance. No ASR annotations are added.
-    Bad labels, bad channels, and non-EEG data are unchanged; the excluded
-    reference stays exactly zero.
-    Details also include component_segments (output intervals whose current
-    update rejects components), original calibration sample indices, filter
-    coefficients, settings, and native calibration and processing diagnostics.
-    component_segments uses the same sample-bound convention as
-    corrected_segments. Insufficient calibration raises before any corrected
-    voltages are written back. Show plot_asr_calibration
-    after calibration and before correction.
+    changes. corrected_segments contains half-open (start, stop) Python-int
+    sample bounds relative to this Raw's beginning; flatlines retains
+    interpolation provenance. No ASR annotations are added. Bad labels, bad
+    channels, and non-EEG data are unchanged; the excluded reference stays
+    exactly zero. Details also include component_segments (output intervals
+    whose current update rejects components), original calibration sample
+    indices, filter coefficients, settings, and native calibration and
+    processing diagnostics. component_segments uses the same sample-bound
+    convention as corrected_segments. Insufficient calibration raises before
+    any corrected voltages are written back. Show plot_asr_calibration after
+    calibration and before correction.
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
@@ -4011,7 +4012,8 @@ def apply_asr_inplace(
         require_calibration(data.shape[1])
         return _asr_filter_channels(data, b, a, zi)
 
-    # mne-denoise has no coefficient argument; restore its private hooks on exit.
+    # mne-denoise has no coefficient argument; restore its
+    # private hooks on exit.
     with patch.object(_calibration, "_design_statistics_filter", return_value=(b, a)), \
             patch.object(_calibration, "_lfilter_channels", side_effect=filter_calibration):
         state, calibration = calibrate_asr(
