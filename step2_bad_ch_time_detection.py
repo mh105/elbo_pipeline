@@ -104,9 +104,10 @@ effective zero reference. Calibration omits BAD annotations, gap-joined local
 flat intervals, and repaired pop intervals, then uses automatic selection; at
 least 60 seconds must remain. Its statistics use a four-second minimum-phase
 FIR with ASR's intended amplitude gains and 100-ms covariance blocks.
-Correction processes the full timeline, including masked periods, at cutoff
-5. Keep the ASR output without another local interpolation pass; the excluded
-reference stays zero. Return one details dictionary with correction duration
+Correction processes the full timeline, including masked periods, at the
+calibration_cutoff (default 5). Keep the ASR output without another local
+interpolation pass; the excluded reference stays zero. Return one details
+dictionary with correction duration
 and percentage, component-rejection and applied-correction intervals on the
 original sample timeline, and
 calibration and window diagnostics.
@@ -3913,7 +3914,10 @@ def _asr_filter_channels(data, b, a, zi=None):
     return filtered, final_state
 
 
-def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals=None):
+def apply_asr_inplace(
+    raw, reference_channel=None, flatlines=None, pop_intervals=None,
+    *, calibration_cutoff=5.0,
+):
     """Correct good EEG channels with ASR in place; return details.
 
     Run after interpolate_local_artifacts_inplace, validate_reference_inplace,
@@ -3927,8 +3931,9 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
     without added padding or gap joining. Concatenate this support for native
     automatic selection, requiring at least 60 retained seconds.
 
-    Use standard ASR at cutoff 5, a four-second minimum-phase statistics FIR,
-    and 100-ms covariance blocks rounded to samples. Other ASR parameters keep
+    Use standard ASR at calibration_cutoff (default 5), a four-second
+    minimum-phase statistics FIR, and 100-ms covariance blocks rounded to
+    samples. Other ASR parameters keep
     their native defaults. Initialize the statistics filter from reflected
     sequence starts rather than calibration-ending history. Correction sees the
     full original timeline, including global BAD periods; their existing
@@ -4007,7 +4012,7 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
             data[:, calibration_input],
             sfreq,
             calibration="auto",
-            cutoff=5,
+            cutoff=calibration_cutoff,
             filter_kind="asr",
             blocksize=blocksize,
             method="standard",
@@ -4062,7 +4067,7 @@ def apply_asr_inplace(raw, reference_channel=None, flatlines=None, pop_intervals
         "calibration_sample_indices": calibration_indices,
         "filter_b": b,
         "filter_a": a,
-        "settings": {"cutoff": 5.0, "blocksize": blocksize,
+        "settings": {"cutoff": float(calibration_cutoff), "blocksize": blocksize,
                      "filter_duration": 4.0, "minimum_calibration_duration": 60.0,
                      "method": "standard", "mne_denoise_version": mne_denoise.__version__},
         "calibration": calibration,

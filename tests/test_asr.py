@@ -171,6 +171,15 @@ class TestASRWrapper(unittest.TestCase):
             self.assertTrue(all(type(start) is int and type(stop) is int
                                 for start, stop in segments))
 
+    def test_custom_calibration_cutoff_is_used_and_reported(self):
+        raw = make_raw()
+        fake = FakeASR()
+        details = self.run_fake(
+            raw, fake, reference_channel="Cz", calibration_cutoff=7.5,
+        )
+        self.assertEqual(fake.calibration_kwargs["cutoff"], 7.5)
+        self.assertEqual(details["settings"]["cutoff"], 7.5)
+
     def test_pop_calibration_exclusions_use_exact_local_and_reference_intervals(self):
         raw = make_raw(sfreq=100, reference="F3")
         raw.info["bads"] = ["F7", "Cz"]
