@@ -9,7 +9,7 @@ RMS-microvolt scaling without changing the fitted ICA or native source traces.
 The input Raw is not modified. Apply the returned ICA directly to the original
 0.3 Hz, native-rate data, preserving its reference, bad channels and annotations::
 
-    ica = fit_ica(raw_bads, reference_channel)
+    ica, fit_epochs = fit_ica(raw_bads, reference_channel)
     ica.apply(raw_bads)
 """
 
@@ -165,13 +165,14 @@ def fit_ica(
     iclabel_threshold=0.75,
     return_details=False,
 ):
-    """Return ICA without modifying or applying to raw.
+    """Return (ICA, fit Epochs) without modifying or applying to raw.
 
     Exclude components with any of the five ICLabel artifact probabilities
     strictly above iclabel_threshold (default 0.75).
     Always display the table rounded to three decimals;
-    return (ICA, unrounded component table) with return_details=True.
-    Manual review and plotting are deferred.
+    return (ICA, fit Epochs, unrounded component table) with return_details=True.
+    The returned epochs are the exact data used for fitting and labeling;
+    manual review and plotting are deferred.
     """
     raw_ica, fit_epochs, reference_channel = prepare_ica_epochs(raw, reference_channel)
     ica = mne.preprocessing.ICA(
@@ -194,8 +195,8 @@ def fit_ica(
     ica.exclude = exclude_indices
     print(f"Excluded ICA components: {ica.exclude}")
     if return_details:
-        return ica, component_table
-    return ica
+        return ica, fit_epochs, component_table
+    return ica, fit_epochs
 
 
 if __name__ == "__main__":
@@ -231,10 +232,11 @@ if __name__ == "__main__":
     )
 
     # %% Fit ICA and select artifact components
-    ica = fit_ica(raw_bads, reference_channel)
+    ica, fit_epochs = fit_ica(raw_bads, reference_channel)
 
     # Manual exclusion appears to be needed for now
     ica.plot_components()
+    ica.plot_sources(fit_epochs, block=True)
     ica.plot_sources(raw_bads, block=True)
 
     ica.exclude = sorted(set(int(index) for index in ica.exclude))

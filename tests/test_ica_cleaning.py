@@ -324,8 +324,9 @@ class TestICASelection(unittest.TestCase):
         raw, epochs, ica, patches = self.fit_with_probabilities(probabilities)
         original = raw.copy()
         with patches[0] as prep, patches[1] as constructor, patches[2] as label, patches[3] as display:
-            returned_ica, table = step3.fit_ica(raw, "Cz", return_details=True)
+            returned_ica, fit_epochs, table = step3.fit_ica(raw, "Cz", return_details=True)
         self.assertIs(returned_ica, ica)
+        self.assertIs(fit_epochs, epochs)
         self.assertEqual(ica.exclude, [1, 4])
         prep.assert_called_once_with(raw, "Cz")
         constructor.assert_called_once_with(
@@ -356,10 +357,11 @@ class TestICASelection(unittest.TestCase):
                 probabilities = np.zeros((1, 7))
                 probabilities[0, column] = 0.9
                 probabilities[0, 2] = 0.1
-                raw, _, ica, patches = self.fit_with_probabilities(probabilities)
+                raw, epochs, ica, patches = self.fit_with_probabilities(probabilities)
                 with patches[0], patches[1], patches[2], patches[3] as display:
-                    returned_ica = step3.fit_ica(raw)
+                    returned_ica, fit_epochs = step3.fit_ica(raw)
                 self.assertIs(returned_ica, ica)
+                self.assertIs(fit_epochs, epochs)
                 display.assert_called_once()
                 self.assertEqual(ica.exclude, [])
 
@@ -368,12 +370,13 @@ class TestICASelection(unittest.TestCase):
         probabilities[0, [0, 1]] = [0.35, 0.65]
         probabilities[1, [0, 2]] = [0.4, 0.6]
         probabilities[2, [0, 6]] = [0.6, 0.4]
-        raw, _, ica, patches = self.fit_with_probabilities(probabilities)
+        raw, epochs, ica, patches = self.fit_with_probabilities(probabilities)
         with patches[0], patches[1], patches[2], patches[3]:
-            returned_ica, table = step3.fit_ica(
+            returned_ica, fit_epochs, table = step3.fit_ica(
                 raw, iclabel_threshold=0.6, return_details=True,
             )
         self.assertIs(returned_ica, ica)
+        self.assertIs(fit_epochs, epochs)
         self.assertEqual(ica.exclude, [0])
         self.assertEqual(table["iclabel_auto_exclude"].tolist(), [True, False, False])
 
