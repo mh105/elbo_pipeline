@@ -293,6 +293,7 @@ if __name__ == "__main__":
     ica, fit_epochs, iclabel_table = fit_ica(
         raw_bads, reference_channel, return_details=True,
     )
+    ica.plot_components()
 
     # %% Prepare and open the interactive viewer; each choice autosaves to JSON
     viewer_dir = prepare_ica_viewer(
