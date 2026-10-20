@@ -236,8 +236,8 @@ if __name__ == "__main__":
 
     # Manual exclusion appears to be needed for now
     ica.plot_components()
-    ica.plot_sources(fit_epochs, block=True)
-    ica.plot_sources(raw_bads, block=True)
+    # ica.plot_sources(fit_epochs, block=True)
+    # ica.plot_sources(raw_bads, block=True)
 
     ica.exclude = sorted(set(int(index) for index in ica.exclude))
     print(f"Final excluded ICA components: {ica.exclude}")
