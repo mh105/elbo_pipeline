@@ -33,9 +33,9 @@ def flatline(raw, **kwargs):
 
 
 def set_sphere_positions(raw):
-    """Give EEG channels distinct positions on a 9-cm sphere for bad_ch_by_std's
-    neighbours: a Fibonacci spiral over the upper hemisphere in channel order,
-    with each M{i} channel antipodal to E{i}.
+    """Give EEG channels distinct positions on a 9-cm sphere for spatial detectors:
+    a Fibonacci spiral over the upper hemisphere in channel order, with each
+    M{i} channel antipodal to E{i}.
     """
     names = [raw.ch_names[i] for i in mne.pick_types(raw.info, eeg=True, exclude=[])]
     upper = [name for name in names if not name.startswith("M")]
@@ -166,14 +166,14 @@ class TestBadChByStd(unittest.TestCase):
                 self.assertEqual(bad_ch_by_std(raw, **kwargs), {"std": expected})
                 self.assertEqual(raw.info["bads"], expected)
 
-    def test_smooth_amplitude_gradient_is_absorbed_but_an_isolated_excess_is_not(self):
+    def test_smooth_amplitude_gradient_is_scored_against_the_whole_head(self):
         # Robust SDs rise 4.5-fold from the top of the sphere to the equator, as
-        # amplitude rises toward the face and the cap edge in real recordings. A
-        # cross-channel z of d would put E29 at 2, but its neighbours share the
-        # gradient.
+        # amplitude rises toward the face and the cap edge in real recordings.
+        # E29 has whole-head robust z = 2.023 even though its neighbours share
+        # the gradient; location no longer protects it from the STD criterion.
         variances = np.exp(np.tile(np.linspace(-1.5, 1.5, 30), (4, 1)))
         self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), robust_z_cutoff=2.0),
-                         {"std": []})
+                         {"std": ["E29", "M29"]})
         variances[:, 10] *= 100  # Ten times the robust SD of its part of the gradient.
         self.assertEqual(bad_ch_by_std(make_raw(variances, average=True)),
                          {"std": ["E10", "M10"]})
@@ -181,17 +181,15 @@ class TestBadChByStd(unittest.TestCase):
         self.assertEqual(bad_ch_by_std(make_raw(variances, average=True)),
                          {"std": ["E10", "M10"]})
 
-    def test_neighbours_need_sensor_positions(self):
+    def test_does_not_require_sensor_positions(self):
         raw = make_raw(np.ones((2, 9)), average=True)
+        raw._data[[8, 17]] *= 10
         raw.set_montage(None)
-        with self.assertRaisesRegex(ValueError, "sensor positions"):
-            bad_ch_by_std(raw)
-        self.assertEqual(raw.info["bads"], [])
+        self.assertEqual(bad_ch_by_std(raw), {"std": ["E8", "M8"]})
+        self.assertEqual(raw.info["bads"], ["E8", "M8"])
 
-    def test_separated_strong_channels_do_not_inflate_baselines(self):
-        # The neighbour medians and the cross-channel median/MAD remain robust to
-        # three strong channels apart from one another (no channel has more than
-        # one strong neighbour).
+    def test_multiple_strong_channels_do_not_inflate_baselines(self):
+        # The cross-channel median/MAD remain robust to three strong channels.
         variances = np.tile(np.linspace(0.8, 1.2, 30), (2, 1))
         variances[:, [1, 13, 28]] = 100
         raw = make_raw(variances, average=True)
@@ -216,15 +214,24 @@ class TestBadChByStd(unittest.TestCase):
         self.assertEqual(raw.info["bads"], ["E9", "E0", "M0"])
 
     def test_high_occurrence_counts_all_scorable_windows(self):
-        # E0 is high in two of four windows; the low window stays in its denominator.
+        # E0 is high in two of four windows; a constant nonzero channel window
+        # has d = 0 and stays in its occurrence denominator.
         variances = np.ones((4, 9))
         variances[:2, 0] = 100
-        variances[2, 0] = 0.01
+        variances[2, 0] = 0
         raw = make_raw(variances, average=True)
         self.assertEqual(bad_ch_by_std(raw), {"std": ["E0", "M0"]})
         self.assertEqual(raw.info["bads"], ["E0", "M0"])
         self.assertEqual(bad_ch_by_std(make_raw(variances, average=True), occurrence_cutoff=0.5),
                          {"std": []})
+
+    def test_default_occurrence_cutoff_is_strictly_greater_than_one_quarter(self):
+        for high_windows, expected in ((1, []), (2, ["E0", "M0"])):
+            with self.subTest(high_windows=high_windows):
+                variances = np.ones((4, 9))
+                variances[:high_windows, 0] = 100
+                self.assertEqual(bad_ch_by_std(make_raw(variances, average=True)),
+                                 {"std": expected})
 
 
 class TestBadChByFlatline(unittest.TestCase):

@@ -73,18 +73,23 @@ class TestWindowDetails(unittest.TestCase):
                                               (details["robust_z"] > 5)[:, 1:])
                 e8 = names.index("E8")
                 np.testing.assert_array_equal(details["violates"][e8, 1:], 1)
-                # The log ratio uses the six nearest scored channels, never the bads.
-                self.assertEqual(list(details["neighbours"]), names)
-                log_std = np.log(details["robust_std_uv"][:, 1:])
-                for i, name in enumerate(names):
-                    neighbours = details["neighbours"][name]
-                    self.assertEqual(len(neighbours), 6)
-                    self.assertTrue(set(neighbours) <= set(names) - {name})
-                    rows = [names.index(n) for n in neighbours]
-                    np.testing.assert_allclose(
-                        details["log_ratio"][i, 1:],
-                        log_std[i] - np.median(log_std[rows], axis=0), atol=1e-12,
-                    )
+                self.assertNotIn("neighbours", details)
+                self.assertNotIn("log_ratio", details)
+
+    def test_std_z_scores_raw_robust_sds_without_log_or_spatial_adjustment(self):
+        # The scored amplitudes are two copies of [1, ..., 8, 20]. Their median
+        # is 5 and MAD is 2, giving z = (amplitude - 5) / (1.4826 * 2).
+        amplitudes = np.array([1, 2, 3, 4, 5, 6, 7, 8, 20], dtype=float)
+        raw = local_raw(np.tile(amplitudes ** 2, (2, 1)), average=True)
+        raw.set_montage(None)
+        report, details = step2.bad_ch_by_std(raw, return_details=True)
+        self.assertEqual(report, {"std": ["E8", "M8"]})
+        expected_z = np.tile((amplitudes - 5) / (1.4826 * 2), 2)
+        np.testing.assert_allclose(details["robust_std_uv"],
+                                   np.repeat((1.4826 * np.tile(amplitudes, 2))[:, None],
+                                             2, axis=1))
+        np.testing.assert_allclose(details["robust_z"],
+                                   np.repeat(expected_z[:, None], 2, axis=1), atol=1e-12)
 
     def test_flatline_global_exclusions_and_partial_tail(self):
         variances = np.ones((5, 7))
