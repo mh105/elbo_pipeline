@@ -382,7 +382,7 @@ if __name__ == "__main__":
     )
     ica.plot_components()
 
-    # %% Prepare and open the interactive viewer; each choice autosaves to JSON
+    # Prepare and open the interactive viewer; each choice autosaves to JSON
     viewer_dir = prepare_ica_viewer(
         ica, fit_epochs, raw_bads,
         eeg_path=eeg_path,
@@ -392,10 +392,11 @@ if __name__ == "__main__":
     open_ica_viewer(viewer_dir)
 
     # %% Run this cell after reviewing; loading replaces, rather than unions, exclusions
-    input("Review ICs in the viewer, then press Enter to load the saved exclusions: ")
+    input("Review ICs in the interactive viewer,"
+          "then press [Enter] to load the saved exclusions: ")
     ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
     exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
 
-    # %% Apply reviewed ICA and view the cleaned data
+    # Apply reviewed ICA exclusion and view the cleaned data
     ica.apply(raw_bads)
     raw_bads.plot(title="After ICA cleaning")
