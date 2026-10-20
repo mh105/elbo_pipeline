@@ -29,11 +29,15 @@ CLASSES = (
 )
 
 
-def make_inputs():
+def make_inputs(*, mixed=False):
     """A real fitted transform, with original-rate event samples after decimation."""
     rng = np.random.default_rng(518)
     names = ["Fp1", "Fp2", "C3", "C4"]
     data = rng.laplace(scale=8e-6, size=(3, len(names), 500))
+    if mixed:
+        mixing = rng.normal(size=(4, 4))
+        mixing /= np.linalg.norm(mixing, axis=0)
+        data = np.einsum("ij,ejt->eit", mixing, data)
     info = mne.create_info(names, 250, "eeg")
     info.set_montage("colin27_1020")
     with info._unlock():
@@ -185,6 +189,58 @@ class TestViewerReviewStorage(unittest.TestCase):
 
 
 class TestViewerBuild(unittest.TestCase):
+    def test_fresh_fit_preserves_native_mixing_matrix_across_fif_round_trip(self):
+        ica, epochs, raw, labels = make_inputs(mixed=True)
+        original_mixing = ica.mixing_matrix_.copy()
+        original_maps = ica.get_components().copy()
+        original_unmixing = ica.unmixing_matrix_.copy()
+        with tempfile.TemporaryDirectory(prefix="ica-viewer-mixing-") as tmp:
+            tmp = Path(tmp)
+            fif_path = tmp / "roundtrip-ica.fif"
+            ica.save(fif_path, verbose=False)
+            restored = mne.preprocessing.read_ica(fif_path, verbose=False)
+            # MNE recomputes pinv after loading the reordered unmixing rows;
+            # the fitted, reordered mixing columns differ by floating-point ULPs.
+            self.assertFalse(np.array_equal(restored.mixing_matrix_, original_mixing))
+            np.testing.assert_array_equal(restored.unmixing_matrix_, original_unmixing)
+            eeg_path = tmp / "sub-mixing_eeg.fif"
+            eeg_path.write_bytes(b"source recording")
+            viewer_dir = storage.prepare_bundle(
+                ica, epochs, raw, eeg_path=eeg_path,
+                reference_channel="Cz", iclabel_table=labels,
+            )
+            manifest = json.loads((viewer_dir / "manifest.json").read_text())
+            np.testing.assert_array_equal(
+                np.load(viewer_dir / manifest["files"]["mixing_matrix"], allow_pickle=False),
+                original_mixing,
+            )
+            storage.save_review(viewer_dir, [], expected_revision=0)
+            decision_path = viewer_dir / manifest["files"]["decision"]
+            saved_bytes = decision_path.read_bytes()
+            self.assertEqual(storage.prepare_bundle(
+                ica, epochs, raw, eeg_path=eeg_path,
+                reference_channel="Cz", iclabel_table=labels,
+            ), viewer_dir)
+            self.assertEqual(decision_path.read_bytes(), saved_bytes)
+            shutil.rmtree(storage.cache_directory(viewer_dir))
+            cache = storage.ensure_cache(viewer_dir)
+            payload = json.loads((cache / "review_metadata.json").read_text())
+            voltage_maps = ica.pre_whitener_ * original_maps * 1e6
+            for component in payload["components"]:
+                index = component["id"]
+                channel = np.argmax(np.abs(voltage_maps[:, index]))
+                self.assertEqual(component["voltage_channel"], ica.ch_names[channel])
+                self.assertEqual(component["voltage_uV_per_source_unit"], voltage_maps[channel, index])
+            direct = tmp / "direct"
+            direct.mkdir()
+            builder._topomaps(direct, ica)
+            for image in (direct / "topomaps").glob("*.png"):
+                self.assertEqual((cache / "topomaps" / image.name).read_bytes(), image.read_bytes())
+        np.testing.assert_array_equal(ica.mixing_matrix_, original_mixing)
+        np.testing.assert_array_equal(ica.unmixing_matrix_, original_unmixing)
+        np.testing.assert_array_equal(ica.get_components(), original_maps)
+        self.assertEqual(ica.exclude, [0])
+
     def test_nonunity_fif_calibration_preserves_exact_samples_when_rebuilding(self):
         ica, epochs, raw, labels = make_inputs()
         epochs.info["chs"][0]["cal"] = 2.415431e-5

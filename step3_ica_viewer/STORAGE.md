@@ -33,6 +33,7 @@ sub-04/eeg/
         sub-04_task-ColorPrecMemStudy_run-1_eeg_ica_exclude.json
         inputs/
           fitted-ica.fif
+          mixing-matrix.npy                      # only if FIF recomputes different mixing values
           training-epo.fif
           training-data.npy                      # only if FIF needs exact-sample supplementation
           iclabel.csv
@@ -72,6 +73,8 @@ The hidden directory is not entirely temporary: it contains the manual review re
 V1 saves ICA and exact fitting epochs inside the bundle. Referencing existing external files by path and checksum is a possible future storage extension, not a current preparation option. Save epoch samples at double precision when using FIF (`fmt="double"`) if exact regeneration from the in-memory fit is required, and verify the round-trip. Avoid relying on default single-precision epoch serialization for exact data identity. Record any FIF split-file parts.
 
 The implemented v1 always archives a copy of the ICA and fitting epochs. MNE's epoch writer can temporarily rescale the supplied buffer, so save an epochs copy. Even double-precision FIF can round calibrated samples; when its round-trip is not bit-exact, save `inputs/training-data.npy` with the original samples. Rebuilding overlays that array only onto newly loaded epochs and verifies its canonical sample fingerprint. Caller objects remain unchanged, and the manifest/checksums cover the optional array. Captured electrode XYZ coordinates also restore geometry rounded by FIF metadata serialization.
+
+MNE saves the unmixing matrix in ICA FIF files and recomputes the mixing matrix on read. After component sorting, that recomputation can differ from the original mixing matrix by floating-point round-off. When needed, archive the original matrix in `inputs/mixing-matrix.npy` and restore it only onto newly loaded ICA objects. Verify the full model fingerprint after restoration, retaining exact transform identity and existing review decisions. The FIF and optional array together form the exact ICA archive; a bare `mne.read_ica()` does not restore the supplement.
 
 The initial source Raw need not be saved again. For EEGLAB source identity, account for both `.set` and its external `.fdt` where present; checking only the small header file is insufficient if samples live elsewhere.
 

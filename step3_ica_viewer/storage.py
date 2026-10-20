@@ -337,6 +337,11 @@ def ensure_cache(viewer_dir):
                 return cache
         _verify_archived(viewer_dir, manifest)
         ica = mne.preprocessing.read_ica(viewer_dir / "inputs/fitted-ica.fif", verbose=False)
+        exact_mixing = manifest["files"].get("mixing_matrix")
+        if exact_mixing is not None:
+            ica.mixing_matrix_ = np.load(viewer_dir / exact_mixing, allow_pickle=False)
+        if model_fingerprint(ica, manifest["reference_channel"]) != manifest["model_identity"]:
+            raise ValueError("Archived ICA transform does not match the exact model identity.")
         epochs = mne.read_epochs(viewer_dir / "inputs/training-epo.fif", preload=True, verbose=False)
         exact_data = manifest["files"].get("exact_data")
         if exact_data is not None:
@@ -426,6 +431,13 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                 if _fingerprint({}, (("samples", restored.get_data(copy=False)),)) != training_samples_id:
                     raise ValueError("Exact fitting samples did not round-trip correctly.")
                 restored_ica = mne.preprocessing.read_ica(inputs / "fitted-ica.fif", verbose=False)
+                exact_mixing = None
+                if not np.array_equal(restored_ica.mixing_matrix_, ica.mixing_matrix_):
+                    # FIF stores unmixing, then recomputes its pseudoinverse on
+                    # read. Preserve rounding from the original component sort.
+                    np.save(inputs / "mixing-matrix.npy", ica.mixing_matrix_, allow_pickle=False)
+                    exact_mixing = "inputs/mixing-matrix.npy"
+                    restored_ica.mixing_matrix_ = np.load(temporary / exact_mixing, allow_pickle=False)
                 if model_fingerprint(restored_ica, reference_channel) != model_id:
                     raise ValueError("The archived ICA transform did not round-trip exactly.")
                 labels.to_csv(inputs / "iclabel.csv", index=False)
@@ -449,6 +461,8 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                                                                           for p in epoch_paths]))
                 if exact_data is not None:
                     manifest["files"]["exact_data"] = exact_data
+                if exact_mixing is not None:
+                    manifest["files"]["mixing_matrix"] = exact_mixing
                 review = {key: manifest[key] for key in
                           ("schema_version", "recording_filename", "fit_id", "n_components", "initial_auto_exclude")}
                 review.update(revision=0, updated_at_utc=_now(), exclude=initial_exclude)

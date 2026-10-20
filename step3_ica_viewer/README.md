@@ -93,7 +93,7 @@ Implemented requirements are the three-tab interface, subject-local hidden stora
 
 Keep v1 focused on this pipeline's EEG input: 1–100 Hz fitting data, 250 Hz sampling, equal 2-second nonoverlapping retained epochs, and standard MNE whitening without `noise_cov`. Derive sizes and durations from the actual objects, validate this support contract, and replace sub-03 constants. Broader recording types or whitening models require a deliberate extension.
 
-V1 archives inputs inside the bundle. An additional NumPy sample array is saved when calibrated FIF serialization cannot preserve the fitting samples exactly; rebuilding uses it automatically. Referencing external fit snapshots instead of archiving them is not implemented.
+V1 archives inputs inside the bundle. Additional NumPy arrays preserve exact fitting samples or the original mixing matrix when MNE's FIF round-trip changes their numerical values; rebuilding uses them automatically. Referencing external fit snapshots instead of archiving them is not implemented.
 
 ## Request template for a future session
 
