@@ -11,9 +11,10 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import PathCollection
 from matplotlib.figure import Figure
 from scipy.ndimage import median_filter
+from scipy.signal import periodogram
 
 
-BUILD_VERSION = "1.0-gap-aware"
+BUILD_VERSION = "1.1-median-psd"
 LAGS_MS = (4, 20, 40, 80, 160)
 THRESHOLD = 5.0
 MERGE_GAP_MS = 300
@@ -216,6 +217,21 @@ def _add_shared_context(components, n_samples, sfreq):
     )
 
 
+def _median_psd(sources, sfreq):
+    """Median full-epoch PSD in native ICA units; never join separate epochs.
+
+    sources has shape (epochs, components, samples). Take the pointwise median
+    of linear power densities across epochs before converting to dB.
+    """
+    frequencies, power = periodogram(
+        sources, fs=sfreq, window="hamming", detrend="constant",
+        scaling="density", axis=-1,
+    )
+    keep = frequencies <= min(50.0, sfreq / 2)
+    median_power = np.median(power[..., keep], axis=0)
+    return frequencies[keep], 10 * np.log10(np.maximum(median_power, np.finfo(float).tiny))
+
+
 def _topomaps(cache_dir, ica):
     maps = ica.get_components()
     topomap_dir = cache_dir / "topomaps"
@@ -262,10 +278,11 @@ def build_viewer(cache_dir, ica, fit_epochs, iclabel_table, *, recording_filenam
     labels = iclabel_table.set_index("component")
     if sorted(labels.index.tolist()) != list(range(n_components)):
         raise ValueError("ICLabel table must contain each component exactly once.")
-    sources = ica.get_sources(fit_epochs).get_data(copy=True)
-    sources = sources.transpose(1, 0, 2).reshape(n_components, -1)
-    if not np.isfinite(sources).all():
+    source_epochs = ica.get_sources(fit_epochs).get_data(copy=True)
+    if not np.isfinite(source_epochs).all():
         raise ValueError("ICA sources contain nonfinite samples.")
+    psd_frequencies, psd_db = _median_psd(source_epochs, sfreq)
+    sources = source_epochs.transpose(1, 0, 2).reshape(n_components, -1)
     segments, discontinuities = _time_segments(epoch_table, sources.shape[1])
     mixing_uv = ica.pre_whitener_ * ica.get_components() * 1e6
     voltage_channels = np.argmax(np.abs(mixing_uv), axis=0)
@@ -276,6 +293,12 @@ def build_viewer(cache_dir, ica, fit_epochs, iclabel_table, *, recording_filenam
         epoch_duration_s=n_times / sfreq, duration_s=sources.shape[1] / sfreq,
         highpass=float(fit_epochs.info["highpass"]), lowpass=float(fit_epochs.info["lowpass"]),
         source_units="ICA activation units (AU)", source_display_scale=5.0,
+        psd=dict(
+            freqs_hz=psd_frequencies.tolist(), fmax_hz=min(50.0, sfreq / 2),
+            method="Median across fitting epochs; full-epoch Hamming periodograms, mean removed.",
+            power_units="AU²/Hz", frequency_resolution_hz=sfreq / n_times,
+            aggregation="median_linear_power_then_db",
+        ),
         lags_ms=list(LAGS_MS), threshold=THRESHOLD, merge_gap_ms=MERGE_GAP_MS,
         review_id=review_id, iclabel_excluded=automatic,
         initial_excluded=list(initial_excluded), segments=segments,
@@ -289,6 +312,7 @@ def build_viewer(cache_dir, ica, fit_epochs, iclabel_table, *, recording_filenam
         row = labels.loc[component]
         record.update(
             id=component, name=f"ICA{component:03d}",
+            psd_db=psd_db[component].tolist(),
             voltage_channel=ica.ch_names[voltage_channels[component]],
             voltage_uV_per_source_unit=float(mixing_uv[voltage_channels[component], component]),
             iclabel_auto_exclude=bool(row.iclabel_auto_exclude),

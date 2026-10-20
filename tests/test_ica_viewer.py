@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -104,6 +105,14 @@ class TestViewerReviewStorage(unittest.TestCase):
         self.assertEqual(decision.read_bytes(), before)
         self.assertEqual(storage.load_exclusions(viewer_dir, ica=changed_exclusions), [2])
         self.assertEqual(changed_exclusions.exclude, [0, 1, 3])
+        previous_cache = storage.cache_directory(viewer_dir)
+        with patch.object(builder, "BUILD_VERSION", builder.BUILD_VERSION + "-upgrade"):
+            rebuilt = storage.ensure_cache(viewer_dir)
+            self.assertNotEqual(rebuilt, previous_cache)
+            payload = json.loads((rebuilt / "review_metadata.json").read_text())
+            self.assertIn("psd", payload)
+            self.assertEqual(decision.read_bytes(), before)
+        self.assertTrue(previous_cache.is_dir())
 
     def test_empty_review_is_complete_list_and_loader_does_not_mutate_ica(self):
         viewer_dir = self.prepare()
@@ -307,7 +316,13 @@ class TestViewerBuild(unittest.TestCase):
             self.assertEqual(payload["segments"], [[0, 1000], [1000, 1500]])
             self.assertEqual(payload["discontinuities"][0]["retained_sample"], 1000)
             sources = ica.get_sources(epochs).get_data().transpose(1, 0, 2).reshape(4, -1)
+            frequencies = np.asarray(payload["psd"]["freqs_hz"])
+            self.assertEqual(frequencies[0], 0.0)
+            self.assertEqual(frequencies[-1], 50.0)
+            self.assertEqual(payload["psd"]["fmax_hz"], 50.0)
             for component, source in zip(payload["components"], sources):
+                self.assertEqual(len(component["psd_db"]), len(frequencies))
+                self.assertTrue(np.isfinite(component["psd_db"]).all())
                 name = component["name"]
                 script = (storage.cache_directory(viewer_dir) / "data" / f"{name}.js").read_text()
                 encoded = script.split('"')[1]
@@ -328,6 +343,46 @@ class TestViewerBuild(unittest.TestCase):
                 )
             self.assertTrue((storage.cache_directory(viewer_dir) / "index.html").exists())
             self.assertTrue((storage.cache_directory(viewer_dir) / "topomaps" / "ICA000.png").exists())
+
+
+class TestViewerPsd(unittest.TestCase):
+    def test_spectral_peaks_energy_and_median_resist_one_artifact_epoch(self):
+        sfreq = 250.0
+        times = np.arange(500) / sfreq
+        clean = np.stack((np.sin(2 * np.pi * 10 * times),
+                          np.sin(2 * np.pi * 20 * times)))
+        epochs = np.repeat(clean[None, :, :], 5, axis=0)
+        frequencies, clean_db = builder._median_psd(epochs, sfreq)
+        contaminated = epochs.copy()
+        contaminated[0] *= 1e6
+        actual_frequencies, contaminated_db = builder._median_psd(contaminated, sfreq)
+        np.testing.assert_array_equal(actual_frequencies, frequencies)
+        np.testing.assert_array_equal(contaminated_db, clean_db)
+        np.testing.assert_array_equal(frequencies[np.argmax(clean_db, axis=1)], [10, 20])
+        # Density must retain the sinusoid's known mean-square power (A^2 / 2).
+        df = frequencies[1] - frequencies[0]
+        np.testing.assert_allclose(np.sum(10 ** (clean_db / 10), axis=1) * df,
+                                   [0.5, 0.5], atol=1e-12, rtol=1e-12)
+
+    def test_native_amplitude_scaling_is_preserved_in_decibels(self):
+        times = np.arange(500) / 250.0
+        source = np.sin(2 * np.pi * 10 * times)
+        epochs = np.stack((source, 3 * source))[None, :, :]
+        frequencies, psd_db = builder._median_psd(epochs, 250.0)
+        peak = np.flatnonzero(frequencies == 10.0)[0]
+        self.assertAlmostEqual(psd_db[1, peak] - psd_db[0, peak],
+                               20 * np.log10(3), places=12)
+
+    def test_frequency_axis_includes_dc_and_stops_at_lower_nyquist(self):
+        sfreq = 80.0
+        times = np.arange(160) / sfreq
+        source = np.sin(2 * np.pi * 10 * times)[None, None, :]
+        frequencies, psd_db = builder._median_psd(source, sfreq)
+        self.assertEqual(frequencies[0], 0.0)
+        self.assertEqual(frequencies[-1], sfreq / 2)
+        self.assertTrue(np.all(np.diff(frequencies) > 0))
+        self.assertEqual(psd_db.shape, (1, len(frequencies)))
+        self.assertEqual(frequencies[np.argmax(psd_db[0])], 10.0)
 
 
 if __name__ == "__main__":

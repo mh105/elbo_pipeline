@@ -10,6 +10,7 @@
 
 .component-card{overflow:visible}.review-main{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:18px 20px;padding:17px 20px}.review-main .controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;padding:0;align-items:start}.componentchoice{min-width:0;grid-column:1;grid-row:1}.navigation-stack{grid-column:2;grid-row:1}.event-row{grid-column:1 / -1;grid-row:2;display:flex;gap:12px;align-items:flex-end;min-width:0}.eventchoice{min-width:0;flex:1}.eventchoice select{width:100%;min-width:0;text-overflow:ellipsis}.window-control,.event-navigation{flex-shrink:0}.review-main .metrics{grid-column:1;display:flex;gap:17px 24px;padding:0;align-self:start}.topomap{grid-column:2;grid-row:1 / span 2;width:210px;margin:0;align-self:start;text-align:center}.topomap img{display:block;width:210px;height:210px;object-fit:contain}.topomap figcaption{font-size:11px;color:var(--muted);margin-top:3px}.component-picker{position:relative;min-width:0}.component-picker>button{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:left}.component-picker>button span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.component-list{position:absolute;z-index:10;top:calc(100% + 5px);left:0;min-width:100%;max-width:min(540px,80vw);max-height:310px;overflow:auto;background:white;border:1px solid #cbd7e2;border-radius:7px;box-shadow:0 8px 24px #172b3a24;padding:4px}.component-list button{display:block;width:100%;height:auto;min-height:33px;border:0;border-radius:4px;text-align:left;white-space:nowrap}.component-list button[aria-selected="true"]{background:#eaf2f9}.component-list button:focus{outline:2px solid #7bb6e2;outline-offset:-2px;background:#edf4fa}.component-picker .rejected{color:var(--red)}.component-help{font-size:10px;color:var(--muted);margin:1px 0 0}.metric strong{white-space:nowrap}.iclabel-row{flex-basis:100%}
 @media(max-width:1100px){.review-main{grid-template-columns:minmax(0,1fr) 180px}.topomap,.topomap img{width:180px}.topomap img{height:180px}.review-main .metrics{grid-column:1 / -1}.event-row{flex-wrap:wrap}.eventchoice{flex-basis:45%}}@media(max-width:800px){.review-main{grid-template-columns:1fr}.topomap{grid-column:1;grid-row:3;justify-self:center}.review-main .metrics{grid-row:2}.review-main .controls{grid-row:1}.component-list{max-width:calc(100vw - 66px)}}@media(max-width:560px){.review-main .controls{display:flex;flex-wrap:wrap}.componentchoice{flex-basis:100%}.event-row{flex-basis:100%;order:3}.eventchoice{flex-basis:100%}.review-main .metrics{gap:18px}.metric strong{font-size:23px}}
+.topomap>figure{margin:0}.topomap .component-psd{margin-top:14px}.component-psd figcaption{font-weight:650;color:var(--ink);margin-bottom:4px}.component-psd canvas{display:block;width:100%;height:175px}.component-psd p{font-size:10px;line-height:1.35;margin:4px 0 0}
 
 [hidden]{display:none!important}
 .metrics.iclabel-flagged strong,.metrics.iclabel-flagged span{color:var(--red)}
@@ -63,7 +64,7 @@ main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}m
 
   <div class="event-row"><div class="control eventchoice"><label for="event">Grouped waveform event</label><select id="event"></select></div><div class="control window-control"><label for="window">View width</label><select id="window"><option value="2">2 seconds</option><option value="5" selected>5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select></div><div class="control event-navigation"><label>Event navigation</label><div class="buttonrow"><button id="previous" title="Previous event (left arrow)">← Previous</button><button id="next" title="Next event (right arrow)">Next →</button></div></div></div>
  </div>
- <figure class="topomap"><img id="componentTopomap" src="topomaps/ICA000.png?dots=black-green-ring-v1" alt="ICA000 mixing-weight topography"><figcaption>IC mixing weights · relative scale</figcaption></figure>
+ <div class="topomap"><figure><img id="componentTopomap" src="topomaps/ICA000.png?dots=black-green-ring-v1" alt="ICA000 mixing-weight topography"><figcaption>IC mixing weights · relative scale</figcaption></figure><figure class="component-psd" id="componentPSDPlot"><figcaption>Median epoch PSD</figcaption><canvas id="componentPSD" height="175" aria-label="Selected IC median power spectral density, linear frequency and decibel power"></canvas><p id="componentPSDMethod"></p></figure></div>
  <div class="metrics" id="metrics"></div>
 </div>
 <p class="review-status" id="componentStatus"></p>
@@ -278,6 +279,31 @@ function drawGaps(p,a,b,top=p.top,bottom=p.bottom){
  const q=p.ctx;q.save();q.strokeStyle='rgba(86,99,110,.65)';q.lineWidth=1;q.setLineDash([2,3]);q.beginPath();
  for(const gap of DATA.discontinuities){if(gap.retained_s<a||gap.retained_s>b)continue;const x=xmap(gap.retained_s,a,b,p);q.moveTo(x,top);q.lineTo(x,bottom)}q.stroke();q.restore();
 }
+function drawPSD(){
+ const c=current(),canvas=$('componentPSD'),metadata=DATA.psd;
+ $('componentPSDPlot').hidden=!metadata||!Array.isArray(c.psd_db);if($('componentPSDPlot').hidden)return;
+ const w=canvas.getBoundingClientRect().width,h=175,dpr=window.devicePixelRatio||1;
+ if(!w)return;canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);
+ const q=canvas.getContext('2d');q.scale(dpr,dpr);q.clearRect(0,0,w,h);
+ const left=44,right=w-7,top=8,bottom=h-35,fmax=metadata.fmax_hz,freqs=metadata.freqs_hz;
+ const values=c.psd_db.filter((v,i)=>freqs[i]>0&&freqs[i]<=fmax&&Number.isFinite(v));
+ if(!values.length)return;
+ let ymin=Math.floor(Math.min(...values)/10)*10,ymax=Math.ceil(Math.max(...values)/10)*10;
+ if(ymax-ymin<10){ymin-=5;ymax+=5}
+ const x=f=>left+f/fmax*(right-left),y=v=>bottom-(v-ymin)/(ymax-ymin)*(bottom-top);
+ q.font='10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.fillStyle='#748391';q.strokeStyle='#e9eef2';q.lineWidth=1;q.textAlign='right';
+ for(const v of ticks(ymin,ymax,4)){q.beginPath();q.moveTo(left,y(v));q.lineTo(right,y(v));q.stroke();q.fillText(fmt(v,0),left-5,y(v)+3)}
+ q.textAlign='center';
+ const fticks=[0,...ticks(0,fmax,5).filter(f=>f>0&&f<fmax*.92),fmax];
+ for(const f of fticks){q.beginPath();q.moveTo(x(f),top);q.lineTo(x(f),bottom);q.stroke();q.fillText(fmt(f,f%1?2:0),x(f),bottom+15)}
+ q.strokeStyle='#d1dbe3';q.beginPath();q.moveTo(left,top);q.lineTo(left,bottom);q.lineTo(right,bottom);q.stroke();
+ q.save();q.beginPath();q.rect(left,top,right-left,bottom-top);q.clip();q.strokeStyle='#2b5371';q.lineWidth=1.3;q.beginPath();let started=false;
+ for(let i=0;i<freqs.length;i++){if(freqs[i]>fmax)break;const v=c.psd_db[i];if(!Number.isFinite(v)){started=false;continue}if(started)q.lineTo(x(freqs[i]),y(v));else{q.moveTo(x(freqs[i]),y(v));started=true}}q.stroke();q.restore();
+ q.fillStyle='#62798a';q.textAlign='center';q.fillText('Frequency (Hz)',(left+right)/2,h-3);
+ q.save();q.translate(10,(top+bottom)/2);q.rotate(-Math.PI/2);q.fillText('dB (AU²/Hz)',0,0);q.restore();
+ const description=`${c.name} median epoch power spectral density, 0 to ${fmax} Hz on a linear frequency axis; decibels relative to 1 native ICA unit squared per Hz. ${metadata.method}`;
+ canvas.setAttribute('aria-label',description);canvas.title=metadata.method;$('componentPSDMethod').textContent='Median across retained fit epochs';
+}
 function overview(){const c=current(),p=setup('overview',145),ym=extent(c.signal,0,duration);grid(p,0,duration,ym);shadeEvents(p,c,0,duration);drawSeries(p,i=>c.signal[i],0,c.signal.length,0,duration,ym,p.top,p.bottom,'#2b5371');const[a,b]=bounds(),q=p.ctx;q.fillStyle='rgba(39,126,186,.10)';q.fillRect(xmap(a,0,duration,p),p.top,Math.max(2,xmap(b,0,duration,p)-xmap(a,0,duration,p)),p.bottom-p.top);q.strokeStyle='#3082b9';q.strokeRect(xmap(a,0,duration,p),p.top,Math.max(2,xmap(b,0,duration,p)-xmap(a,0,duration,p)),p.bottom-p.top);q.fillStyle='#62798a';q.textAlign='left';q.fillText(c.source_normalization_valid?'robust units':'native ICA units (zero MAD)',p.left,10);drawGaps(p,0,duration);voltageEndpoints(p,c,ym);$('overview')._plot=p}
 function waveform(){const c=current(),[a,b]=bounds(),p=setup('waveform',220),ym=extent(c.signal,a,b);grid(p,a,b,ym);shadeEvents(p,c,a,b);highlight(p,a,b);drawSeries(p,i=>c.signal[i],Math.floor(a*sf),Math.min(c.signal.length,Math.ceil(b*sf)),a,b,ym,p.top,p.bottom,'#214d6d');runMarks(p,thresholdRuns(c,a,b),a,b);p.ctx.fillStyle='#62798a';p.ctx.textAlign='left';p.ctx.fillText(c.source_normalization_valid?'robust source units':'native ICA units (zero MAD)',p.left,10);drawGaps(p,a,b);voltageEndpoints(p,c,ym)}
 function deltas(){const c=current(),[a,b]=bounds(),p=setup('deltas',530),rowH=98,q=p.ctx;for(let k=0;k<DATA.lags_ms.length;k++){const lag=Math.round(DATA.lags_ms[k]*sf/1000),offset=Math.floor(lag/2),i0=Math.max(0,Math.floor(a*sf)-offset),i1=Math.min(c.signal.length-lag,Math.ceil(b*sf)-offset),top=18+k*rowH,bottom=top+72;let ym=7.5;for(let j=i0;j<i1;j++){const z=scoreAt(c,k,j);if(Number.isFinite(z))ym=Math.max(ym,Math.abs(z)*1.08)}grid(p,a,b,ym,top,bottom,k===4);shadeEvents(p,c,a,b,top,bottom);highlight(p,a,b,top,bottom);q.save();q.setLineDash([5,4]);q.strokeStyle='#d4979f';for(const z of [-DATA.threshold,DATA.threshold]){const y=bottom-(z+ym)/(2*ym)*(bottom-top);q.beginPath();q.moveTo(p.left,y);q.lineTo(p.right,y);q.stroke()}q.restore();drawSeries(p,j=>scoreAt(c,k,j),i0,i1,a,b,ym,top,bottom,colors[k],offset);q.fillStyle=colors[k];q.textAlign='left';q.font='bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.fillText(DATA.lags_ms[k]+' ms',p.left+5,top+13);q.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';if(k<4){q.fillStyle='#8b98a2';q.textAlign='right';q.fillText('delta Z',p.right,bottom+13)}}}
@@ -477,7 +503,7 @@ function handleStackedKey(e){
 }
 
 
-function render(){updateText();updatePersistence();if(state.view==='stacked'){renderStacked();return;}if(state.view==='distributions'){renderDistributions();return;}if(!current().signal){for(const[id,h]of[['overview',145],['waveform',220],['deltas',530]]){const p=setup(id,h);p.ctx.fillStyle=state.loadError?'#a82f3d':'#62798a';p.ctx.textAlign='left';p.ctx.fillText(state.loadError||'Loading '+current().name+' waveform…',p.left,35)}$('overview')._plot=null;return}overview();waveform();deltas()}
+function render(){updateText();updatePersistence();if(state.view==='stacked'){renderStacked();return;}if(state.view==='distributions'){renderDistributions();return;}drawPSD();if(!current().signal){for(const[id,h]of[['overview',145],['waveform',220],['deltas',530]]){const p=setup(id,h);p.ctx.fillStyle=state.loadError?'#a82f3d':'#62798a';p.ctx.textAlign='left';p.ctx.fillText(state.loadError||'Loading '+current().name+' waveform…',p.left,35)}$('overview')._plot=null;return}overview();waveform();deltas()}
 $('overview').addEventListener('click',e=>{const p=$('overview')._plot,r=e.target.getBoundingClientRect(),x=e.clientX-r.left;if(!p)return;if(x<p.left||x>p.right)return;state.center=(x-p.left)/(p.right-p.left)*duration;state.width=Number($('window').value);state.ei=-1;$('event').value='-1';render()});
 let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(render,120)});
 updatePersistence();updateReview();setView(state.view);

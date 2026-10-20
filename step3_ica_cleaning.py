@@ -254,6 +254,93 @@ def load_ica_exclusions(viewer_dir, *, ica):
     return load_exclusions(viewer_dir, ica=ica)
 
 
+def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
+    """Print the reviewed exclusions and show three topomap/PSD pairs per row.
+
+    Call before applying ICA to raw_bads. Measure the joint variance reduction
+    as 1 - sum(channel temporal variances after exclusion) / sum(before), on
+    exactly ica.ch_names in the original reference. Omit BAD-annotated samples
+    from both variance estimates. This is the actual net reduction, not a sum
+    of individual IC variance fractions; it can be negative.
+
+    PSDs use the exact fitting epochs and their sampling rate, with the same
+    native-unit median estimator as the viewer. Leave all inputs unchanged.
+    Return the displayed figure, or None when no components are excluded.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PathCollection
+    from step3_ica_viewer.build import _median_psd
+
+    excluded = sorted(set(ica.exclude))
+    print(f"Excluded ICA components: {excluded}")
+    print(f"Excluded components: {len(excluded)} / {ica.n_components_}")
+    if not excluded:
+        print("Variance reduction on unannotated original data: 0.000%")
+        return None
+
+    comparison = raw_bads.copy().pick(ica.ch_names)
+    original = comparison.get_data(reject_by_annotation="omit", verbose=False)
+    n_retained = original.shape[1]
+    if not n_retained:
+        raise ValueError("No unannotated samples remain for variance estimation.")
+    before = np.var(original, axis=1).sum()
+    del original
+    if before <= 0:
+        raise ValueError("The fitted channels must have positive temporal variance.")
+    ica.apply(comparison, verbose=False)
+    after = np.var(comparison.get_data(reject_by_annotation="omit", verbose=False),
+                   axis=1).sum()
+    reduction = 1 - after / before
+    del comparison
+    print(f"Variance reduction on unannotated original data: {100 * reduction:.3f}%")
+    print(f"Variance support: {len(ica.ch_names)} fitted channels; "
+          f"{n_retained} / {raw_bads.n_times} samples at {raw_bads.info['sfreq']:g} Hz, "
+          "excluding BAD spans, in the original reference.")
+
+    sources = ica.get_sources(fit_epochs).get_data(picks=excluded)
+    sfreq = float(fit_epochs.info["sfreq"])
+    frequencies, psd_db = _median_psd(sources, sfreq)
+    maps = ica.get_components()
+    n_rows = (len(excluded) + 2) // 3
+    fig, axes = plt.subplots(
+        n_rows, 6, figsize=(18, 2.8 * n_rows), squeeze=False,
+        gridspec_kw={"width_ratios": [1, 1.4] * 3}, layout="constrained",
+    )
+    fig.suptitle(f"Excluded ICA components: {len(excluded)} / {ica.n_components_} · "
+                 f"variance reduction {100 * reduction:.3f}%\n"
+                 f"Median PSDs from {len(fit_epochs)} fitting epochs at {sfreq:g} Hz")
+    for pair, component in enumerate(excluded):
+        topo_ax, psd_ax = axes[pair // 3, 2 * (pair % 3):2 * (pair % 3) + 2]
+        weights = maps[:, component]
+        maximum = np.max(np.abs(weights))
+        values = weights / maximum if maximum else np.zeros_like(weights)
+        mne.viz.plot_topomap(
+            values, ica.info, axes=topo_ax, vlim=(-1, 1), cmap="RdBu_r",
+            sensors=True, contours=6, outlines="head", show=False,
+        )
+        for markers in topo_ax.collections:
+            if (isinstance(markers, PathCollection)
+                    and markers.get_offsets().shape == (len(ica.ch_names), 2)):
+                markers.set_facecolor("#000000")
+                markers.set_edgecolor("#39ff14")
+                markers.set_sizes([10.0])
+                markers.set_linewidths([0.65])
+        topo_ax.set_title(f"ICA{component:03d}")
+        psd_ax.plot(frequencies, psd_db[pair], color="#2b5371", linewidth=1)
+        psd_ax.set(xlim=(0, min(50.0, sfreq / 2)), xlabel="Frequency (Hz)",
+                   ylabel="PSD (dB AU²/Hz)", title="Median epoch PSD")
+        positive = psd_db[pair, frequencies > 0]
+        low, high = np.min(positive), np.max(positive)
+        padding = max(1.0, 0.05 * (high - low))
+        psd_ax.set_ylim(low - padding, high + padding)
+        psd_ax.grid(alpha=0.25)
+    for pair in range(len(excluded), 3 * n_rows):
+        for ax in axes[pair // 3, 2 * (pair % 3):2 * (pair % 3) + 2]:
+            ax.set_visible(False)
+    plt.show()
+    return fig
+
+
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-03"
@@ -307,4 +394,8 @@ if __name__ == "__main__":
     # %% Run this cell after reviewing; loading replaces, rather than unions, exclusions
     input("Review ICs in the viewer, then press Enter to load the saved exclusions: ")
     ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-    print(f"Final excluded ICA components: {ica.exclude}")
+    exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
+
+    # %% Apply reviewed ICA and view the cleaned data
+    ica.apply(raw_bads)
+    raw_bads.plot(title="After ICA cleaning")

@@ -54,7 +54,7 @@ Preserve this panel order and layout:
 
 1. Component picker labeled with **original threshold runs**, e.g. `ICA010 · 1179 (664) runs`, and component navigation. Color follows the current rejection decision.
 2. A single aligned control row: grouped waveform-event selector, view-width selector (2/5/10/30 s), then Previous/Next event buttons.
-3. IC mixing-weight topomap in the upper-right corner of the first panel.
+3. IC mixing-weight topomap in the upper-right corner of the first panel, with the selected IC's median PSD directly beneath it in the same column.
 4. Four large metrics: original threshold runs; original runs/minute; grouped waveform events; longest grouped interval. For each, show raw value followed by adjusted value in parentheses. The rate denominator stays the full retained fitting duration.
 5. A separate second metric row: ICLabel winning probability and category in the same large font, with a smaller ICLabel caption; next to it, an obvious Kept/Rejected toggle and the corresponding shortcut.
 6. Whole-recording overview, zoomed source waveform, five signed delta traces, detection/grouping explanation, and clickable counts-by-component table.
@@ -86,6 +86,16 @@ Use saved, native-reference `ica.get_components()` maps in `ica.ch_names` order.
 Normalize each displayed map by its own maximum absolute fitted-electrode weight; use `RdBu_r`, symmetric limits ±1, six contours, MNE head outline, nose up, ears left/right. Colors describe within-map weights and do not compare absolute component strengths. Preserve the saved polarity.
 
 Electrode markers have a **black center (`#000000`) and bright green surrounding ring (`#39ff14`)**. Current Matplotlib scatter size is 10 pt² with a 0.65 pt edge. Keep the actual fitted electrode coordinates. Render 360×360 PNGs and display responsively in the first panel; the usual desktop width is 210 px. Version image URLs when marker styling changes to avoid stale cached images.
+
+## Component spectra
+
+Below the selected IC's topomap, show its median power spectral density with a linear frequency axis from 0 to `min(50, sfreq / 2)` Hz and a dB power axis. Use native ICA activation units: dB relative to 1 AU²/Hz, not sensor µV²/Hz or robust-normalized source units.
+
+Compute a density-scaled Hamming periodogram for each exact retained fitting epoch, removing that epoch's mean. Do not concatenate epochs for spectral estimation or use the Float32 waveform display cache. Take the pointwise median of linear PSD values across epochs, then convert with `10 * log10(power)`, flooring zero densities at the smallest positive normal float64 value. For current 2-second epochs the frequency spacing is 0.5 Hz. These are spectra of the 1–100 Hz fitting data, including the corresponding filter effects near the low-frequency end.
+
+Store shared frequency bins and method metadata in the viewer payload, with one dB spectrum per component. Redraw when the selected IC, tab, or viewport changes. Preserve existing topomap size and review controls. Use positive-frequency bins for vertical autoscaling so a numerical DC floor cannot flatten the rest of the plot; draw the full spectrum with clipping to the axes.
+
+Spectra are derived display assets. Updating this calculation or its layout changes the display cache, not the fit identity or durable rejection JSON. Reopening an existing bundle must rebuild from its archived exact ICA and fitting epochs without refitting or resetting manual decisions.
 
 ## Numerical units
 

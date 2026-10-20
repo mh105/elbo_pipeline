@@ -41,7 +41,7 @@ Passing `raw_bads` at initial preparation is convenient for capturing this metad
 
 Pass the explicit original `.set`/EEG path. MNE's `raw_bads.filenames[0]` can refer to an external `.fdt` file rather than the `.set` file you opened; the Step 3 example constructs `eeg_path` explicitly.
 
-CSV files are useful exports, but they are not substitutes for the fitted ICA and exact epochs. The current browser loads embedded JSON, lazy per-IC Float32 waveform files, and topomap PNGs. It does not read `summary.csv` to draw its waveforms.
+CSV files are useful exports, but they are not substitutes for the fitted ICA and exact epochs. The current browser loads embedded JSON (including median component spectra), lazy per-IC Float32 waveform files, and topomap PNGs. It does not read `summary.csv` to draw its waveforms.
 
 ## Intended workflow
 
@@ -57,6 +57,7 @@ After fitting, use these implemented helpers. `viewer_dir` is a `Path` to the re
 ```python
 from step3_ica_cleaning import (
     prepare_ica_viewer, open_ica_viewer, load_ica_exclusions,
+    summarize_ica_exclusions,
 )
 
 viewer_dir = prepare_ica_viewer(
@@ -71,9 +72,12 @@ viewer_url = open_ica_viewer(viewer_dir)
 
 # Later, after review, validate the target ICA and replace its exclusions.
 ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
+exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
 # Applying ICA remains a separate analysis step:
 # ica.apply(raw_bads)
 ```
+
+The summary prints the excluded indices/count and the joint percentage reduction in summed temporal channel variance after excluding them. It uses the original-rate `raw_bads` samples outside BAD annotations for both variance estimates, and only fitted channels in the original reference. The printed support gives retained and total sample counts. Call it before modifying `raw_bads` with ICA. Its figure shows three topomap/median-PSD pairs per row, using the same exact fitting-epoch spectra as the viewer. It leaves inputs unchanged and returns the figure (or `None` for no exclusions).
 
 A new session can reopen an existing bundle without an active Python kernel or full Raw. Rebuilding a missing cache uses the stored ICA, exact epochs, labels, and manifest. Objects that existed only in a closed kernel cannot be recovered without first saving them.
 
@@ -86,6 +90,18 @@ python -m step3_ica_viewer /absolute/path/to/the/recording/fit-directory
 ```
 
 This prints the URL and serves until Ctrl+C. Add `--no-browser` to print the URL without opening a browser. In a running kernel, `open_ica_viewer(viewer_dir)` starts a background service and returns immediately.
+
+After updating viewer code, reopen the same `viewer_dir`; the code-versioned display cache rebuilds from archived inputs and preserves the saved exclusion JSON. Do not delete `.ica_viewer`, rerun preprocessing, or refit ICA. If the builder was already imported in a running kernel, refresh it before reopening and follow the returned URL:
+
+```python
+import importlib
+import step3_ica_viewer.build as viewer_build
+
+importlib.reload(viewer_build)
+open_ica_viewer(viewer_dir)
+```
+
+Do not reload `server.py`, because its module state tracks running local services. A fresh command-line process uses the updated builder directly.
 
 ## Implementation decisions and boundaries
 
