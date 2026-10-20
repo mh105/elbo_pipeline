@@ -70,29 +70,32 @@ def remove_line_noise_inplace(raw, raw_prep, clean):
     All three inputs must have matching channels, order, and samples.
     Estimate the removed noise as raw_prep - clean.
     Only this difference is subtracted; raw retains its original filter metadata.
+    Then show the before/after diagnostics with plot_line_noise_removal.
     """
     line_noise = raw_prep.get_data() - clean.get_data()
     raw._data -= line_noise
+    del line_noise
+    plot_line_noise_removal(raw, raw_prep)
 
 
-if __name__ == "__main__":
-    # %% Load example data
-    raw = load_raw_data("sub-02")
+def plot_line_noise_removal(raw, raw_prep, *, fmax=150.0, posterior_channel="E75"):
+    """Show line-noise inspection plots; return the eight diagnostic figures.
 
-    # %% Line noise removal
-
-    # For line noise removal, first highpass filter at 1.0 Hz to remove slow drifts
-    raw_prep = raw.copy()
-    raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-
-    # %% Some manual inspection of the data before line-noise removal
+    raw is the corrected original data; raw_prep is the 1 Hz high-pass copy
+    from before line-noise removal. Reapply 1 Hz high-pass to a private copy
+    of raw for comparison, leaving both inputs unchanged. Exclude Cz from
+    channel PSD summaries. Preserve the posterior-channel SOMATA multitaper
+    settings and shared before/after color limits.
+    """
+    figures = []
     # Inspect the spectra across channels
-    fmax = 150  # <-- adjust fmax as needed
-    psd_before = raw_prep.compute_psd(fmax=fmax)
-    psd_before.plot(picks="data", exclude=['Cz'], amplitude=False)
+    with mne.use_log_level("WARNING"):
+        psd_before = raw_prep.compute_psd(fmax=fmax, exclude=["Cz"])
+        fig = psd_before.plot(picks="data", exclude=["Cz"], amplitude=False, show=False)
+    fig.suptitle("Before line-noise removal (1 Hz high-pass)")
+    figures.append(fig)
 
     # Inspect the posterior channel before any line-noise removal.
-    posterior_channel = "E75"  # Posterior midline electrode in this EGI montage.
     sfreq = float(raw_prep.info["sfreq"])
     spectrogram_params = dict(
         frequency_range=[1, fmax],
@@ -113,47 +116,39 @@ if __name__ == "__main__":
     )
     vmin, vmax = np.nanpercentile(power_before_db, [5, 98])
     fig, ax = plt.subplots(figsize=(12, 4), layout="constrained")
+    figures.append(fig)
     mesh = ax.pcolormesh(times, freqs, power_before_db, shading="auto",
                          vmin=vmin, vmax=vmax, cmap="cet_rainbow4")
     ax.set_title(f"{posterior_channel}: Before line-noise removal (1 Hz high-pass)")
     ax.set_ylabel("Frequency (Hz)")
     ax.set_xlabel("Time from start of cropped recording (s)")
     fig.colorbar(mesh, ax=ax, label=r"PSD (dB re 1 $\mu V^2$/Hz)")
-    plt.show()
 
-    # %% Apply line-noise removal
-    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    # clean = ZapLine_notch(clean, line_freq=90.0)
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-
-    # sub-02 - when ZapLine fails, use SpectrumInterpolation for 30 Hz and 90 Hz as well
-    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
-
-    # Remove the estimated noise from the original data without high-pass filtering it
-    remove_line_noise_inplace(raw, raw_prep, clean)
-
-    # %% Some more manual inspection of the data after line-noise removal
     # Need to re-apply the 1 Hz high-pass filter to the modified raw data without
     # line noise for comparison, since the original raw was not high-pass filtered.
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
 
     # Inspect the spectra across channels
-    psd_after = raw_prep.compute_psd(fmax=fmax)
-    psd_after.plot(picks="data", exclude=['Cz'], amplitude=False)
+    with mne.use_log_level("WARNING"):
+        psd_after = raw_prep.compute_psd(fmax=fmax, exclude=["Cz"])
+        fig = psd_after.plot(picks="data", exclude=["Cz"], amplitude=False, show=False)
+    fig.suptitle("After line-noise removal (1 Hz high-pass)")
+    figures.append(fig)
 
     # Inspect a posterior channel's spectrogram before and after cleaning
     power_after, _, _ = multitaper_spectrogram(
         raw_prep.get_data(picks=[posterior_channel], units="uV")[0],
         sfreq, **spectrogram_params,
     )
+    del raw_prep
     power_after_db = 10 * np.log10(np.where(power_after > 0, power_after, np.nan))
     power_db = np.stack([power_before_db, power_after_db])
     vmin, vmax = np.nanpercentile(power_db, [5, 98])
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True, sharey=True,
                              layout="constrained")
+    figures.append(fig)
     for ax, spectrum, title in zip(axes, power_db, ("Before cleaning", "After cleaning")):
         mesh = ax.pcolormesh(times, freqs, spectrum, shading="auto",
                              vmin=vmin, vmax=vmax, cmap="cet_rainbow4")
@@ -161,7 +156,6 @@ if __name__ == "__main__":
         ax.set_ylabel("Frequency (Hz)")
     axes[-1].set_xlabel("Time from start of cropped recording (s)")
     fig.colorbar(mesh, ax=axes, label=r"PSD (dB re 1 $\mu V^2$/Hz)")
-    plt.show()
 
     def mean_psd_db(psd):
         """Convert each channel's power to dB re 1 uV^2/Hz, then average channels."""
@@ -172,6 +166,7 @@ if __name__ == "__main__":
 
     # Channel-averaged PSD, before vs after line-noise removal
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
+    figures.append(fig)
     ax.plot(*mean_psd_db(psd_before), label="before cleaning")
     ax.plot(*mean_psd_db(psd_after), label="after cleaning")
     ax.set(
@@ -193,6 +188,7 @@ if __name__ == "__main__":
     atten_mean = atten_per_channel.mean(axis=0)
 
     fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
+    figures.append(fig)
     ax.plot(psd_freqs, atten_per_channel.T, color="C0", alpha=0.5, lw=0.8)
     ax.plot(psd_freqs, atten_mean, color="k", lw=2.5, label="mean across channels")
     ax.axhline(0, color="0.6", lw=0.8, ls="--")
@@ -218,6 +214,7 @@ if __name__ == "__main__":
     band_delta_db = 10 * np.log10(band_after / band_before)
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4), layout="constrained")
+    figures.append(fig)
 
     ax = axes[0]
     ax.fill_between(psd_freqs, pct[0], pct[4], color="C0", alpha=0.2, lw=0, label="5-95%")
@@ -242,17 +239,11 @@ if __name__ == "__main__":
     )
 
     psd_ch_names = psd_before.copy().pick("data", exclude=["Cz"]).ch_names
-    worst = int(np.argmin(band_delta_db))
-    print(
-        f"{BAND[0]}-{BAND[1]} Hz change (dB): "
-        f"median {np.median(band_delta_db):+.3f}, "
-        f"range [{band_delta_db.min():+.3f}, {band_delta_db.max():+.3f}], "
-        f"most affected channel {psd_ch_names[worst]}"
-    )
 
     # Worst-case single channels at 20 Hz and 80 Hz, before vs after
     fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True, sharey=True,
                              layout="constrained")
+    figures.append(fig)
     for ax, f_probe in zip(axes, (20.0, 80.0)):
         i_freq = int(np.argmin(np.abs(psd_freqs - f_probe)))
         i_ch = int(np.argmin(delta_db[:, i_freq]))  # most negative == most power lost
@@ -271,3 +262,25 @@ if __name__ == "__main__":
         )
         ax.legend()
     plt.show()
+    return figures
+
+
+if __name__ == "__main__":
+    # %% Load example data
+    raw = load_raw_data("sub-02")
+
+    # %% Line noise removal
+    # For line noise removal, first highpass filter at 1.0 Hz to remove slow drifts
+    raw_prep = raw.copy()
+    raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
+
+    # clean = ZapLine_notch(raw_prep, line_freq=30.0)
+    # clean = ZapLine_notch(clean, line_freq=90.0)
+    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+
+    # sub-02 - when ZapLine fails, use SpectrumInterpolation for 30 Hz and 90 Hz as well
+    clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+
+    # Subtract estimated noise and show the before/after inspection plots.
+    remove_line_noise_inplace(raw, raw_prep, clean)
