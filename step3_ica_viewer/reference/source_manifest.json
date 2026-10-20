@@ -1,0 +1,38 @@
+{
+  "captured_date": "2026-10-19",
+  "status": "Frozen prototype; generic builder and disk autosave not implemented",
+  "sources": [
+    {
+      "snapshot": "viewer_template.html",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_all_retained_20261018/viewer_template.html",
+      "sha256": "9dd1c3d71da40544951859becdcbdd67d500c45b7b1321c156f4a1c388f92dd8"
+    },
+    {
+      "snapshot": "build_viewer.py",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_all_retained_20261018/build_viewer.py",
+      "sha256": "d27b78928d34c369e95e82a3d058e7c3d3f822540e529c7d2147dfad84058ea0"
+    },
+    {
+      "snapshot": "add_shared_context.py",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_all_retained_20261018/add_shared_context.py",
+      "sha256": "a9d538e9f32dc5af51d15de4458f90aa37dc6a4306beabc93321756c8e105d2b"
+    },
+    {
+      "snapshot": "generate_topomaps.py",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_all_retained_20261018/generate_topomaps.py",
+      "sha256": "2b943ccd5236c6554b26ab247f5a8c7a75068a850a1bd7747e16ed4cdd71f149"
+    },
+    {
+      "snapshot": "prepare_native_sources.py",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_all_retained_20261018/prepare_native_sources.py",
+      "sha256": "b11b5dde21a55edda36b7d12d512d2c31cb477c415cd0c23ca4a85e04f7a3c7f"
+    },
+    {
+      "snapshot": "analyze_delta_z5.py",
+      "source": "code/eeg_analysis/elbo_pipeline/reports/sub03_delta_z5_20261018/analyze_delta_z5.py",
+      "sha256": "f4ceb5012f59de321644752f18846f21591e0d429c79e1a7651395b5b9c905a0"
+    }
+  ],
+  "pipeline_contract_source": "code/eeg_analysis/elbo_pipeline/step3_ica_cleaning.py",
+  "pipeline_contract_sha256": "22141096b9cce8745d872ff8820e56c02338edac98fe17fbc857d068aeaad771"
+}

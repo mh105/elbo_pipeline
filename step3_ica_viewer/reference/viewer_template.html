@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sub-03 · all ICA delta-event inspector</title>
+<style>
+:root{color-scheme:light;--ink:#172b3a;--muted:#5c6e7c;--line:#dce4eb;--bg:#f3f6f9;--card:#fff;--red:#bd3a45;--blue:#235c90;--shade:rgba(210,68,81,.10)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1450px;margin:auto;padding:28px 30px 44px}header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:20px}h1{font-size:27px;letter-spacing:-.7px;line-height:1.15;margin:5px 0 9px}p{margin:5px 0;color:var(--muted)}.eyebrow{color:var(--blue);font-size:11px;font-weight:750;letter-spacing:1.7px;text-transform:uppercase}.pill{border:1px solid #cfdce7;border-radius:99px;padding:6px 11px;color:var(--blue);white-space:nowrap;background:#f8fbfd;font-size:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:13px;box-shadow:0 2px 4px #18304c04;overflow:hidden;margin-bottom:16px}.controls{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;padding:17px 20px}.control{display:flex;flex-direction:column;gap:5px}.control label,.smallcap{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--muted)}select,button,input{font:inherit;color:var(--ink);background:white;border:1px solid #cbd7e2;border-radius:7px;padding:7px 10px;height:36px}select:focus,button:focus,input:focus{outline:2px solid #7bb6e2;outline-offset:2px}button{cursor:pointer}button:hover{background:#edf4fa}button:disabled{cursor:default;opacity:.4}.buttonrow{display:flex;gap:6px}.spacer{flex:1}.metrics{display:flex;gap:25px;flex-wrap:wrap;padding:0 20px 17px}.metric strong{font-size:23px;line-height:1.1;font-weight:650;display:block}.metric span{color:var(--muted);font-size:12px}.plothead{display:flex;align-items:center;justify-content:space-between;padding:14px 19px 4px;gap:15px}.plothead h2{font-size:15px;margin:0;font-weight:650}.plothead span{font-size:12px;color:var(--muted)}.plotwrap{padding:0 11px 4px}.plotwrap canvas{display:block;width:100%;touch-action:pan-y}.help{padding:0 20px 13px;color:var(--muted);font-size:12px}.eventbar{padding:13px 20px;background:#fff8f8;border-top:1px solid #f1dce0;display:flex;gap:16px;align-items:center;flex-wrap:wrap}.eventbar strong{color:#91313c}.eventbar span{font-size:12px;color:#6d4951}.eventbar.shared{background:#fffae9;border-top-color:#eddaa4}.eventbar.shared strong{color:#876214}.eventbar.shared span{color:#75622e}.eventbar details{font-size:12px;color:#5c6e7c;flex-basis:100%}.eventbar details summary{cursor:pointer}.eventbar details div{padding-top:5px;overflow-wrap:anywhere}.eventbar.empty{background:#f7fafc;border-top-color:var(--line)}.eventbar.empty strong{color:var(--ink)}.legend{display:flex;gap:16px;flex-wrap:wrap;padding:3px 20px 12px;color:var(--muted);font-size:12px}.swatch{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:5px}.swatch.event{background:rgba(210,68,81,.25);height:10px}.swatch.run{background:#bd3a45;height:10px;width:2px}.grid{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}.grid .card{margin-bottom:0}.bodycopy{padding:5px 20px 18px}.bodycopy p{margin:7px 0}.bodycopy code{font-size:12px;background:#f0f4f7;padding:1px 4px;border-radius:3px}.links{display:flex;flex-wrap:wrap;gap:13px;margin:12px 0 0}a{color:#235c90;text-underline-offset:3px}.tablewrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:12px;margin-top:7px}th,td{padding:8px 10px;border-bottom:1px solid #e8edf1;text-align:right;font-variant-numeric:tabular-nums}th{color:var(--muted);font-weight:600;font-size:11px}th:first-child,td:first-child{text-align:left}tr[data-ic]{cursor:pointer}tr[data-ic]:hover{background:#f1f6fb}tr.active{background:#eaf2f9}tr.rejected td{color:#a82f3d;background:#fff4f4}tr.rejected.active td{background:#fbe9ec}tr.rejected .decisioncell{font-weight:700}.footnote{font-size:11px;color:var(--muted);padding:10px 20px 15px}kbd{font-size:10px;border:1px solid #d1dae2;border-radius:3px;padding:1px 4px;background:#fbfcfd}.currenttime{font-variant-numeric:tabular-nums}.review-status{margin:0;padding:0 20px 16px;color:var(--muted);font-size:12px}.review-rejected{color:#a82f3d;font-weight:700}.tablewrap{max-height:560px;overflow:auto}.tablewrap thead{position:sticky;top:0;background:#fff;z-index:1}.tablewrap th{white-space:nowrap}.nowrap{white-space:nowrap}@media(max-width:800px){main{padding:18px 12px}header{display:block}header .pill{display:inline-block;margin-top:7px}h1{font-size:24px}.grid{grid-template-columns:1fr}.metrics{gap:18px}.plothead{align-items:flex-start;flex-direction:column;gap:2px}.control.eventchoice{max-width:100%}.eventchoice select{max-width:100%}.spacer{display:none}}
+
+.component-card{overflow:visible}.review-main{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:18px 20px;padding:17px 20px}.review-main .controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;padding:0;align-items:start}.componentchoice{min-width:0;grid-column:1;grid-row:1}.navigation-stack{grid-column:2;grid-row:1}.event-row{grid-column:1 / -1;grid-row:2;display:flex;gap:12px;align-items:flex-end;min-width:0}.eventchoice{min-width:0;flex:1}.eventchoice select{width:100%;min-width:0;text-overflow:ellipsis}.window-control,.event-navigation{flex-shrink:0}.review-main .metrics{grid-column:1;display:flex;gap:17px 24px;padding:0;align-self:start}.topomap{grid-column:2;grid-row:1 / span 2;width:210px;margin:0;align-self:start;text-align:center}.topomap img{display:block;width:210px;height:210px;object-fit:contain}.topomap figcaption{font-size:11px;color:var(--muted);margin-top:3px}.component-picker{position:relative;min-width:0}.component-picker>button{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;text-align:left}.component-picker>button span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.component-list{position:absolute;z-index:10;top:calc(100% + 5px);left:0;min-width:100%;max-width:min(540px,80vw);max-height:310px;overflow:auto;background:white;border:1px solid #cbd7e2;border-radius:7px;box-shadow:0 8px 24px #172b3a24;padding:4px}.component-list button{display:block;width:100%;height:auto;min-height:33px;border:0;border-radius:4px;text-align:left;white-space:nowrap}.component-list button[aria-selected="true"]{background:#eaf2f9}.component-list button:focus{outline:2px solid #7bb6e2;outline-offset:-2px;background:#edf4fa}.component-picker .rejected{color:var(--red)}.component-help{font-size:10px;color:var(--muted);margin:1px 0 0}.metric strong{white-space:nowrap}.iclabel-row{flex-basis:100%}
+@media(max-width:1100px){.review-main{grid-template-columns:minmax(0,1fr) 180px}.topomap,.topomap img{width:180px}.topomap img{height:180px}.review-main .metrics{grid-column:1 / -1}.event-row{flex-wrap:wrap}.eventchoice{flex-basis:45%}}@media(max-width:800px){.review-main{grid-template-columns:1fr}.topomap{grid-column:1;grid-row:3;justify-self:center}.review-main .metrics{grid-row:2}.review-main .controls{grid-row:1}.component-list{max-width:calc(100vw - 66px)}}@media(max-width:560px){.review-main .controls{display:flex;flex-wrap:wrap}.componentchoice{flex-basis:100%}.event-row{flex-basis:100%;order:3}.eventchoice{flex-basis:100%}.review-main .metrics{gap:18px}.metric strong{font-size:23px}}
+
+[hidden]{display:none!important}
+.metrics.iclabel-flagged strong,.metrics.iclabel-flagged span{color:var(--red)}
+.view-tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin-bottom:16px}
+.view-tabs button{background:transparent;border:0;border-bottom:3px solid transparent;border-radius:0;height:40px;padding:7px 15px;color:var(--muted)}
+.view-tabs button[aria-selected="true"]{color:var(--blue);border-bottom-color:var(--blue);font-weight:650}
+.component-card.distribution-mode .review-main{display:block}
+.component-card.distribution-mode .event-row,.component-card.distribution-mode .topomap,.component-card.distribution-mode .metrics,.component-card.distribution-mode>.review-status,.component-card.distribution-mode>.help{display:none}
+.component-card.distribution-mode .controls{grid-template-columns:minmax(0,1fr) auto}
+@media(max-width:650px){.component-card.distribution-mode .controls{display:flex;flex-wrap:wrap}}
+.distribution-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.distribution-grid .card{min-width:0}.distribution-population{font-size:12px;margin:0 0 14px}.distribution-selection{padding:6px 20px 9px;display:flex;flex-direction:column;gap:5px}.distribution-selection strong{font-size:23px;line-height:1.1;font-weight:650}.distribution-selection span{font-size:12px;color:var(--muted)}@media(max-width:800px){.distribution-grid{grid-template-columns:1fr}}
+
+.iclabel-row{display:flex;align-items:center;gap:22px;flex-wrap:wrap}.rejection-toggle{height:auto;min-height:48px;min-width:200px;padding:9px 18px;font-size:17px;font-weight:700;border-width:2px}.rejection-toggle.kept{color:#26724e;background:#edf8f1;border-color:#9bc4ad}.rejection-toggle.rejected{color:#a82f3d;background:#fff0f2;border-color:#d08c96}.rejection-toggle small{display:block;font-size:11px;font-weight:500}.review-summary{padding:12px 18px;margin-bottom:16px}.review-summary .review-status{padding:0;margin:0 0 6px;font-size:13px}.exclude-export{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.exclude-export code{font-size:12px;overflow-wrap:anywhere}.exclude-export button{height:30px;font-size:12px}.review-summary p{font-size:11px;margin:5px 0 0}.review-summary .copy-status{color:var(--blue)}
+.stacked-controls{display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;padding:15px 20px 10px}
+.stacked-controls input{width:105px}.stacked-readout{display:flex;flex-direction:column;gap:3px;margin-left:auto;font-variant-numeric:tabular-nums}.stacked-readout strong{font-size:13px}.stacked-readout span{font-size:11px;color:var(--muted)}
+.stacked-canvas-wrap{padding:0 10px}.stacked-canvas-wrap canvas{display:block;width:100%;touch-action:none;cursor:default}
+.stacked-scroll{position:relative;height:16px;overflow:hidden;margin:0 21px 0 89px;background:#edf1f5;border:1px solid #d8e0e7;border-radius:8px;touch-action:none;cursor:pointer;user-select:none}
+.stacked-scroll:focus-visible{outline:2px solid #3476ad;outline-offset:2px}
+#stackTimeThumb{position:absolute;top:2px;bottom:2px;left:0;background:#8d9eac;border-radius:6px;cursor:grab}
+.stacked-scroll.dragging #stackTimeThumb{background:#657d90;cursor:grabbing}
+.stacked-status{min-height:27px;padding:4px 20px 5px;font-size:11px;color:var(--muted)}
+@media(max-width:650px){.stacked-controls{gap:10px}.stacked-controls input{width:85px}.stacked-readout{margin-left:0;flex-basis:100%}}
+
+main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}main.stacked-active>header{margin-bottom:8px}
+
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="eyebrow">sub-03 · waveform event analysis</div><h1>All ICA components</h1><p>Independent component detection · five time scales · |robust Z| ≥ 5</p><p>Original 415 fit epochs · 1–100 Hz · 250 Hz · 830 s retained data</p><p>119 ICs in component order · 8 initial ICLabel flags</p></div><div class="pill">Manual ICA review</div></header>
+
+<div class="view-tabs" role="tablist" aria-label="ICA review views">
+ <button id="distributionTab" type="button" role="tab" aria-selected="true" aria-controls="distributionView">1 · Metric distributions</button>
+ <button id="stackedTab" type="button" role="tab" aria-selected="false" aria-controls="stackedView" tabindex="-1">2 · Full time traces</button>
+ <button id="waveformTab" type="button" role="tab" aria-selected="false" aria-controls="waveformView" tabindex="-1">3 · IC waveforms</button>
+</div>
+
+
+<section class="card review-summary" aria-label="Current ICA rejection decisions">
+<p class="review-status" id="reviewStatus" aria-live="polite"></p>
+<div class="exclude-export"><code id="excludeList"></code><button id="copyExclusions" type="button">Copy ica.exclude</button><span id="copyStatus" class="copy-status" role="status"></span></div>
+<p id="decisionPersistence"></p>
+<p id="reviewShortcuts">Shortcuts: <kbd>⌘1</kbd> distributions · <kbd>⌘2</kbd> full time traces · <kbd>⌘3</kbd> IC waveforms. In IC waveforms: <kbd>↑</kbd>/<kbd>↓</kbd> components, <kbd>←</kbd>/<kbd>→</kbd> events, <kbd>-</kbd> reject, <kbd>=</kbd> keep.</p>
+</section>
+
+<section class="card component-card distribution-mode">
+<div class="review-main">
+ <div class="controls">
+  <div class="control componentchoice"><label id="componentLabel" for="componentPicker">Original runs (adjusted)</label><select id="component" hidden aria-hidden="true" tabindex="-1"></select><div class="component-picker" id="componentPickerWrap"><button id="componentPicker" type="button" role="combobox" aria-labelledby="componentLabel componentValue" aria-haspopup="listbox" aria-controls="componentList" aria-expanded="false"><span id="componentValue"></span><span aria-hidden="true">⌄</span></button><div id="componentList" class="component-list" role="listbox" aria-labelledby="componentLabel" hidden></div></div><p class="component-help">Red = currently rejected.</p></div>
+  <div class="navigation-stack"><div class="control"><label>Component navigation</label><div class="buttonrow"><button id="previousComponent" title="Previous component (up arrow)">↑ IC</button><button id="nextComponent" title="Next component (down arrow)">IC ↓</button></div></div></div>
+
+  <div class="event-row"><div class="control eventchoice"><label for="event">Grouped waveform event</label><select id="event"></select></div><div class="control window-control"><label for="window">View width</label><select id="window"><option value="2">2 seconds</option><option value="5" selected>5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select></div><div class="control event-navigation"><label>Event navigation</label><div class="buttonrow"><button id="previous" title="Previous event (left arrow)">← Previous</button><button id="next" title="Next event (right arrow)">Next →</button></div></div></div>
+ </div>
+ <figure class="topomap"><img id="componentTopomap" src="topomaps/ICA000.png?dots=black-green-ring-v1" alt="ICA000 mixing-weight topography"><figcaption>IC mixing weights · relative scale</figcaption></figure>
+ <div class="metrics" id="metrics"></div>
+</div>
+<p class="review-status" id="componentStatus"></p>
+<div class="help">Numbers in parentheses exclude shared grouped events. Shared means at least 30 of all 119 ICs have grouped event intervals covering this event’s peak, including all 8 initial ICLabel rejections. Rates use the same 830 s denominator.</div>
+</section>
+
+<section id="waveformView" role="tabpanel" aria-labelledby="waveformTab" hidden>
+<section class="card">
+<div class="plothead"><h2 id="overviewTitle">Whole recording</h2><span>Click anywhere to inspect that time</span></div>
+<div class="plotwrap"><canvas id="overview" height="145" aria-label="Whole recording source waveform and event locations"></canvas></div>
+<div class="legend"><span><i class="swatch" style="background:#2b5371"></i>Source min–max envelope</span><span><i class="swatch event"></i>Below sharing threshold</span><span><i class="swatch event" style="background:rgba(234,180,28,.35)"></i>Shared event: &gt;25% (≥30/119 ICs)</span><span><i class="swatch" style="background:#3082b9"></i>Current view</span></div>
+</section>
+
+<section class="card">
+<div class="plothead"><h2 id="detailTitle">Source waveform</h2><span class="currenttime" id="viewRange"></span></div>
+<div class="plotwrap"><canvas id="waveform" height="220" aria-label="Component waveform at the selected time"></canvas></div>
+<div id="eventInfo" class="eventbar"></div>
+<div class="help" style="padding-top:8px">Source amplitude is in robust units: (source − median) / (1.4826 × MAD). Vertical µV labels show this IC's contribution relative to its median at the strongest-loading electrode, named above each plot. Shading marks grouped event intervals: red below the sharing threshold, yellow for shared events. Red short marks identify original threshold-run peaks. A dashed vertical line marks the selected event peak.</div>
+</section>
+
+<section class="card">
+<div class="plothead"><h2>Signed delta traces</h2><span>Each time scale has its own labeled vertical range; dashed horizontal lines are ±5.</span></div>
+<div class="plotwrap"><canvas id="deltas" height="530" aria-label="Five signed robust normalized delta waveforms"></canvas></div>
+<div class="help">Delta = source(t + lag/2) − source(t − lag/2), robustly normalized separately for each IC and lag. Delta times are centered on the samples used to calculate each difference. Every time scale contributes to the same candidate mask.</div>
+</section>
+
+
+
+<div class="grid">
+<section class="card"><div class="plothead"><h2>Detection and grouping</h2></div><div class="bodycopy"><p id="methodText"></p><p>Original threshold runs are the primary count. Shape labels describe detected waveforms; they do not filter candidates. Parenthesized counts remove entire grouped events classified as shared at their peak. The adjusted run count sums threshold runs within the remaining groups; it does not classify each original run separately. Grouped intervals remain available for waveform navigation and shared-event context.</p><p>Use <kbd>←</kbd> / <kbd>→</kbd> to step through grouped events, or click the whole-recording view to inspect quieter stretches. Selecting an event expands the view if needed to include the full interval.</p><div class="links"><a href="summary.csv">Counts and initial ICLabel CSV</a></div></div></section>
+<section class="card"><div class="plothead"><h2>Counts by component</h2><span>Click a row to inspect</span></div><div class="tablewrap"><table><thead><tr><th>IC</th><th>Current decision</th><th>Runs (adjusted)</th><th>Groups (adjusted)</th><th>Groups &gt;1 s (adjusted)</th><th>150 ms gap</th><th>500 ms gap</th></tr></thead><tbody id="summaryRows"></tbody></table></div><div class="footnote">Red rows identify currently rejected components. Decisions are shared across all three views. Parentheses exclude shared events. Grouped counts combine threshold runs separated by ≤300 ms; the last two columns show raw grouped counts with alternate gap choices, without shared-event discounting.</div></section>
+</div>
+</section>
+<section id="stackedView" role="tabpanel" aria-labelledby="stackedTab" hidden>
+ <section class="card stacked-card">
+  <div class="stacked-controls">
+   <div class="control"><label for="stackCount">ICs displayed</label><input id="stackCount" type="number" min="1" max="119" step="1" value="20"></div>
+   <div class="control"><label for="stackFirst">First IC</label><input id="stackFirst" type="number" min="0" max="99" step="1" value="0"></div>
+   <div class="control"><label for="stackSeconds">Seconds displayed</label><input id="stackSeconds" type="number" min="2" max="830" step="2" value="40"></div>
+   <div class="control"><label>Amplitude</label><div class="buttonrow"><button id="stackSmaller" type="button" title="Decrease amplitude for all ICs">−</button><button id="stackLarger" type="button" title="Increase amplitude for all ICs">+</button></div></div>
+   <div class="stacked-readout"><strong id="stackRange"></strong><span id="stackEpochs"></span></div>
+  </div>
+  <div class="stacked-canvas-wrap"><canvas id="stackedCanvas" aria-label="Native ICA activation traces; click an ICA label to toggle rejection"></canvas></div>
+  <div class="stacked-scroll" id="stackTimeScroll" tabindex="0" role="scrollbar" aria-label="Recording time" aria-orientation="horizontal" aria-valuemin="0"><div id="stackTimeThumb"></div></div>
+  <div class="stacked-status" id="stackStatus" role="status" aria-live="polite"></div>
+  <div class="help">Scroll ↑ / ↓ over the traces to change ICs; swipe ← / → to pan time. The bottom scrollbar moves through the recording. Click an ICA label to toggle rejection; rejected traces and labels are faint pink. All ICs share one amplitude scale in native ICA activation units, with each visible trace centered by its mean. Dotted gray lines mark epoch boundaries.</div>
+ </section>
+</section>
+
+<section id="distributionView" role="tabpanel" aria-labelledby="distributionTab">
+<p class="distribution-population">Histograms use the fixed population of 111 ICs without an initial ICLabel flag. The 8 initial ICLabel rejections are omitted; selecting one still marks its count for comparison. Counts exclude shared grouped events, using the same rule as the IC view.</p>
+<div class="distribution-grid">
+ <section class="card distribution-card">
+  <div class="plothead"><h2>Adjusted original threshold runs</h2><span>100-run bins</span></div>
+  <div class="distribution-selection"><strong id="distributionRunsSelected"></strong><span id="distributionRunsPosition"></span></div>
+  <div class="plotwrap"><canvas id="distributionRuns" height="280" aria-label="Distribution of original threshold-run counts after shared-event removal"></canvas></div>
+  <div class="legend"><span><i class="swatch" style="background:#8cacc4;height:10px"></i>111 ICLabel-retained ICs</span><span><i class="swatch" style="background:#167d80"></i>Selected IC</span></div>
+ </section>
+ <section class="card distribution-card">
+  <div class="plothead"><h2>Adjusted grouped waveform events</h2><span>25-event bins</span></div>
+  <div class="distribution-selection"><strong id="distributionGroupsSelected"></strong><span id="distributionGroupsPosition"></span></div>
+  <div class="plotwrap"><canvas id="distributionGroups" height="280" aria-label="Distribution of grouped waveform-event counts after shared-event removal"></canvas></div>
+  <div class="legend"><span><i class="swatch" style="background:#8cacc4;height:10px"></i>111 ICLabel-retained ICs</span><span><i class="swatch" style="background:#167d80"></i>Selected IC</span></div>
+ </section>
+</div>
+<p class="distribution-population">A bar counts ICs whose adjusted count falls in its interval. Teal lines show the selected IC. Component selection and the current waveform position are preserved when switching views.</p>
+</section>
+
+</main>
+
+<script>
+'use strict';
+const DATA=__PAYLOAD_JSON__;
+const $=id=>document.getElementById(id);
+const colors=['#215c97','#d36b27','#3a8466','#8657a3','#bd3a60'];
+const sf=DATA.sfreq, duration=DATA.duration_s;
+const state={ci:0,ei:0,center:2.5,width:5,loadError:'',view:'distributions'};
+const decisionStorageKey='ica-review:'+DATA.review_id;
+let decisionOverrides={},decisionStorageError='';
+try{const saved=JSON.parse(localStorage.getItem(decisionStorageKey)||'{}');for(const c of DATA.components){if(typeof saved?.[c.id]==='boolean')decisionOverrides[c.id]=saved[c.id]}}catch(error){decisionStorageError='Browser storage is unavailable or unreadable; review changes may not survive reload.'}
+const isRejected=c=>decisionOverrides[c.id]??c.iclabel_auto_exclude;
+const decisionSource=c=>Object.hasOwn(decisionOverrides,c.id)?'manual decision':'ICLabel default';
+function updatePersistence(){$('decisionPersistence').textContent=decisionStorageError||'Decisions are saved in this browser for this ICA decomposition. Copy the list to Python when review is complete; the saved ICA file is unchanged.'}
+function applyDecision(c,rejected){const restoreFocus=document.activeElement?.id==='rejectionToggle';if(rejected===c.iclabel_auto_exclude)delete decisionOverrides[c.id];else decisionOverrides[c.id]=rejected;try{localStorage.setItem(decisionStorageKey,JSON.stringify(decisionOverrides));decisionStorageError=''}catch(error){decisionStorageError='Could not save this decision in browser storage; current changes may not survive reload.'}updatePersistence();updateReview();render();if(restoreFocus)$('rejectionToggle')?.focus()}
+function setRejected(rejected){applyDecision(current(),rejected)}
+function toggleRejected(id){const c=componentById.get(Number(id));if(c)applyDecision(c,!isRejected(c))}
+let selectionToken=0;
+function decode(s){const bin=atob(s),buf=new ArrayBuffer(bin.length),u=new Uint8Array(buf);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Float32Array(buf)}
+const pendingSignals=new Map();
+const componentById=new Map(DATA.components.map(c=>[c.id,c]));
+window.receiveICSignal=function(id,b64){const pending=pendingSignals.get(id),c=componentById.get(id);if(!c)return;try{c.signal=decode(b64);if(pending)pending.resolve(c.signal)}catch(error){if(pending)pending.reject(error)}finally{pendingSignals.delete(id)}};
+function ensureSignal(c){if(c.signal)return Promise.resolve(c.signal);if(pendingSignals.has(c.id))return pendingSignals.get(c.id).promise;let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});pendingSignals.set(c.id,{promise,resolve,reject});const script=document.createElement('script');script.src='data/'+c.name+'.js';script.async=true;script.onerror=()=>{pendingSignals.delete(c.id);reject(new Error('Could not load '+c.name+' waveform. Keep the data folder next to this HTML file.'));script.remove()};script.onload=()=>{if(!c.signal){pendingSignals.delete(c.id);reject(new Error(c.name+' waveform script did not provide a signal.'))}script.remove()};document.head.appendChild(script);return promise}
+
+const fmt=(x,n=2)=>Number.isFinite(x)?x.toFixed(n):'—';
+const current=()=>DATA.components[state.ci];
+const selected=()=>current().events[state.ei]||null;
+function bounds(){let a=state.center-state.width/2,b=state.center+state.width/2;if(a<0){b-=a;a=0}if(b>duration){a-=b-duration;b=duration}return[Math.max(0,a),Math.min(duration,b)]}
+function eventOption(e,i){return `${i+1} / ${current().events.length} · ${fmt(e.peak_s,3)} s · ${e.shape||'event'}${e.shared?' · shared':''}`}
+async function chooseComponent(index){state.ci=Number(index);state.loadError='';const token=++selectionToken,c=current();state.ei=c.events.length?c.events.reduce((best,e,i,arr)=>e.peak_score>arr[best].peak_score?i:best,0):-1;$('component').value=String(state.ci);updateComponentPicker();populateEvents();if(state.ei>=0)focusEvent();else{state.center=2.5;state.width=Number($('window').value)}render();try{await ensureSignal(c);if(token===selectionToken)render()}catch(error){if(token===selectionToken){state.loadError=error.message;render()}}const url=new URL(location.href);url.searchParams.set('ic',String(current().id));try{history.replaceState(null,'',url)}catch(error){}}
+function componentLabel(c){return `${c.name} · ${c.summary.n_runs} (${c.summary.n_runs_adjusted}) runs`}
+function updateReview(){DATA.components.forEach((c,i)=>{const rejected=isRejected(c);$('component').options[i].textContent=componentLabel(c);const option=$('componentList').children[i];option.textContent=componentLabel(c);option.classList.toggle('rejected',rejected);const row=document.querySelector(`tr[data-ic="${i}"]`);if(row){row.classList.toggle('rejected',rejected);row.querySelector('.decisioncell').textContent=`${rejected?'Rejected':'Kept'} · ${decisionSource(c)}`}});updateComponentPicker();const rejected=DATA.components.filter(isRejected),n=rejected.length;$('reviewStatus').textContent=`${DATA.components.length} components · ${n} rejected · ${DATA.components.length-n} kept · ${Object.keys(decisionOverrides).length} manual override${Object.keys(decisionOverrides).length===1?'':'s'}.`;$('excludeList').textContent='ica.exclude = ['+rejected.map(c=>c.id).join(', ')+']';$('copyStatus').textContent=''}
+$('copyExclusions').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('excludeList').textContent);$('copyStatus').textContent='Copied'}catch(error){$('copyStatus').textContent='Copy unavailable; select the list above to copy it.'}});
+
+
+$('previousComponent').addEventListener('click',()=>chooseComponent(Math.max(0,state.ci-1)));
+$('nextComponent').addEventListener('click',()=>chooseComponent(Math.min(DATA.components.length-1,state.ci+1)));
+function populateEvents(){const c=current(),sel=$('event');sel.innerHTML='';if(!c.events.length){sel.add(new Option('No grouped events','-1'));sel.disabled=true}else{sel.disabled=false;sel.add(new Option('Free time inspection','-1'));c.events.forEach((e,i)=>sel.add(new Option(eventOption(e,i),String(i))))}sel.value=String(state.ei)}
+function focusEvent(){const e=selected();if(!e)return;const span=e.end_s-e.start_s;state.width=Math.max(Number($('window').value),span+Math.max(.8,.3*span));state.width=Math.min(duration,state.width);state.center=(e.start_s+e.end_s)/2;$('event').value=String(state.ei)}
+function moveEvent(step){if(!current().events.length)return;state.ei=Math.max(0,Math.min(current().events.length-1,state.ei<0?(step>0?0:current().events.length-1):state.ei+step));focusEvent();render()}
+function updateComponentPicker(){const c=current();$('componentValue').textContent=componentLabel(c);$('componentPicker').classList.toggle('rejected',isRejected(c));Array.from($('componentList').children).forEach((option,i)=>{option.setAttribute('aria-selected',String(i===state.ci));option.tabIndex=i===state.ci?0:-1})}
+function closeComponentList(restoreFocus=false){$('componentList').hidden=true;$('componentPicker').setAttribute('aria-expanded','false');if(restoreFocus)$('componentPicker').focus()}
+function openComponentList(){const list=$('componentList');list.hidden=false;$('componentPicker').setAttribute('aria-expanded','true');list.children[state.ci].focus()}
+DATA.components.forEach((c,i)=>{$('component').add(new Option(componentLabel(c),String(i)));const option=document.createElement('button');option.type='button';option.id='componentOption'+i;option.role='option';option.textContent=componentLabel(c);option.classList.toggle('rejected',isRejected(c));option.addEventListener('click',()=>{closeComponentList(true);chooseComponent(i)});$('componentList').appendChild(option)});
+$('componentPicker').addEventListener('click',()=>{$('componentList').hidden?openComponentList():closeComponentList()});
+$('componentPicker').addEventListener('keydown',e=>{if(['Enter',' '].includes(e.key)){e.preventDefault();openComponentList()}});
+$('componentList').addEventListener('keydown',e=>{const options=Array.from($('componentList').children),i=options.indexOf(document.activeElement);if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();options[e.key==='Home'?0:e.key==='End'?options.length-1:Math.max(0,Math.min(options.length-1,i+(e.key==='ArrowDown'?1:-1)))].focus()}else if(e.key==='Escape'){e.preventDefault();closeComponentList(true)}else if(e.key==='Tab')closeComponentList()});
+document.addEventListener('click',e=>{if(!$('componentPickerWrap').contains(e.target))closeComponentList()});
+$('component').addEventListener('change',e=>chooseComponent(e.target.value));
+$('event').addEventListener('change',e=>{state.ei=Number(e.target.value);if(state.ei>=0)focusEvent();render();e.target.blur()});
+$('window').addEventListener('change',e=>{state.width=Number($('window').value);if(selected())focusEvent();render();e.target.blur()});
+$('previous').addEventListener('click',()=>moveEvent(-1));$('next').addEventListener('click',()=>moveEvent(1));
+document.addEventListener('keydown',e=>{if(e.defaultPrevented||e.ctrlKey||e.metaKey||e.altKey||!$('componentList').hidden||e.target.closest('select,input,textarea,[contenteditable]:not([contenteditable="false"])'))return;if(state.view==='stacked'){if(typeof handleStackedKey==='function')handleStackedKey(e);return}if(state.view!=='waveforms')return;if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();const next=Math.max(0,Math.min(DATA.components.length-1,state.ci+(e.key==='ArrowDown'?1:-1)));if(next!==state.ci)chooseComponent(next)}else if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();moveEvent(e.key==='ArrowRight'?1:-1)}else if(e.key==='-'||e.key==='='){e.preventDefault();setRejected(e.key==='-')}});
+document.addEventListener('keydown',e=>{if(!e.metaKey||e.ctrlKey||e.altKey||!['1','2','3'].includes(e.key))return;e.preventDefault();e.stopPropagation();closeComponentList();setView(['distributions','stacked','waveforms'][Number(e.key)-1])},true);
+const table=$('summaryRows');DATA.components.forEach((c,i)=>{const tr=document.createElement('tr');tr.dataset.ic=String(i);tr.innerHTML=`<td>${c.name}</td><td class="decisioncell"></td><td><b>${c.summary.n_runs} (${c.summary.n_runs_adjusted})</b></td><td>${c.summary.n_events} (${c.summary.n_events_adjusted})</td><td>${c.summary.n_gt1s} (${c.summary.n_gt1s_adjusted})</td><td>${c.summary.gap150_events}</td><td>${c.summary.gap500_events}</td>`;tr.addEventListener('click',()=>chooseComponent(i));table.appendChild(tr)});
+$('methodText').textContent=DATA.method||`At each lag (${DATA.lags_ms.join(', ')} ms), normalize source differences by their median and 1.4826 × MAD. A candidate occurs when any absolute delta Z reaches ${DATA.threshold}. Group threshold runs separated by at most ${DATA.merge_gap_ms} ms into one waveform event.`;
+
+function setup(id,h){const el=$(id),r=el.getBoundingClientRect(),w=Math.max(300,r.width),dpr=window.devicePixelRatio||1;el.width=Math.round(w*dpr);el.height=Math.round(h*dpr);el.style.height=h+'px';const ctx=el.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);ctx.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';return{ctx,w,h,left:64,right:w-20,top:13,bottom:h-29}}
+function xmap(t,a,b,p){return p.left+(t-a)/(b-a)*(p.right-p.left)}
+function ticks(a,b,count=7){const raw=(b-a)/count,pow=10**Math.floor(Math.log10(raw)),v=raw/pow,step=(v<1.5?1:v<3.5?2:v<7.5?5:10)*pow,out=[];for(let t=Math.ceil(a/step)*step;t<=b+step*.001;t+=step)out.push(t);return out}
+function grid(p,a,b,ymax,top=p.top,bottom=p.bottom,showTime=true){const q=p.ctx;q.lineWidth=1;q.strokeStyle='#e9eef2';q.fillStyle='#748391';q.textAlign='right';for(const z of [-ymax,0,ymax]){const y=bottom-(z+ymax)/(2*ymax)*(bottom-top);q.beginPath();q.moveTo(p.left,y);q.lineTo(p.right,y);q.stroke();q.fillText(Math.abs(z)>=10?z.toFixed(0):z.toFixed(1),p.left-9,y+3)}q.textAlign='center';for(const t of ticks(a,b)){const x=xmap(t,a,b,p);q.beginPath();q.moveTo(x,top);q.lineTo(x,bottom);q.stroke();if(showTime)q.fillText(fmt(t,(b-a)<=5?1:0),x,bottom+17)}q.strokeStyle='#d1dbe3';q.beginPath();q.moveTo(p.left,top);q.lineTo(p.left,bottom);q.lineTo(p.right,bottom);q.stroke()}
+function shadeEvents(p,c,a,b,top=p.top,bottom=p.bottom,colour='rgba(210,68,81,.10)'){const q=p.ctx;for(const e of c.events){if(e.end_s<a||e.start_s>b)continue;q.fillStyle=e.shared?'rgba(234,180,28,.19)':colour;const x=xmap(Math.max(a,e.start_s),a,b,p),x2=xmap(Math.min(b,e.end_s),a,b,p);q.fillRect(x,top,Math.max(1,x2-x),bottom-top)}}
+function highlight(p,a,b,top=p.top,bottom=p.bottom){const e=selected();if(!e||e.end_s<a||e.start_s>b)return;const q=p.ctx;q.fillStyle=e.shared?'rgba(234,180,28,.15)':'rgba(210,68,81,.12)';q.fillRect(xmap(Math.max(a,e.start_s),a,b,p),top,Math.max(1,xmap(Math.min(b,e.end_s),a,b,p)-xmap(Math.max(a,e.start_s),a,b,p)),bottom-top);q.save();q.setLineDash([4,4]);q.strokeStyle=e.shared?'#b08014':'#ac4852';q.beginPath();q.moveTo(xmap(e.peak_s,a,b,p),top);q.lineTo(xmap(e.peak_s,a,b,p),bottom);q.stroke();q.restore()}
+function extent(arr,a,b){let v=0;for(let i=Math.max(0,Math.floor(a*sf));i<Math.min(arr.length,Math.ceil(b*sf));i++)v=Math.max(v,Math.abs(arr[i]));return Math.max(3,v*1.13)}
+function drawSeries(p,get,i0,i1,a,b,ymax,top,bottom,colour,offset=0){const q=p.ctx,N=i1-i0,pixels=Math.max(1,Math.floor(p.right-p.left));q.strokeStyle=colour;q.lineWidth=1.05;q.beginPath();if(N>pixels*2){for(let px=0;px<pixels;px++){const k0=i0+Math.floor(px*N/pixels),k1=i0+Math.floor((px+1)*N/pixels);let lo=Infinity,hi=-Infinity;for(let i=k0;i<k1;i++){const v=get(i);if(v<lo)lo=v;if(v>hi)hi=v}const x=p.left+px+.5;q.moveTo(x,bottom-(lo+ymax)/(2*ymax)*(bottom-top));q.lineTo(x,bottom-(hi+ymax)/(2*ymax)*(bottom-top))}}else{let first=true;for(let i=i0;i<i1;i++){const x=xmap((i+offset)/sf,a,b,p),y=bottom-(get(i)+ymax)/(2*ymax)*(bottom-top);if(first){q.moveTo(x,y);first=false}else q.lineTo(x,y)}}q.stroke()}
+function scoreAt(c,k,j){return(c.signal[j+Math.round(DATA.lags_ms[k]*sf/1000)]-c.signal[j]-c.delta_medians[k])/c.delta_scales[k]}
+function thresholdRuns(c,a,b){const first=Math.max(0,Math.floor(a*sf)),last=Math.min(c.signal.length-1,Math.ceil(b*sf)),runs=[];let run=null;for(let t=first;t<=last;t++){let score=0;for(let k=0;k<DATA.lags_ms.length;k++){const lag=Math.round(DATA.lags_ms[k]*sf/1000),j=t-Math.floor(lag/2);if(j>=0&&j+lag<c.signal.length)score=Math.max(score,Math.abs(scoreAt(c,k,j)))}if(score>=DATA.threshold){if(!run)run={start:t,peak:t,score};if(score>run.score){run.peak=t;run.score=score}}else if(run){run.end=t-1;runs.push(run);run=null}}if(run){run.end=last;runs.push(run)}return runs}
+function runMarks(p,runs,a,b,top=p.top){const q=p.ctx;q.strokeStyle='#bd3a45';q.lineWidth=1;for(const r of runs){const x=xmap(r.peak/sf,a,b,p);q.beginPath();q.moveTo(x,top+1);q.lineTo(x,top+9);q.stroke()}}
+function voltageEndpoints(p,c,ymax){
+ const q=p.ctx,limit=ymax*c.source_scale*c.voltage_uV_per_source_unit;
+ const label=v=>(v>0?'+':'')+fmt(v,Math.abs(v)>=100?0:1)+' µV';
+ q.save();q.fillStyle='#62798a';q.font='10px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+ q.textAlign='right';q.fillText('µV at '+c.voltage_channel,p.right,10);
+ for(const [value,y,align] of [[limit,p.top+2,'right'],[-limit,p.bottom-2,'left']]){
+  q.save();q.translate(p.w-7,y);q.rotate(-Math.PI/2);q.textAlign=align;q.textBaseline='middle';q.fillText(label(value),0,0);q.restore();
+ }
+ q.restore();
+ const description=`Secondary endpoints: top ${label(limit)}, bottom ${label(-limit)}; ${c.name} contribution at ${c.voltage_channel}, relative to its median. This electrode has the largest absolute mixing weight.`;
+ q.canvas.setAttribute('aria-description',description);q.canvas.title=description;
+}
+function overview(){const c=current(),p=setup('overview',145),ym=extent(c.signal,0,duration);grid(p,0,duration,ym);shadeEvents(p,c,0,duration);drawSeries(p,i=>c.signal[i],0,c.signal.length,0,duration,ym,p.top,p.bottom,'#2b5371');const[a,b]=bounds(),q=p.ctx;q.fillStyle='rgba(39,126,186,.10)';q.fillRect(xmap(a,0,duration,p),p.top,Math.max(2,xmap(b,0,duration,p)-xmap(a,0,duration,p)),p.bottom-p.top);q.strokeStyle='#3082b9';q.strokeRect(xmap(a,0,duration,p),p.top,Math.max(2,xmap(b,0,duration,p)-xmap(a,0,duration,p)),p.bottom-p.top);q.fillStyle='#62798a';q.textAlign='left';q.fillText('robust units',p.left,10);voltageEndpoints(p,c,ym);$('overview')._plot=p}
+function waveform(){const c=current(),[a,b]=bounds(),p=setup('waveform',220),ym=extent(c.signal,a,b);grid(p,a,b,ym);shadeEvents(p,c,a,b);highlight(p,a,b);drawSeries(p,i=>c.signal[i],Math.floor(a*sf),Math.min(c.signal.length,Math.ceil(b*sf)),a,b,ym,p.top,p.bottom,'#214d6d');runMarks(p,thresholdRuns(c,a,b),a,b);p.ctx.fillStyle='#62798a';p.ctx.textAlign='left';p.ctx.fillText('robust source units',p.left,10);voltageEndpoints(p,c,ym)}
+function deltas(){const c=current(),[a,b]=bounds(),p=setup('deltas',530),rowH=98,q=p.ctx;for(let k=0;k<DATA.lags_ms.length;k++){const lag=Math.round(DATA.lags_ms[k]*sf/1000),offset=Math.floor(lag/2),i0=Math.max(0,Math.floor(a*sf)-offset),i1=Math.min(c.signal.length-lag,Math.ceil(b*sf)-offset),top=18+k*rowH,bottom=top+72;let ym=7.5;for(let j=i0;j<i1;j++)ym=Math.max(ym,Math.abs(scoreAt(c,k,j))*1.08);grid(p,a,b,ym,top,bottom,k===4);shadeEvents(p,c,a,b,top,bottom);highlight(p,a,b,top,bottom);q.save();q.setLineDash([5,4]);q.strokeStyle='#d4979f';for(const z of [-DATA.threshold,DATA.threshold]){const y=bottom-(z+ym)/(2*ym)*(bottom-top);q.beginPath();q.moveTo(p.left,y);q.lineTo(p.right,y);q.stroke()}q.restore();drawSeries(p,j=>scoreAt(c,k,j),i0,i1,a,b,ym,top,bottom,colors[k],offset);q.fillStyle=colors[k];q.textAlign='left';q.font='bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.fillText(DATA.lags_ms[k]+' ms',p.left+5,top+13);q.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';if(k<4){q.fillStyle='#8b98a2';q.textAlign='right';q.fillText('delta Z',p.right,bottom+13)}}}
+
+function updateText(){const c=current(),s=c.summary,e=selected(),[a,b]=bounds(),rejected=isRejected(c);$('componentStatus').textContent=`${c.name} · ${rejected?'Rejected':'Kept'} · ${decisionSource(c)} · ${c.iclabel_auto_exclude?'Initially flagged by ICLabel':'Not initially flagged by ICLabel'}`;$('componentStatus').classList.toggle('review-rejected',rejected);$('metrics').classList.toggle('iclabel-flagged',rejected);$('componentTopomap').src='topomaps/'+c.name+'.png?dots=black-green-ring-v1';$('componentTopomap').alt=c.name+' mixing-weight topography';$('previousComponent').disabled=state.ci===0;$('nextComponent').disabled=state.ci===DATA.components.length-1;$('metrics').innerHTML=`<div class="metric"><strong>${s.n_runs} (${s.n_runs_adjusted})</strong><span>original threshold runs</span></div><div class="metric"><strong>${fmt(s.n_runs/duration*60,1)} (${fmt(s.n_runs_adjusted/duration*60,1)})</strong><span>original threshold runs per minute</span></div><div class="metric"><strong>${s.n_events} (${s.n_events_adjusted})</strong><span>grouped waveform events</span></div><div class="metric"><strong>${fmt(s.max_duration_s,2)} s (${fmt(s.max_duration_s_adjusted,2)} s)</strong><span>longest grouped interval</span></div><div class="iclabel-row"><div class="metric"><strong>${fmt(c.iclabel_score*100,1)}% · ${c.iclabel_label}</strong><span>ICLabel</span></div><button id="rejectionToggle" type="button" class="rejection-toggle ${rejected?'rejected':'kept'}" aria-pressed="${rejected}">${rejected?'Rejected':'Kept'}<small>Click to ${rejected?'keep':'reject'} · ${rejected?'=':'-'} shortcut</small></button></div>`;$('overviewTitle').textContent=c.name+' · whole recording';$('detailTitle').textContent=c.name+' · source waveform';$('viewRange').textContent=`${fmt(a,3)}–${fmt(b,3)} s · ${fmt(b-a,2)} s view`;$('previous').disabled=!c.events.length||state.ei===0;$('next').disabled=!c.events.length||state.ei===c.events.length-1;const info=$('eventInfo');info.classList.toggle('empty',!e);info.classList.toggle('shared',Boolean(e?.shared));if(e){info.innerHTML=`<strong>Event ${state.ei+1} / ${c.events.length} · ${e.shape||'unclassified'}</strong><span>${fmt(e.start_s,3)}–${fmt(e.end_s,3)} s</span><span>Duration ${fmt(e.end_s-e.start_s,3)} s</span><span>Peak |Z| ${fmt(e.peak_score,1)} at ${e.peak_lag_ms} ms</span><span>${e.n_runs} threshold run${e.n_runs===1?'':'s'}</span><span><b>${e.shared?'Shared':'Below sharing threshold'}: ${e.context_count}/${DATA.context.n_components} ICs (${fmt(e.context_fraction*100,1)}%)</b></span><span>Pre / post level ${fmt(e.pre_level,1)} / ${fmt(e.post_level,1)}</span><span>Median contrast Z ${fmt(e.median_contrast_z,1)} · fast Z ${fmt(e.fast_z,1)}</span><details><summary>ICs with an event interval covering this peak</summary><div>${e.context_components.map(id=>'ICA'+String(id).padStart(3,'0')).join(', ')}</div></details>`}else info.innerHTML='<strong>Free time inspection</strong><span>Select an event to show its metrics, or continue inspecting any time using the recording overview.</span>';document.querySelectorAll('tr[data-ic]').forEach(tr=>tr.classList.toggle('active',Number(tr.dataset.ic)===state.ci))}
+$('metrics').addEventListener('click',e=>{if(e.target.closest('#rejectionToggle'))setRejected(!isRejected(current()))});
+const distributionPopulation=DATA.components.filter(c=>!c.iclabel_auto_exclude);
+function distributionBins(values,binWidth,selectedValue){const upper=(Math.floor(Math.max(...values,selectedValue)/binWidth)+1)*binWidth,bins=Array(upper/binWidth).fill(0);for(const value of values)bins[Math.floor(value/binWidth)]++;return{upper,bins}}
+function drawDistribution(id,values,binWidth,selectedValue){
+ const p=setup(id,280),q=p.ctx,{upper,bins}=distributionBins(values,binWidth,selectedValue);p.left=46;p.top=29;p.bottom=235;
+ const ymax=Math.max(5,Math.ceil(Math.max(...bins)/5)*5),x=v=>p.left+v/upper*(p.right-p.left),y=v=>p.bottom-v/ymax*(p.bottom-p.top);
+ q.strokeStyle='#e9eef2';q.fillStyle='#748391';q.textAlign='right';q.lineWidth=1;
+ for(const n of ticks(0,ymax,5)){q.beginPath();q.moveTo(p.left,y(n));q.lineTo(p.right,y(n));q.stroke();q.fillText(String(n),p.left-9,y(n)+3)}
+ q.fillStyle='#8cacc4';bins.forEach((n,i)=>{if(n)q.fillRect(x(i*binWidth)+1,y(n),Math.max(1,x((i+1)*binWidth)-x(i*binWidth)-2),p.bottom-y(n))});
+ q.fillStyle='#748391';q.textAlign='center';for(const n of ticks(0,upper,5))q.fillText(String(Math.round(n)),x(n),p.bottom+17);
+ q.strokeStyle='#d1dbe3';q.beginPath();q.moveTo(p.left,p.top);q.lineTo(p.left,p.bottom);q.lineTo(p.right,p.bottom);q.stroke();
+
+ q.strokeStyle='#167d80';q.lineWidth=2;q.beginPath();q.moveTo(x(selectedValue),p.top);q.lineTo(x(selectedValue),p.bottom);q.stroke();
+ q.fillStyle='#62798a';q.textAlign='left';q.fillText('IC count',p.left,14);q.textAlign='center';q.fillText('Adjusted count',(p.left+p.right)/2,273);
+ $(id).setAttribute('aria-label',`${values.length} ICLabel-retained ICs, ${binWidth}-count bins. Selected ${current().name}: ${selectedValue}.`);
+}
+function distributionPosition(c,key){const value=c.summary[key],above=distributionPopulation.filter(x=>x.summary[key]>value).length,atOrBelow=distributionPopulation.length-above,ties=distributionPopulation.filter(x=>x.summary[key]===value).length;return`${c.iclabel_auto_exclude?'Initially rejected by ICLabel; outside reference population':`${ties>1?'Tied rank':'Rank'} ${above+1} / ${distributionPopulation.length} (highest first)`} · ${atOrBelow} / ${distributionPopulation.length} reference ICs at or below this count`}
+function renderDistributions(){
+ if($('distributionView').hidden)return;
+ const c=current(),runs=distributionPopulation.map(x=>x.summary.n_runs_adjusted),groups=distributionPopulation.map(x=>x.summary.n_events_adjusted);
+ $('distributionRunsSelected').textContent=`${c.name} · ${c.summary.n_runs_adjusted} runs`;$('distributionRunsPosition').textContent=distributionPosition(c,'n_runs_adjusted');
+ $('distributionGroupsSelected').textContent=`${c.name} · ${c.summary.n_events_adjusted} groups`;$('distributionGroupsPosition').textContent=distributionPosition(c,'n_events_adjusted');
+
+ drawDistribution('distributionRuns',runs,100,c.summary.n_runs_adjusted);drawDistribution('distributionGroups',groups,25,c.summary.n_events_adjusted);
+}
+
+
+let stackLastFocusedIC=null;
+function setView(view){
+ const enteringStacked=view==='stacked'&&state.view!=='stacked';
+ state.view=view;document.querySelector('main').classList.toggle('stacked-active',view==='stacked');
+ closeComponentList();
+ const waveforms=view==='waveforms';
+ const card=document.querySelector('.component-card');card.hidden=view==='stacked';card.classList.toggle('distribution-mode',view==='distributions');
+ $('waveformView').hidden=!waveforms;$('distributionView').hidden=view!=='distributions';$('stackedView').hidden=view!=='stacked';
+ for(const [id,name] of [['distributionTab','distributions'],['stackedTab','stacked'],['waveformTab','waveforms']]){
+  $(id).setAttribute('aria-selected',String(view===name));$(id).tabIndex=view===name?0:-1;
+ }
+ if(enteringStacked&&stackLastFocusedIC!==state.ci){jumpStackedToComponent(state.ci);stackLastFocusedIC=state.ci;}
+ render();
+}
+for(const [id,view]of[['distributionTab','distributions'],['stackedTab','stacked'],['waveformTab','waveforms']])$(id).addEventListener('click',()=>setView(view));
+document.querySelector('.view-tabs').addEventListener('keydown',e=>{
+ if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;
+ e.preventDefault();e.stopPropagation();
+ const views=['distributions','stacked','waveforms'],tabs=['distributionTab','stackedTab','waveformTab'],i=views.indexOf(state.view),next=e.key==='Home'?0:e.key==='End'?2:(i+(e.key==='ArrowRight'?1:2))%3;
+ setView(views[next]);$(tabs[next]).focus();
+});
+
+const stackState={first:0,count:20,start:0,seconds:40,gain:1};
+let stackLoadToken=0,stackFrame=0,stackVerticalPixels=0,stackLastWheel=0,stackScrollDrag=null;
+const stackEpoch=DATA.epoch_duration_s;
+function clampStacked(){
+ stackState.count=Math.max(1,Math.min(DATA.components.length,Math.round(stackState.count)));
+ stackState.first=Math.max(0,Math.min(DATA.components.length-stackState.count,Math.round(stackState.first)));
+ stackState.seconds=Math.min(duration,Math.max(stackEpoch,Math.ceil(stackState.seconds/stackEpoch)*stackEpoch));
+ stackState.start=Math.max(0,Math.min(duration-stackState.seconds,stackState.start));
+}
+function getStackedPosition(){return{...stackState,end:stackState.start+stackState.seconds,epochs:Math.round(stackState.seconds/stackEpoch)}}
+function jumpStackedToComponent(index){
+ if(index<stackState.first||index>=stackState.first+stackState.count)stackState.first=index;
+ clampStacked();
+}
+function queueStacked(){if(!stackFrame)stackFrame=requestAnimationFrame(()=>{stackFrame=0;renderStacked()})}
+function syncStackedControls(){
+ $('stackCount').value=stackState.count;$('stackFirst').value=stackState.first;
+ $('stackFirst').max=DATA.components.length-stackState.count;$('stackSeconds').value=stackState.seconds;
+ const end=stackState.start+stackState.seconds,last=stackState.first+stackState.count-1;
+ $('stackRange').textContent=`${DATA.components[stackState.first].name}–${DATA.components[last].name} · ${fmt(stackState.start,2)}–${fmt(end,2)} s`;
+ $('stackEpochs').textContent=`${stackState.seconds} s · ${Math.round(stackState.seconds/stackEpoch)} epochs × ${stackEpoch} s · common scale ${fmt(DATA.source_display_scale/stackState.gain,2)} ICA units / half row`;
+ const scroll=$('stackTimeScroll'),width=scroll.clientWidth,thumb=$('stackTimeThumb');
+ const thumbWidth=Math.min(width,Math.max(18,width*stackState.seconds/duration));
+ thumb.style.width=thumbWidth+'px';
+ thumb.style.left=(duration>stackState.seconds?stackState.start/(duration-stackState.seconds)*(width-thumbWidth):0)+'px';
+ scroll.setAttribute('aria-valuemax',String(duration-stackState.seconds));scroll.setAttribute('aria-valuenow',String(stackState.start));scroll.setAttribute('aria-valuetext',`${fmt(stackState.start,2)} seconds`);
+}
+function drawStacked(){
+ const canvas=$('stackedCanvas'),w=canvas.getBoundingClientRect().width;
+ if(!w)return;
+ const h=Math.max(320,Math.min(850,window.innerHeight-canvas.getBoundingClientRect().top-68)),dpr=window.devicePixelRatio||1;
+ canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);canvas.style.height=h+'px';
+ const q=canvas.getContext('2d');q.scale(dpr,dpr);q.fillStyle='#fff';q.fillRect(0,0,w,h);
+ const left=79,right=w-11,top=13,bottom=h-29,row=(bottom-top)/stackState.count;
+ const start=stackState.start,end=start+stackState.seconds,i0=Math.round(start*sf),i1=Math.min(Math.round(end*sf),Math.round(duration*sf));
+ const x=t=>left+(t-start)/stackState.seconds*(right-left),pixels=Math.max(1,Math.floor(right-left));
+ q.save();q.beginPath();q.rect(left,top,right-left,bottom-top);q.clip();
+ q.lineWidth=.5;q.strokeStyle='rgba(120,130,140,.50)';q.setLineDash([1,4]);q.beginPath();
+ for(let t=Math.ceil(start/stackEpoch)*stackEpoch;t<end;t+=stackEpoch){const xx=x(t);q.moveTo(xx,top);q.lineTo(xx,bottom)}q.stroke();q.setLineDash([]);
+ for(let slot=0;slot<stackState.count;slot++){
+  const c=DATA.components[stackState.first+slot],signal=c.signal;
+  if(!signal)continue;
+  let mean=0;for(let i=i0;i<i1;i++)mean+=signal[i];mean/=i1-i0;
+  const center=top+(slot+.5)*row,scale=c.source_scale*stackState.gain/(2*DATA.source_display_scale)*row;
+  const y=v=>center-(v-mean)*scale;
+  q.strokeStyle=isRejected(c)?'rgba(213,132,151,.38)':'#18232b';q.lineWidth=.8;q.beginPath();
+  if(i1-i0>pixels*2){
+   for(let px=0;px<pixels;px++){
+    const a=i0+Math.floor(px*(i1-i0)/pixels),b=i0+Math.floor((px+1)*(i1-i0)/pixels);
+    let low=Infinity,high=-Infinity;for(let i=a;i<b;i++){if(signal[i]<low)low=signal[i];if(signal[i]>high)high=signal[i]}
+    q.moveTo(left+px+.5,y(low));q.lineTo(left+px+.5,y(high));
+   }
+  }else{
+   for(let i=i0;i<i1;i++){const xx=x(i/sf),yy=y(signal[i]);if(i===i0)q.moveTo(xx,yy);else q.lineTo(xx,yy)}
+  }
+  q.stroke();
+ }
+ q.restore();q.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.textAlign='right';
+ for(let slot=0;slot<stackState.count;slot++){
+  const c=DATA.components[stackState.first+slot],center=top+(slot+.5)*row;
+  q.fillStyle=isRejected(c)?'rgba(193,103,125,.48)':'#253542';q.fillText(c.name,left-9,center+3.5);
+ }
+ q.fillStyle='#748391';q.textAlign='center';
+ for(const t of ticks(start,end,10))q.fillText(fmt(t,stackState.seconds<=10?1:0),x(t),bottom+17);
+ q.strokeStyle='#dce4eb';q.lineWidth=.7;q.beginPath();q.moveTo(left,top);q.lineTo(left,bottom);q.lineTo(right,bottom);q.stroke();
+ canvas._stackPlot={left,right,top,bottom,row};
+ canvas.setAttribute('aria-label',`${DATA.components[stackState.first].name} through ${DATA.components[stackState.first+stackState.count-1].name}, ${fmt(start,2)} to ${fmt(end,2)} seconds, native ICA activations on a common scale. Click a label to toggle rejection.`);
+}
+async function renderStacked(){
+ if($('stackedView').hidden)return;
+ clampStacked();syncStackedControls();drawStacked();
+ const token=++stackLoadToken,visible=DATA.components.slice(stackState.first,stackState.first+stackState.count),missing=visible.filter(c=>!c.signal);
+ if(!missing.length){$('stackStatus').textContent='Native ICA activations · common amplitude scale · click an ICA label to change its decision.';return}
+ $('stackStatus').textContent=`Loading ${missing.length} component waveform${missing.length===1?'':'s'}…`;
+ try{
+  await Promise.all(missing.map(ensureSignal));
+  if(token!==stackLoadToken||$('stackedView').hidden)return;
+  drawStacked();$('stackStatus').textContent='Native ICA activations · common amplitude scale · click an ICA label to change its decision.';
+ }catch(error){if(token===stackLoadToken)$('stackStatus').textContent=error.message}
+}
+for(const[id,key]of[['stackCount','count'],['stackFirst','first'],['stackSeconds','seconds']]){
+ $(id).addEventListener('change',()=>{const value=Number($(id).value);if(Number.isFinite(value)&&value>=(key==='first'?0:1))stackState[key]=value;clampStacked();renderStacked()});
+}
+$('stackSmaller').addEventListener('click',()=>{stackState.gain/=1.25;renderStacked()});
+$('stackLarger').addEventListener('click',()=>{stackState.gain*=1.25;renderStacked()});
+function moveStackedScrollbar(clientX,offset){
+ const scroll=$('stackTimeScroll'),r=scroll.getBoundingClientRect(),thumb=$('stackTimeThumb');
+ const travel=scroll.clientWidth-parseFloat(thumb.style.width);
+ stackState.start=travel>0?(clientX-r.left-offset)/travel*(duration-stackState.seconds):0;
+ clampStacked();queueStacked();
+}
+$('stackTimeScroll').addEventListener('pointerdown',e=>{
+ if(e.button!==0)return;e.preventDefault();
+ const scroll=$('stackTimeScroll'),thumb=$('stackTimeThumb'),r=scroll.getBoundingClientRect();
+ const offset=e.target===thumb?e.clientX-r.left-parseFloat(thumb.style.left):parseFloat(thumb.style.width)/2;
+ stackScrollDrag={id:e.pointerId,offset};scroll.setPointerCapture(e.pointerId);scroll.classList.add('dragging');scroll.focus();
+ moveStackedScrollbar(e.clientX,offset);
+});
+$('stackTimeScroll').addEventListener('pointermove',e=>{
+ if(stackScrollDrag&&e.pointerId===stackScrollDrag.id)moveStackedScrollbar(e.clientX,stackScrollDrag.offset);
+});
+for(const name of ['pointerup','pointercancel','lostpointercapture'])$('stackTimeScroll').addEventListener(name,()=>{
+ stackScrollDrag=null;$('stackTimeScroll').classList.remove('dragging');
+});
+$('stackTimeScroll').addEventListener('wheel',e=>{
+ e.preventDefault();const unit=e.deltaMode===1?16:e.deltaMode===2?200:1;
+ const delta=(Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY)*unit;
+ stackState.start+=delta/Math.max(1,$('stackTimeScroll').clientWidth)*stackState.seconds;
+ clampStacked();queueStacked();
+},{passive:false});
+$('stackTimeScroll').addEventListener('keydown',e=>{
+ if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();e.stopPropagation();
+ stackState.start=e.key==='Home'?0:e.key==='End'?duration-stackState.seconds:stackState.start+(e.key==='ArrowRight'?1:-1)*stackEpoch;clampStacked();renderStacked();
+});
+$('stackedCanvas').addEventListener('wheel',e=>{
+ e.preventDefault();const unit=e.deltaMode===1?16:e.deltaMode===2?200:1,dx=e.deltaX*unit,dy=e.deltaY*unit,now=performance.now();
+ if(now-stackLastWheel>180)stackVerticalPixels=0;stackLastWheel=now;
+ if(Math.abs(dx)>Math.abs(dy)||e.shiftKey){
+  const delta=e.shiftKey&&Math.abs(dx)<Math.abs(dy)?dy:dx;
+  stackState.start+=delta/Math.max(1,$('stackedCanvas').clientWidth-90)*stackState.seconds;
+ }else{
+  stackVerticalPixels+=dy;const rows=Math.trunc(stackVerticalPixels/30);stackVerticalPixels-=rows*30;stackState.first+=rows;
+ }
+ clampStacked();queueStacked();
+},{passive:false});
+$('stackedCanvas').addEventListener('click',e=>{
+ const canvas=$('stackedCanvas'),p=canvas._stackPlot,r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+ if(!p||x>=p.left||y<p.top||y>=p.bottom)return;
+ const slot=Math.floor((y-p.top)/p.row),c=DATA.components[stackState.first+slot];
+ if(c)toggleRejected(c.id);
+});
+$('stackedCanvas').addEventListener('mousemove',e=>{
+ const canvas=$('stackedCanvas'),p=canvas._stackPlot,r=canvas.getBoundingClientRect();
+ canvas.style.cursor=p&&e.clientX-r.left<p.left&&e.clientY-r.top>=p.top&&e.clientY-r.top<p.bottom?'pointer':'default';
+});
+
+function handleStackedKey(e){
+ if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))return;
+ e.preventDefault();
+ if(e.key==='ArrowUp'||e.key==='ArrowDown')stackState.first+=e.key==='ArrowDown'?1:-1;
+ else stackState.start+=(e.key==='ArrowRight'?1:-1)*stackEpoch;
+ clampStacked();renderStacked();
+}
+
+
+function render(){updateText();if(state.view==='stacked'){renderStacked();return;}if(state.view==='distributions'){renderDistributions();return;}if(!current().signal){for(const[id,h]of[['overview',145],['waveform',220],['deltas',530]]){const p=setup(id,h);p.ctx.fillStyle=state.loadError?'#a82f3d':'#62798a';p.ctx.textAlign='left';p.ctx.fillText(state.loadError||'Loading '+current().name+' waveform…',p.left,35)}$('overview')._plot=null;return}overview();waveform();deltas()}
+$('overview').addEventListener('click',e=>{const p=$('overview')._plot,r=e.target.getBoundingClientRect(),x=e.clientX-r.left;if(!p)return;if(x<p.left||x>p.right)return;state.center=(x-p.left)/(p.right-p.left)*duration;state.width=Number($('window').value);state.ei=-1;$('event').value='-1';render()});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(render,120)});
+updatePersistence();updateReview();setView(state.view);
+const queryIC=new URLSearchParams(location.search).get('ic'),requested=queryIC===null?-1:DATA.components.findIndex(c=>c.id===Number(queryIC.replace(/^ICA/i,'')));
+chooseComponent(requested>=0?requested:0);
+</script>
+</body>
+</html>

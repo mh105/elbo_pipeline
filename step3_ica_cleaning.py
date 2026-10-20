@@ -14,6 +14,7 @@ The input Raw is not modified. Apply the returned ICA directly to the original
 """
 
 import warnings
+from pathlib import Path
 
 from IPython.display import display
 import mne
@@ -154,6 +155,11 @@ def exclude_ica_components(probabilities, iclabel_threshold=0.75):
                            probabilities[components, winners])
     component_table["iclabel_auto_exclude"] = component_table["component"].isin(exclude_indices)
     component_table["excluded"] = component_table["component"].isin(exclude_indices)
+    component_table.attrs.update(
+        iclabel_threshold=float(iclabel_threshold),
+        automatic_exclusion_classes=list(ICLABEL_CLASSES[1:6]),
+        automatic_exclusion_comparison=">",
+    )
     display(component_table.round(3))
     return exclude_indices, component_table
 
@@ -199,9 +205,61 @@ def fit_ica(
     return ica, fit_epochs
 
 
+def prepare_ica_viewer(
+    ica,
+    fit_epochs,
+    raw_bads,
+    *,
+    eeg_path,
+    reference_channel,
+    iclabel_table,
+):
+    """Save this fit and prepare its subject-local interactive review directory.
+
+    Return a Path under eeg_path.parent / '.ica_viewer'. Repeating preparation
+    for the same fit preserves its saved exclusions. The input ICA, fitting
+    epochs and Raw are not modified, and ICA is neither refitted nor applied.
+    """
+    from step3_ica_viewer.storage import prepare_bundle
+
+    return prepare_bundle(
+        ica, fit_epochs, raw_bads,
+        eeg_path=eeg_path,
+        reference_channel=reference_channel,
+        iclabel_table=iclabel_table,
+    )
+
+
+def open_ica_viewer(viewer_dir, *, open_browser=True):
+    """Serve a prepared viewer with disk autosaving; return its local URL.
+
+    The local service runs in the background while this Python process remains
+    alive. Reopening the same directory restores its saved review decisions.
+    """
+    from step3_ica_viewer.server import open_viewer
+
+    url = open_viewer(viewer_dir, open_browser=open_browser)
+    print(f"ICA viewer: {url}")
+    return url
+
+
+def load_ica_exclusions(viewer_dir, *, ica):
+    """Return the saved final exclusions after validating the target ICA.
+
+    Assign the result to ica.exclude to replace its previous contents, including
+    when the saved list is empty. This helper does not modify or apply ICA.
+    """
+    from step3_ica_viewer.storage import load_exclusions
+
+    return load_exclusions(viewer_dir, ica=ica)
+
+
 if __name__ == "__main__":
     # %% Load example data
-    raw = load_raw_data("sub-03")
+    subject_id = "sub-03"
+    eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
+                / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
+    raw = load_raw_data(subject_id)
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
     bad_ch_report = {}
@@ -232,12 +290,20 @@ if __name__ == "__main__":
     )
 
     # %% Fit ICA and select artifact components
-    ica, fit_epochs = fit_ica(raw_bads, reference_channel)
+    ica, fit_epochs, iclabel_table = fit_ica(
+        raw_bads, reference_channel, return_details=True,
+    )
 
-    # Manual exclusion appears to be needed for now
-    ica.plot_components()
-    # ica.plot_sources(fit_epochs, block=True)
-    # ica.plot_sources(raw_bads, block=True)
+    # %% Prepare and open the interactive viewer; each choice autosaves to JSON
+    viewer_dir = prepare_ica_viewer(
+        ica, fit_epochs, raw_bads,
+        eeg_path=eeg_path,
+        reference_channel=reference_channel,
+        iclabel_table=iclabel_table,
+    )
+    open_ica_viewer(viewer_dir)
 
-    ica.exclude = sorted(set(int(index) for index in ica.exclude))
+    # %% Run this cell after reviewing; loading replaces, rather than unions, exclusions
+    input("Review ICs in the viewer, then press Enter to load the saved exclusions: ")
+    ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
     print(f"Final excluded ICA components: {ica.exclude}")
