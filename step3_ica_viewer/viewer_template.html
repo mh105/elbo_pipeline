@@ -107,10 +107,10 @@ main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}m
    <div class="control"><label>Amplitude</label><div class="buttonrow"><button id="stackSmaller" type="button" title="Decrease amplitude for all ICs">−</button><button id="stackLarger" type="button" title="Increase amplitude for all ICs">+</button></div></div>
    <div class="stacked-readout"><strong id="stackRange"></strong><span id="stackEpochs"></span></div>
   </div>
-  <div class="stacked-canvas-wrap"><canvas id="stackedCanvas" aria-label="Native ICA activation traces; click an ICA label to toggle rejection"></canvas></div>
+  <div class="stacked-canvas-wrap"><canvas id="stackedCanvas" aria-label="Native ICA activation traces; click a trace row to inspect that IC and time, or an ICA label to toggle rejection"></canvas></div>
   <div class="stacked-scroll" id="stackTimeScroll" tabindex="0" role="scrollbar" aria-label="Recording time" aria-orientation="horizontal" aria-valuemin="0"><div id="stackTimeThumb"></div></div>
   <div class="stacked-status" id="stackStatus" role="status" aria-live="polite"></div>
-  <div class="help">Scroll ↑ / ↓ over the traces to change ICs; swipe ← / → to pan time. The bottom scrollbar moves through the recording. Click an ICA label to toggle rejection; rejected traces and labels are faint pink. All ICs share one amplitude scale in native ICA activation units, with each visible trace centered by its mean. Dotted gray lines mark epoch boundaries.</div>
+  <div class="help">Scroll ↑ / ↓ over the traces to change ICs; swipe ← / → to pan time. The bottom scrollbar moves through the recording. Click a trace row to open that IC at the clicked time in IC waveforms. Click an ICA label to toggle rejection; rejected traces and labels are faint pink. All ICs share one amplitude scale in native ICA activation units, with each visible trace centered by its mean. Dotted gray lines mark epoch boundaries.</div>
  </section>
 </section>
 
@@ -424,18 +424,18 @@ function drawStacked(){
  for(const t of ticks(start,end,10))q.fillText(fmt(t,stackState.seconds<=10?1:0),x(t),bottom+17);
  q.strokeStyle='#dce4eb';q.lineWidth=.7;q.beginPath();q.moveTo(left,top);q.lineTo(left,bottom);q.lineTo(right,bottom);q.stroke();
  canvas._stackPlot={left,right,top,bottom,row};
- canvas.setAttribute('aria-label',`${DATA.components[stackState.first].name} through ${DATA.components[stackState.first+stackState.count-1].name}, ${fmt(start,2)} to ${fmt(end,2)} seconds, native ICA activations on a common scale. Click a label to toggle rejection.`);
+ canvas.setAttribute('aria-label',`${DATA.components[stackState.first].name} through ${DATA.components[stackState.first+stackState.count-1].name}, ${fmt(start,2)} to ${fmt(end,2)} seconds, native ICA activations on a common scale. Click a trace row to inspect that IC and time, or a label to toggle rejection.`);
 }
 async function renderStacked(){
  if($('stackedView').hidden)return;
  clampStacked();syncStackedControls();drawStacked();
  const token=++stackLoadToken,visible=DATA.components.slice(stackState.first,stackState.first+stackState.count),missing=visible.filter(c=>!c.signal);
- if(!missing.length){$('stackStatus').textContent='Native ICA activations · common amplitude scale · click an ICA label to change its decision.';return}
+ if(!missing.length){$('stackStatus').textContent='Native ICA activations · common amplitude scale · click a trace row to inspect; click an ICA label to change its decision.';return}
  $('stackStatus').textContent=`Loading ${missing.length} component waveform${missing.length===1?'':'s'}…`;
  try{
   await Promise.all(missing.map(ensureSignal));
   if(token!==stackLoadToken||$('stackedView').hidden)return;
-  drawStacked();$('stackStatus').textContent='Native ICA activations · common amplitude scale · click an ICA label to change its decision.';
+  drawStacked();$('stackStatus').textContent='Native ICA activations · common amplitude scale · click a trace row to inspect; click an ICA label to change its decision.';
  }catch(error){if(token===stackLoadToken)$('stackStatus').textContent=error.message}
 }
 for(const[id,key]of[['stackCount','count'],['stackFirst','first'],['stackSeconds','seconds']]){
@@ -485,13 +485,18 @@ $('stackedCanvas').addEventListener('wheel',e=>{
 },{passive:false});
 $('stackedCanvas').addEventListener('click',e=>{
  const canvas=$('stackedCanvas'),p=canvas._stackPlot,r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
- if(!p||x>=p.left||y<p.top||y>=p.bottom)return;
- const slot=Math.floor((y-p.top)/p.row),c=DATA.components[stackState.first+slot];
- if(c)toggleRejected(c.id);
+ if(!p||x<0||x>p.right||y<p.top||y>=p.bottom)return;
+ const slot=Math.floor((y-p.top)/p.row),index=stackState.first+slot,c=DATA.components[index];
+ if(!c)return;
+ if(x<p.left){toggleRejected(c.id);return;}
+ chooseComponent(index);
+ state.center=stackState.start+(x-p.left)/(p.right-p.left)*stackState.seconds;
+ state.width=Number($('window').value);state.ei=-1;$('event').value='-1';
+ setView('waveforms');
 });
 $('stackedCanvas').addEventListener('mousemove',e=>{
  const canvas=$('stackedCanvas'),p=canvas._stackPlot,r=canvas.getBoundingClientRect();
- canvas.style.cursor=p&&e.clientX-r.left<p.left&&e.clientY-r.top>=p.top&&e.clientY-r.top<p.bottom?'pointer':'default';
+ canvas.style.cursor=p&&e.clientX-r.left>=0&&e.clientX-r.left<=p.right&&e.clientY-r.top>=p.top&&e.clientY-r.top<p.bottom?'pointer':'default';
 });
 
 function handleStackedKey(e){

@@ -41,6 +41,7 @@ This is the multi-component, MNE-like review surface.
 | Horizontal swipe | Pan retained-data time; use the dominant horizontal wheel direction, or Shift with vertical wheel input. |
 | Bottom scrollbar | Always-visible track and proportional thumb; click, drag, wheel, Home/End, and left/right keys move through the full retained duration. |
 | IC-label click | Toggle that component's rejection using the shared current decision set. |
+| Trace-row click | Open Tab 3 with that row's IC selected and free time inspection centered at the clicked time. Leave rejection decisions and the stacked view's scrolled range unchanged. |
 
 Plot native ICA activations, not per-component robust-normalized traces. Subtract each displayed trace's visible-window mean and use a shared amplitude scale. Native ICA activation units are arbitrary units (AU), not sensor µV. Undo the stored robust scaling before plotting; do not use a separate display SD or MAD per IC.
 
