@@ -35,9 +35,9 @@ This is the multi-component, MNE-like review surface.
 
 | Control or behavior | Contract |
 | --- | --- |
-| ICs displayed | Default `min(20, n_components)`; positive integer, clamped to available components. |
-| First IC | Zero-based component index; clamp so the requested number of traces fits. |
-| Seconds displayed | Default 40 s, limited to retained duration. Round up to whole fitting epochs; display the effective seconds and epoch count. |
+| ICs displayed | Default `n_components` (all ICs); positive integer, clamped to available components. |
+| First IC | Default 0 (ICA000); zero-based component index, clamped so the requested number of traces fits. |
+| Seconds displayed | Default 60 s, limited to retained duration. Round up to whole fitting epochs; display the effective seconds and epoch count. |
 | Amplitude | One common scale for all ICs. Initial MNE-style scale is 5 native ICA AU per half-row. Buttons multiply/divide display gain by 1.25. |
 | Vertical trackpad scroll | Move up/down through ICs, rather than scrolling the page while the pointer is over the traces. Prototype sensitivity is 30 wheel pixels per IC. |
 | Horizontal swipe | Pan retained-data time; use the dominant horizontal wheel direction, or Shift with vertical wheel input. |

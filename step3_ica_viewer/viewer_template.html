@@ -102,9 +102,9 @@ main.stacked-active{max-width:none;padding-bottom:16px}main.stacked-active>heade
 <section id="stackedView" role="tabpanel" aria-labelledby="stackedTab" hidden>
  <section class="card stacked-card">
   <div class="stacked-controls">
-   <div class="control"><label for="stackCount">ICs displayed</label><input id="stackCount" type="number" min="1" step="1" value="20"></div>
+   <div class="control"><label for="stackCount">ICs displayed</label><input id="stackCount" type="number" min="1" step="1"></div>
    <div class="control"><label for="stackFirst">First IC</label><input id="stackFirst" type="number" min="0" max="99" step="1" value="0"></div>
-   <div class="control"><label for="stackSeconds">Seconds displayed</label><input id="stackSeconds" type="number" min="2" step="2" value="40"></div>
+   <div class="control"><label for="stackSeconds">Seconds displayed</label><input id="stackSeconds" type="number" min="2" step="2" value="60"></div>
    <div class="control"><label>Amplitude</label><div class="buttonrow"><button id="stackSmaller" type="button" title="Decrease amplitude for all ICs">−</button><button id="stackLarger" type="button" title="Increase amplitude for all ICs">+</button></div></div>
    <div class="stacked-readout"><strong id="stackRange"></strong><span id="stackEpochs"></span></div>
   </div>
@@ -152,7 +152,7 @@ $('sharedLegend').textContent=`Shared event: >25% (≥${DATA.context.min_compone
 const initialPopulation=DATA.components.length-DATA.iclabel_excluded.length;
 $('distributionPopulationDescription').textContent=initialPopulation?`Histograms use the fixed population of ${initialPopulation} ICs without an initial ICLabel flag. Manual decisions do not change this reference population. Counts exclude shared grouped events.`:'No ICs remain in the initial ICLabel-retained reference population.';
 for(const element of document.querySelectorAll('.populationLegend'))element.textContent=`${initialPopulation} ICLabel-retained ICs`;
-$('stackCount').max=DATA.components.length;$('stackSeconds').max=duration;
+$('stackCount').max=DATA.components.length;$('stackCount').value=DATA.components.length;$('stackSeconds').max=duration;
 const segmentEnds=new Int32Array(Math.round(duration*sf));
 for(const [start,end] of DATA.segments)segmentEnds.fill(end,start,end);
 const breakSamples=new Set(DATA.discontinuities.map(g=>g.retained_sample));
@@ -391,7 +391,7 @@ document.querySelector('.view-tabs').addEventListener('keydown',e=>{
  setView(views[next]);$(tabs[next]).focus();
 });
 
-const stackState={first:0,count:Math.min(20,DATA.components.length),start:0,seconds:Math.min(40,duration),gain:1};
+const stackState={first:0,count:DATA.components.length,start:0,seconds:Math.min(60,duration),gain:1};
 let stackLoadToken=0,stackFrame=0,stackVerticalPixels=0,stackLastWheel=0,stackScrollDrag=null;
 const stackEpoch=DATA.epoch_duration_s;
 function clampStacked(){
