@@ -343,7 +343,7 @@ def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-03"
+    subject_id = "sub-10"
     eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = load_raw_data(subject_id)
