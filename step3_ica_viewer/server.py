@@ -5,10 +5,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
-from .storage import ReviewConflict, ensure_cache, read_review, save_review
+from .storage import (ReviewConflict, create_review_version, ensure_cache,
+                      read_review, save_review, set_stable_review_version)
 
 
 _SERVERS = {}
@@ -54,7 +55,11 @@ class _ViewerHandler(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/review":
             try:
-                self._json(200, read_review(self.viewer_dir))
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(query) - {"version"} or len(query.get("version", [])) > 1:
+                    raise ValueError("Send a single labeling version only.")
+                version = query["version"][0] if "version" in query else None
+                self._json(200, read_review(self.viewer_dir, version=version))
             except (ValueError, OSError, KeyError, TypeError) as error:
                 self._json(400, {"error": str(error)})
         elif path.startswith("/api/"):
@@ -76,21 +81,47 @@ class _ViewerHandler(SimpleHTTPRequestHandler):
         super().do_HEAD()
 
     def do_PUT(self):
+        self._mutate_review()
+
+    def do_POST(self):
+        self._mutate_review()
+
+    def _mutate_review(self):
         if not self._allowed():
             return
-        if urlsplit(self.path).path != "/api/review":
+        path = urlsplit(self.path).path
+        routes = {("PUT", "/api/review"), ("PUT", "/api/review/stable"),
+                  ("POST", "/api/review/versions")}
+        if (self.command, path) not in routes:
             self._json(404, {"error": "Unknown review API route."})
             return
+        version = None
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 65536:
                 raise ValueError("Invalid review request length.")
             request = json.loads(self.rfile.read(length))
-            if not isinstance(request, dict) or set(request) != {"exclude", "expected_revision"}:
-                raise ValueError("Send exclude and expected_revision only.")
-            review = save_review(self.viewer_dir, request["exclude"], request["expected_revision"])
+            if not isinstance(request, dict):
+                raise ValueError("Send a JSON review request object.")
+            version = request.get("version")
+            if "version" in request and not isinstance(version, str):
+                raise ValueError("Send a labeling version ID string.")
+            if path == "/api/review":
+                if set(request) not in ({"exclude", "expected_revision"},
+                                        {"exclude", "expected_revision", "version"}):
+                    raise ValueError("Send exclude, expected_revision, and optionally version only.")
+                review = save_review(self.viewer_dir, request["exclude"], request["expected_revision"],
+                                     version=version)
+            elif path == "/api/review/versions":
+                if set(request) != {"expected_revision"}:
+                    raise ValueError("Send expected_revision only.")
+                review = create_review_version(self.viewer_dir, request["expected_revision"])
+            else:
+                if set(request) != {"version", "expected_revision"}:
+                    raise ValueError("Send version and expected_revision only.")
+                review = set_stable_review_version(self.viewer_dir, version, request["expected_revision"])
         except ReviewConflict as error:
-            self._json(409, {"error": str(error), "review": read_review(self.viewer_dir)})
+            self._json(409, {"error": str(error), "review": read_review(self.viewer_dir, version=version)})
         except (ValueError, OSError, KeyError, TypeError) as error:
             self._json(400, {"error": str(error)})
         else:

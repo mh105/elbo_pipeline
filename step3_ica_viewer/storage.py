@@ -8,6 +8,7 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
@@ -17,6 +18,7 @@ import pandas as pd
 
 
 SCHEMA_VERSION = 1
+REVIEW_SCHEMA_VERSION = 2
 CLASSES = ("brain", "muscle artifact", "eye blink", "heart beat", "line noise",
            "channel noise", "other")
 
@@ -153,22 +155,73 @@ def _manifest(viewer_dir):
 def _validate_review(review, manifest):
     if not isinstance(review, dict):
         raise ValueError("Saved ICA exclusions must be a JSON object.")
-    for field in ("schema_version", "recording_filename", "fit_id", "n_components"):
+    review_schema = review.get("schema_version")
+    if type(review_schema) is not int or review_schema not in (1, REVIEW_SCHEMA_VERSION):
+        raise ValueError("Unsupported ICA exclusion review schema.")
+    for field in ("recording_filename", "fit_id", "n_components"):
         if review.get(field) != manifest[field]:
             raise ValueError(f"Saved ICA exclusions have mismatched {field}.")
     if type(review.get("revision")) is not int or review["revision"] < 0:
         raise ValueError("Saved ICA exclusions have an invalid revision.")
     if _indices(review.get("initial_auto_exclude"), manifest["n_components"]) != manifest["initial_auto_exclude"]:
         raise ValueError("Saved ICA exclusions have a mismatched automatic baseline.")
-    return _indices(review.get("exclude"), manifest["n_components"])
-
-
-def read_review(viewer_dir):
-    """Read a validated authoritative decision record; never reset corrupt data."""
-    manifest = _manifest(viewer_dir)
-    review = _read_json(Path(viewer_dir) / manifest["files"]["decision"])
-    _validate_review(review, manifest)
+    _indices(review.get("exclude"), manifest["n_components"])
+    if not isinstance(review.get("updated_at_utc"), str) or not review["updated_at_utc"]:
+        raise ValueError("Saved ICA exclusions have an invalid timestamp.")
+    if review_schema == 1:
+        if "versions" in review or "stable_version" in review:
+            raise ValueError("Legacy ICA exclusions cannot contain labeling versions.")
+        # Opening an existing review must not rewrite its file or lose its manual decisions.
+        review = dict(review, stable_version="v1", versions=[dict(
+            id="v1", name="Version 1", exclude=review["exclude"],
+            created_at_utc=manifest.get("created_at_utc", review["updated_at_utc"]),
+            updated_at_utc=review["updated_at_utc"],
+        )])
+    versions = review.get("versions")
+    if not isinstance(versions, list) or not versions:
+        raise ValueError("Saved ICA exclusions must contain labeling versions.")
+    ids = []
+    for version in versions:
+        if not isinstance(version, dict):
+            raise ValueError("Each labeling version must be a JSON object.")
+        version_id = version.get("id")
+        if not isinstance(version_id, str) or re.fullmatch(r"v[1-9][0-9]*", version_id) is None:
+            raise ValueError("Saved ICA exclusions have an invalid labeling version ID.")
+        if version.get("name") != "Version " + version_id[1:]:
+            raise ValueError("Saved ICA exclusions have an invalid labeling version name.")
+        for field in ("created_at_utc", "updated_at_utc"):
+            if not isinstance(version.get(field), str) or not version[field]:
+                raise ValueError("Saved ICA exclusions have an invalid version timestamp.")
+        _indices(version.get("exclude"), manifest["n_components"])
+        ids.append(version_id)
+    if len(ids) != len(set(ids)):
+        raise ValueError("Saved ICA exclusions contain duplicate labeling versions.")
+    if review.get("stable_version") not in ids:
+        raise ValueError("Saved ICA exclusions have an unknown stable labeling version.")
+    stable = next(version for version in versions if version["id"] == review["stable_version"])
+    if _indices(review["exclude"], manifest["n_components"]) != _indices(stable["exclude"], manifest["n_components"]):
+        raise ValueError("Saved ICA exclusions do not match their stable labeling version.")
     return review
+
+
+def _review_document(viewer_dir, manifest):
+    review = _read_json(Path(viewer_dir) / manifest["files"]["decision"])
+    return _validate_review(review, manifest)
+
+
+def _review_response(review, version=None):
+    version = review["stable_version"] if version is None else version
+    selected = next((item for item in review["versions"] if item["id"] == version), None)
+    if selected is None:
+        raise ValueError("Unknown ICA labeling version.")
+    return dict(review, active_version=version, exclude=selected["exclude"],
+                updated_at_utc=selected["updated_at_utc"])
+
+
+def read_review(viewer_dir, version=None):
+    """Read a labeling version (stable by default) without rewriting saved data."""
+    manifest = _manifest(viewer_dir)
+    return _review_response(_review_document(viewer_dir, manifest), version)
 
 
 def _initialize_review(viewer_dir, manifest):
@@ -183,25 +236,67 @@ def _initialize_review(viewer_dir, manifest):
         read_review(viewer_dir)
 
 
-def save_review(viewer_dir, exclude, expected_revision):
-    """Atomically replace the complete exclusion list using optimistic revisioning."""
+def _write_review(viewer_dir, manifest, review, expected_revision):
+    if type(expected_revision) is not int or expected_revision != review["revision"]:
+        raise ReviewConflict("Saved decisions changed; reload before saving again.")
+    stable = next(item for item in review["versions"] if item["id"] == review["stable_version"])
+    review["exclude"] = list(stable["exclude"])
+    review["revision"] += 1
+    review["updated_at_utc"] = _now()
+    # Older servers reject this schema instead of overwriting only the stable mirror.
+    review["schema_version"] = REVIEW_SCHEMA_VERSION
+    review.pop("active_version", None)
+    _validate_review(review, manifest)
+    _atomic_json(viewer_dir / manifest["files"]["decision"], review)
+
+
+def save_review(viewer_dir, exclude, expected_revision, version=None):
+    """Replace one complete list (stable by default), checking the global revision."""
     viewer_dir = Path(viewer_dir)
     with _locked(viewer_dir / ".review.lock"):
         manifest = _manifest(viewer_dir)
-        review = read_review(viewer_dir)
-        if type(expected_revision) is not int or expected_revision != review["revision"]:
-            raise ReviewConflict("Saved decisions changed; reload before saving again.")
-        review["exclude"] = _indices(exclude, manifest["n_components"])
-        review["revision"] += 1
-        review["updated_at_utc"] = _now()
-        _atomic_json(viewer_dir / manifest["files"]["decision"], review)
-        return review
+        review = _review_document(viewer_dir, manifest)
+        selected_id = _review_response(review, version)["active_version"]
+        selected = next(item for item in review["versions"] if item["id"] == selected_id)
+        selected["exclude"] = _indices(exclude, manifest["n_components"])
+        selected["updated_at_utc"] = _now()
+        _write_review(viewer_dir, manifest, review, expected_revision)
+        return _review_response(review, selected_id)
 
 
-def load_exclusions(viewer_dir, ica=None):
-    """Return the full final list, optionally checking a target ICA transform."""
+def create_review_version(viewer_dir, expected_revision):
+    """Create an independent labeling version from the original automatic baseline."""
+    viewer_dir = Path(viewer_dir)
+    with _locked(viewer_dir / ".review.lock"):
+        manifest = _manifest(viewer_dir)
+        review = _review_document(viewer_dir, manifest)
+        number = max(int(item["id"][1:]) for item in review["versions"]) + 1
+        now = _now()
+        review["versions"].append(dict(
+            id=f"v{number}", name=f"Version {number}",
+            exclude=list(manifest["initial_auto_exclude"]),
+            created_at_utc=now, updated_at_utc=now,
+        ))
+        _write_review(viewer_dir, manifest, review, expected_revision)
+        return _review_response(review, f"v{number}")
+
+
+def set_stable_review_version(viewer_dir, version, expected_revision):
+    """Choose which saved version opens and loads into Python by default."""
+    viewer_dir = Path(viewer_dir)
+    with _locked(viewer_dir / ".review.lock"):
+        manifest = _manifest(viewer_dir)
+        review = _review_document(viewer_dir, manifest)
+        selected_id = _review_response(review, version)["active_version"]
+        review["stable_version"] = selected_id
+        _write_review(viewer_dir, manifest, review, expected_revision)
+        return _review_response(review, selected_id)
+
+
+def load_exclusions(viewer_dir, ica=None, *, version=None):
+    """Return a complete list (stable by default), optionally checking the transform."""
     manifest = _manifest(viewer_dir)
-    review = read_review(viewer_dir)
+    review = read_review(viewer_dir, version=version)
     if ica is not None:
         if (ica.n_components_ != manifest["n_components"] or
                 model_fingerprint(ica, manifest["reference_channel"]) != manifest["model_identity"]):

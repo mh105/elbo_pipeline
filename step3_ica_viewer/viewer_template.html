@@ -34,13 +34,14 @@
 .stacked-status{min-height:27px;padding:4px 20px 5px;font-size:11px;color:var(--muted)}
 @media(max-width:650px){.stacked-controls{gap:10px}.stacked-controls input{width:85px}.stacked-readout{margin-left:0;flex-basis:100%}}
 
-main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}main.stacked-active>header{margin-bottom:8px}
+main.stacked-active{max-width:none;padding-bottom:16px}main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}main.stacked-active>header{margin-bottom:8px}
 
+.version-picker{display:flex;flex-direction:column;gap:5px;min-width:230px}.version-picker label{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}.version-picker select{width:100%}
 </style>
 </head>
 <body>
 <main>
-<header><div><div class="eyebrow" id="recordingHeading"></div><h1>All ICA components</h1><p>Independent component detection · five time scales · |robust Z| ≥ 5</p><p id="fitDescription"></p><p id="componentDescription"></p></div><div class="pill">Manual ICA review</div></header>
+<header><div><div class="eyebrow" id="recordingHeading"></div><h1>All ICA components</h1><p>Independent component detection · five time scales · |robust Z| ≥ 5</p><p id="fitDescription"></p><p id="componentDescription"></p></div><div class="version-picker"><label for="reviewVersion">Labeling version</label><select id="reviewVersion" disabled><option>Loading versions…</option></select></div></header>
 
 <div class="view-tabs" role="tablist" aria-label="ICA review views">
  <button id="distributionTab" type="button" role="tab" aria-selected="true" aria-controls="distributionView">1 · Metric distributions</button>
@@ -158,51 +159,83 @@ const breakSamples=new Set(DATA.discontinuities.map(g=>g.retained_sample));
 
 let currentExclusions=new Set(DATA.initial_excluded||[]),reviewReady=false,reviewRevision=null;
 let changeSerial=0,savedSerial=0,saveInFlight=false,saveError='',saveConflict=false,savedAt='';
+let reviewVersions=[],activeVersion='',stableVersion='',versionBusy=false,versionRetry=null;
 const isRejected=c=>currentExclusions.has(c.id);
 const decisionSource=c=>isRejected(c)!==c.iclabel_auto_exclude?'manual decision':'ICLabel default';
+function updateVersionPicker(){
+ const picker=$('reviewVersion');picker.replaceChildren();
+ if(!reviewVersions.length){picker.add(new Option('Loading versions…',''));picker.disabled=true;return;}
+ for(const version of reviewVersions)picker.add(new Option(version.name+(version.id===stableVersion?' · stable':''),version.id));
+ const actions=document.createElement('optgroup');actions.label='Version actions';
+ actions.appendChild(new Option('Create new version (ICLabel defaults)','__new__'));
+ const stable=new Option('Mark current version as stable','__stable__');stable.disabled=activeVersion===stableVersion;actions.appendChild(stable);picker.appendChild(actions);
+ picker.value=activeVersion;picker.disabled=!reviewReady||versionBusy||saveInFlight||changeSerial>savedSerial||saveConflict;
+}
 function updatePersistence(){
  const pending=changeSerial>savedSerial;
- $('decisionPersistence').textContent=saveError?`Unsaved changes: ${saveError}`:!reviewReady?'Loading saved review…':pending||saveInFlight?'Saving decisions to the subject’s .ica_viewer folder…':`Saved to the subject’s .ica_viewer folder · revision ${reviewRevision}${savedAt?' · '+savedAt:''}. Load the saved list explicitly in Python when ready.`;
+ const version=reviewVersions.find(v=>v.id===activeVersion),name=version?version.name+(activeVersion===stableVersion?' (stable)':''):'';
+ $('decisionPersistence').textContent=saveError?`Unsaved changes: ${saveError}`:versionBusy?'Updating labeling version…':!reviewReady?'Loading saved review…':pending||saveInFlight?'Saving decisions to the subject’s .ica_viewer folder…':`${name} saved to the subject’s .ica_viewer folder · revision ${reviewRevision}${savedAt?' · '+savedAt:''}. Python loads the stable version by default.`;
  $('decisionPersistence').style.color=saveError?'#a82f3d':'';
  $('saveActions').hidden=!saveError;$('retrySave').hidden=saveConflict;$('reloadReview').hidden=!saveConflict;
- if($('rejectionToggle'))$('rejectionToggle').disabled=!reviewReady||saveConflict;
+ $('retrySave').textContent=versionRetry?'Retry version action':'Retry save';
+ if($('rejectionToggle'))$('rejectionToggle').disabled=!reviewReady||saveConflict||versionBusy;
+ updateVersionPicker();
+ if(state.view==='stacked')queueStacked();
 }
 function checkedReview(record){
  if(record.fit_id!==DATA.review_id||!Number.isInteger(record.revision)||!Array.isArray(record.exclude)||record.exclude.some(id=>!Number.isInteger(id)||!DATA.components.some(c=>c.id===id)))throw new Error('Saved review does not match this ICA.');
+ if(!Array.isArray(record.versions)||!record.versions.some(v=>v.id===record.active_version)||!record.versions.some(v=>v.id===record.stable_version))throw new Error('Saved labeling versions are invalid. Restart the viewer service after updating its code.');
  return record;
 }
-async function loadReview(){
- reviewReady=false;saveError='';updatePersistence();
+function adoptReview(record){
+ currentExclusions=new Set(record.exclude);reviewRevision=record.revision;savedAt=record.updated_at_utc;
+ reviewVersions=record.versions;activeVersion=record.active_version;stableVersion=record.stable_version;
+ changeSerial=0;savedSerial=0;saveConflict=false;reviewReady=true;updateReview();render();
+}
+async function loadReview(version=null){
+ reviewReady=false;saveError='';versionRetry=null;updatePersistence();
  try{
-  const response=await fetch('/api/review',{cache:'no-store'});
+  const response=await fetch('/api/review'+(version?'?version='+encodeURIComponent(version):''),{cache:'no-store'});
   if(!response.ok)throw new Error(`Could not read saved decisions (${response.status}).`);
   const record=checkedReview(await response.json());
-  currentExclusions=new Set(record.exclude);reviewRevision=record.revision;savedAt=record.updated_at_utc;
-  changeSerial=0;savedSerial=0;saveConflict=false;reviewReady=true;updateReview();render();
+  adoptReview(record);
  }catch(error){saveError=error.message+' Open this viewer through open_ica_viewer, not as a standalone HTML file.';updatePersistence()}
 }
+async function changeReviewVersion(value){
+ if(!reviewReady||versionBusy||saveInFlight||changeSerial>savedSerial||saveConflict){updateVersionPicker();return;}
+ if(!['__new__','__stable__'].includes(value)){await loadReview(value);return;}
+ versionBusy=true;saveError='';versionRetry=value;updatePersistence();
+ try{
+  const creating=value==='__new__',body={expected_revision:reviewRevision};if(!creating)body.version=activeVersion;
+  const response=await fetch(creating?'/api/review/versions':'/api/review/stable',{method:creating?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!response.ok){const detail=await response.json().catch(()=>({}));if(response.status===409)saveConflict=true;throw new Error(detail.error||`Version update failed (${response.status}).`);}
+  adoptReview(checkedReview(await response.json()));versionRetry=null;
+ }catch(error){saveError=error.message;}
+ finally{versionBusy=false;updatePersistence();}
+}
+$('reviewVersion').addEventListener('change',e=>changeReviewVersion(e.target.value));
 async function savePending(){
  if(saveInFlight||!reviewReady||saveConflict)return;
- saveInFlight=true;saveError='';updatePersistence();
+ saveInFlight=true;saveError='';versionRetry=null;updatePersistence();
  try{
   while(savedSerial<changeSerial){
    const serial=changeSerial,exclude=Array.from(currentExclusions).sort((a,b)=>a-b);
-   const response=await fetch('/api/review',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({exclude,expected_revision:reviewRevision})});
+   const response=await fetch('/api/review',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({exclude,expected_revision:reviewRevision,version:activeVersion})});
    if(!response.ok){const detail=await response.json().catch(()=>({}));if(response.status===409)saveConflict=true;throw new Error(detail.error||`Save failed (${response.status}).`)}
-   const record=checkedReview(await response.json());reviewRevision=record.revision;savedAt=record.updated_at_utc;savedSerial=serial;
+   const record=checkedReview(await response.json());reviewRevision=record.revision;savedAt=record.updated_at_utc;savedSerial=serial;reviewVersions=record.versions;stableVersion=record.stable_version;
   }
  }catch(error){saveError=error.message}
  finally{saveInFlight=false;updatePersistence()}
 }
 function applyDecision(c,rejected){
- if(!reviewReady||saveConflict)return;
+ if(!reviewReady||saveConflict||versionBusy)return;
  if(isRejected(c)===rejected)return;
  const restoreFocus=document.activeElement?.id==='rejectionToggle';
  if(rejected)currentExclusions.add(c.id);else currentExclusions.delete(c.id);
  changeSerial++;updateReview();render();savePending();if(restoreFocus)$('rejectionToggle')?.focus();
 }
-$('retrySave').addEventListener('click',()=>reviewReady?savePending():loadReview());
-$('reloadReview').addEventListener('click',()=>loadReview());
+$('retrySave').addEventListener('click',()=>versionRetry?changeReviewVersion(versionRetry):reviewReady?savePending():loadReview());
+$('reloadReview').addEventListener('click',()=>loadReview(activeVersion));
 function setRejected(rejected){applyDecision(current(),rejected)}
 function toggleRejected(id){const c=componentById.get(Number(id));if(c)applyDecision(c,!isRejected(c))}
 let selectionToken=0;
@@ -388,7 +421,9 @@ function syncStackedControls(){
 function drawStacked(){
  const canvas=$('stackedCanvas'),w=canvas.getBoundingClientRect().width;
  if(!w)return;
- const h=Math.max(320,Math.min(850,window.innerHeight-canvas.getBoundingClientRect().top-68)),dpr=window.devicePixelRatio||1;
+ const cardStyle=getComputedStyle(canvas.closest('.stacked-card')),mainStyle=getComputedStyle(document.querySelector('main'));
+ const footer=$('stackTimeScroll').offsetHeight+$('stackStatus').offsetHeight+parseFloat(cardStyle.borderBottomWidth)+parseFloat(cardStyle.marginBottom)+parseFloat(mainStyle.paddingBottom);
+ const h=Math.max(320,window.innerHeight-canvas.getBoundingClientRect().top-window.scrollY-footer),dpr=window.devicePixelRatio||1;
  canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);canvas.style.height=h+'px';
  const q=canvas.getContext('2d');q.scale(dpr,dpr);q.fillStyle='#fff';q.fillRect(0,0,w,h);
  const left=79,right=w-11,top=13,bottom=h-29,row=(bottom-top)/stackState.count;

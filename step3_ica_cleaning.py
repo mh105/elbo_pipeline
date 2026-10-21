@@ -243,15 +243,16 @@ def open_ica_viewer(viewer_dir, *, open_browser=True):
     return url
 
 
-def load_ica_exclusions(viewer_dir, *, ica):
-    """Return the saved final exclusions after validating the target ICA.
+def load_ica_exclusions(viewer_dir, *, ica, version=None):
+    """Return stable-version exclusions after validating the target ICA.
 
     Assign the result to ica.exclude to replace its previous contents, including
     when the saved list is empty. This helper does not modify or apply ICA.
+    Pass a version ID, such as "v2", to explicitly load a different labeling.
     """
     from step3_ica_viewer.storage import load_exclusions
 
-    return load_exclusions(viewer_dir, ica=ica)
+    return load_exclusions(viewer_dir, ica=ica, version=version)
 
 
 def summarize_ica_exclusions(ica, fit_epochs, raw_bads):

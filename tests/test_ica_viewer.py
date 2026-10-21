@@ -1,6 +1,7 @@
 """Persistence and numerical contracts for the reusable ICA review viewer."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 import shutil
 import sys
@@ -120,6 +121,136 @@ class TestViewerReviewStorage(unittest.TestCase):
         self.assertEqual(storage.load_exclusions(viewer_dir, ica=self.ica), [])
         self.assertEqual(self.ica.exclude, [0])
 
+    def test_legacy_review_opens_as_stable_version_without_rewriting(self):
+        viewer_dir = self.prepare()
+        path = self.decision_file(viewer_dir)
+        legacy = json.loads(path.read_text())
+        manifest = json.loads((viewer_dir / "manifest.json").read_text())
+        self.assertEqual(legacy["schema_version"], 1)
+        legacy.update(exclude=[2], revision=7)
+        content = (json.dumps(legacy, indent=4) + "\n").encode()
+        path.write_bytes(content)
+        review = storage.read_review(viewer_dir)
+        self.assertEqual(review["active_version"], "v1")
+        self.assertEqual(review["stable_version"], "v1")
+        self.assertEqual(review["versions"][0]["exclude"], [2])
+        self.assertEqual(storage.load_exclusions(viewer_dir), [2])
+        self.assertEqual(self.prepare(), viewer_dir)
+        self.assertEqual(path.read_bytes(), content)
+        created = storage.create_review_version(viewer_dir, expected_revision=7)
+        self.assertEqual(created["exclude"], [0])
+        self.assertEqual(storage.read_review(viewer_dir)["exclude"], [2])
+        upgraded = json.loads(path.read_text())
+        self.assertEqual(upgraded["schema_version"], 2)
+        # An older writer requires review.schema_version == manifest.schema_version.
+        # Keeping these different prevents it from replacing only the stable mirror.
+        self.assertNotEqual(upgraded["schema_version"], manifest["schema_version"])
+        self.assertEqual(json.loads((viewer_dir / "manifest.json").read_text()), manifest)
+        self.assertNotIn("active_version", upgraded)
+        self.assertIn("versions", upgraded)
+
+    def test_versions_are_independent_and_new_versions_use_automatic_baseline(self):
+        initial = self.ica.copy()
+        initial.exclude = [2, 3]
+        viewer_dir = self.prepare(initial)
+        created = storage.create_review_version(viewer_dir, expected_revision=0)
+        self.assertEqual(created["active_version"], "v2")
+        self.assertEqual(created["stable_version"], "v1")
+        self.assertEqual(created["exclude"], [0])
+        edited = storage.save_review(viewer_dir, [1], expected_revision=1, version="v2")
+        self.assertEqual(edited["exclude"], [1])
+        self.assertEqual(storage.load_exclusions(viewer_dir), [2, 3])
+        self.assertEqual(storage.load_exclusions(viewer_dir, version="v2"), [1])
+        self.assertEqual(json.loads(self.decision_file(viewer_dir).read_text())["exclude"], [2, 3])
+        third = storage.create_review_version(viewer_dir, expected_revision=2)
+        self.assertEqual(third["active_version"], "v3")
+        self.assertEqual(third["exclude"], [0])
+        self.assertEqual(storage.read_review(viewer_dir, "v2")["exclude"], [1])
+
+    def test_stable_selection_controls_default_read_load_and_reopening(self):
+        viewer_dir = self.prepare()
+        storage.create_review_version(viewer_dir, expected_revision=0)
+        storage.save_review(viewer_dir, [], expected_revision=1, version="v2")
+        selected = storage.set_stable_review_version(viewer_dir, "v2", expected_revision=2)
+        self.assertEqual(selected["revision"], 3)
+        self.assertEqual(selected["active_version"], "v2")
+        self.assertEqual(selected["stable_version"], "v2")
+        self.assertEqual(storage.load_exclusions(viewer_dir, ica=self.ica), [])
+        self.assertEqual(self.prepare(), viewer_dir)
+        self.assertEqual(storage.read_review(viewer_dir)["active_version"], "v2")
+        self.assertEqual(json.loads(self.decision_file(viewer_dir).read_text())["exclude"], [])
+        storage.save_review(viewer_dir, [3], expected_revision=3)
+        self.assertEqual(storage.read_review(viewer_dir, "v2")["exclude"], [3])
+        # Stable can be an older version; creating newer versions never promotes them.
+        storage.set_stable_review_version(viewer_dir, "v1", expected_revision=4)
+        storage.create_review_version(viewer_dir, expected_revision=5)
+        self.assertEqual(storage.read_review(viewer_dir)["exclude"], [0])
+        self.assertEqual(storage.read_review(viewer_dir)["stable_version"], "v1")
+        self.assertEqual(storage.read_review(viewer_dir, "v2")["exclude"], [3])
+
+    def test_invalid_version_records_and_stale_mutations_preserve_json(self):
+        viewer_dir = self.prepare()
+        storage.create_review_version(viewer_dir, expected_revision=0)
+        path = self.decision_file(viewer_dir)
+        original = path.read_bytes()
+        for action in (
+                lambda: storage.create_review_version(viewer_dir, 0),
+                lambda: storage.set_stable_review_version(viewer_dir, "v2", 0),
+                lambda: storage.save_review(viewer_dir, [3], 0, version="v2"),
+                lambda: storage.save_review(viewer_dir, [3], True, version="v2")):
+            with self.assertRaises(storage.ReviewConflict):
+                action()
+            self.assertEqual(path.read_bytes(), original)
+        for invalid in ("v0", "v999", "v02", [], True):
+            with self.subTest(version=invalid), self.assertRaises(ValueError):
+                storage.read_review(viewer_dir, invalid)
+            with self.subTest(version=invalid), self.assertRaises(ValueError):
+                storage.set_stable_review_version(viewer_dir, invalid, 1)
+            self.assertEqual(path.read_bytes(), original)
+        for field, value in (("stable_version", "v3"), ("versions", []), ("exclude", [3]),
+                             ("initial_auto_exclude", [2]), ("schema_version", 1),
+                             ("schema_version", 99)):
+            corrupt = json.loads(original)
+            corrupt[field] = value
+            path.write_text(json.dumps(corrupt))
+            with self.assertRaises(ValueError):
+                storage.create_review_version(viewer_dir, 1)
+            self.assertEqual(json.loads(path.read_text()), corrupt)
+        for key, value in (("id", "v01"), ("exclude", [True]), ("exclude", [4]),
+                           ("name", "wrong"), ("updated_at_utc", None)):
+            corrupt = json.loads(original)
+            corrupt["versions"][1][key] = value
+            path.write_text(json.dumps(corrupt))
+            with self.assertRaises(ValueError):
+                storage.load_exclusions(viewer_dir)
+            self.assertEqual(json.loads(path.read_text()), corrupt)
+        corrupt = json.loads(original)
+        corrupt["versions"][1] = dict(corrupt["versions"][0])
+        path.write_text(json.dumps(corrupt))
+        with self.assertRaises(ValueError):
+            storage.read_review(viewer_dir)
+        corrupt = json.loads(original)
+        del corrupt["versions"]
+        path.write_text(json.dumps(corrupt))
+        with self.assertRaises(ValueError):
+            storage.read_review(viewer_dir)
+
+    def test_concurrent_version_creation_has_one_winner(self):
+        viewer_dir = self.prepare()
+
+        def create():
+            try:
+                return storage.create_review_version(viewer_dir, 0)
+            except storage.ReviewConflict:
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: create(), range(2)))
+        self.assertEqual(sum(result is not None for result in results), 1)
+        review = storage.read_review(viewer_dir)
+        self.assertEqual(review["revision"], 1)
+        self.assertEqual([item["id"] for item in review["versions"]], ["v1", "v2"])
+
     def test_changed_numerical_transform_gets_new_fit_and_cannot_load_old_review(self):
         viewer_dir = self.prepare()
         changed = self.ica.copy()
@@ -195,6 +326,57 @@ class TestViewerReviewStorage(unittest.TestCase):
         self.assertEqual(storage.read_review(viewer_dir)["revision"], saved["revision"])
         server.close_viewer(viewer_dir)
         self.assertEqual(storage.load_exclusions(viewer_dir, ica=self.ica), [2, 3])
+
+    def test_http_version_creation_selection_stable_and_global_conflicts(self):
+        viewer_dir = self.prepare()
+        url = server.open_viewer(viewer_dir, open_browser=False)
+        self.addCleanup(server.close_viewer, viewer_dir)
+        endpoint = url.rsplit("/", 1)[0] + "/api/review"
+        local_http = build_opener(ProxyHandler({}))
+
+        def request(method, suffix="", **body):
+            payload = None if method == "GET" else json.dumps(body).encode()
+            item = Request(endpoint + suffix, data=payload,
+                           headers={"Content-Type": "application/json"}, method=method)
+            with local_http.open(item) as response:
+                return json.load(response)
+
+        initial = request("GET")
+        self.assertEqual(initial["active_version"], "v1")
+        request("PUT", exclude=[2], expected_revision=0)
+        created = request("POST", "/versions", expected_revision=1)
+        self.assertEqual(created["active_version"], "v2")
+        self.assertEqual(created["exclude"], [0])
+        self.assertEqual(request("GET")["exclude"], [2])
+        saved = request("PUT", exclude=[3], expected_revision=2, version="v2")
+        self.assertEqual(saved["exclude"], [3])
+        selected = request("GET", "?version=v2")
+        self.assertEqual(selected["exclude"], [3])
+        self.assertEqual(selected["stable_version"], "v1")
+        with self.assertRaises(HTTPError) as error:
+            request("PUT", exclude=[], expected_revision=2, version="v2")
+        self.assertEqual(error.exception.code, 409)
+        conflict = json.load(error.exception)["review"]
+        self.assertEqual(conflict["active_version"], "v2")
+        self.assertEqual(conflict["exclude"], [3])
+        stable = request("PUT", "/stable", version="v2", expected_revision=3)
+        self.assertEqual(stable["stable_version"], "v2")
+        self.assertEqual(request("GET")["exclude"], [3])
+        self.assertEqual(storage.load_exclusions(viewer_dir), [3])
+        for method, suffix, body in (
+                ("GET", "?version=v99", {}),
+                ("GET", "?version=v1&version=v2", {}),
+                ("PUT", "", dict(exclude=[], expected_revision=4, version=None)),
+                ("POST", "/versions", dict(expected_revision=4, exclude=[])),
+                ("PUT", "/stable", dict(expected_revision=4)),
+                ("PUT", "/stable", dict(expected_revision=4, version="v99"))):
+            with self.subTest(method=method, suffix=suffix, body=body), self.assertRaises(HTTPError) as error:
+                request(method, suffix, **body)
+            self.assertEqual(error.exception.code, 400)
+        self.assertEqual(storage.read_review(viewer_dir)["revision"], 4)
+        server.close_viewer(viewer_dir)
+        server.open_viewer(viewer_dir, open_browser=False)
+        self.assertEqual(storage.read_review(viewer_dir)["stable_version"], "v2")
 
 
 class TestViewerBuild(unittest.TestCase):
