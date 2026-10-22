@@ -43,6 +43,8 @@ Pass the explicit original `.set`/EEG path. MNE's `raw_bads.filenames[0]` can re
 
 CSV files are useful exports, but they are not substitutes for the fitted ICA and exact epochs. The current browser loads embedded JSON (including median component spectra), lazy per-IC Float32 waveform files, and topomap PNGs. It does not read `summary.csv` to draw its waveforms.
 
+The Full time traces tab also shows a synchronized reconstructed EEG envelope in µV across all fitted channels, using 20 ms extrema. It starts as one black **Current** band. After a manual reject/keep toggle in either review tab, it compares black **Before** and green **After** bands for that last change. Reopening or loading a labeling version resets this temporary comparison to Current. Exact native source and reconstruction arrays are rebuildable cache files; no additional Raw recording is needed.
+
 ## Intended workflow
 
 1. Run preprocessing and `fit_ica(..., return_details=True)`. Preparation must not silently rerun preprocessing, refit ICA, change the reference, or apply ICA.
@@ -105,7 +107,7 @@ open_ica_viewer(viewer_dir)
 
 Do not reload `server.py`, because its module state tracks running local services. A fresh command-line process uses the updated builder directly.
 
-The labeling-version update also changes the server and storage code. For an already-running older service, launch a fresh process with `python -m step3_ica_viewer /absolute/path/to/viewer_dir` and use its new URL. This reads the same saved fit and decisions; no preprocessing, ICA refit, or deletion of `.ica_viewer` is needed.
+The labeling-version and reconstructed-envelope updates also change the server code. For an already-running older service, launch a fresh process with `python -m step3_ica_viewer /absolute/path/to/viewer_dir` and use its new URL. This reads the same saved fit and decisions; no preprocessing, ICA refit, or deletion of `.ica_viewer` is needed.
 
 ## Implementation decisions and boundaries
 

@@ -13,8 +13,10 @@ from matplotlib.figure import Figure
 from scipy.ndimage import median_filter
 from scipy.signal import periodogram
 
+from .envelope import _write_reconstruction
 
-BUILD_VERSION = "1.1-median-psd"
+
+BUILD_VERSION = "1.2-reconstructed-envelope"
 LAGS_MS = (4, 20, 40, 80, 160)
 THRESHOLD = 5.0
 MERGE_GAP_MS = 300
@@ -284,6 +286,7 @@ def build_viewer(cache_dir, ica, fit_epochs, iclabel_table, *, recording_filenam
     psd_frequencies, psd_db = _median_psd(source_epochs, sfreq)
     sources = source_epochs.transpose(1, 0, 2).reshape(n_components, -1)
     segments, discontinuities = _time_segments(epoch_table, sources.shape[1])
+    _write_reconstruction(cache_dir, ica, fit_epochs, sources, segments)
     mixing_uv = ica.pre_whitener_ * ica.get_components() * 1e6
     voltage_channels = np.argmax(np.abs(mixing_uv), axis=0)
     automatic = labels.index[labels.iclabel_auto_exclude].astype(int).tolist()

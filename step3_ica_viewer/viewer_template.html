@@ -37,6 +37,7 @@
 main.stacked-active{max-width:none;padding-bottom:16px}main.stacked-active>header p,main.stacked-active #reviewShortcuts{display:none}main.stacked-active>header{margin-bottom:8px}
 
 .version-picker{display:flex;flex-direction:column;gap:5px;min-width:230px}.version-picker label{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}.version-picker select{width:100%}
+.envelope-canvas-wrap{padding:0 10px}.envelope-canvas-wrap canvas{display:block;width:100%}.envelope-card .legend{padding-bottom:5px}.envelope-card .help{padding-bottom:10px;font-size:11px}.envelope-card .swatch{height:10px}
 </style>
 </head>
 <body>
@@ -100,6 +101,12 @@ main.stacked-active{max-width:none;padding-bottom:16px}main.stacked-active>heade
 </div>
 </section>
 <section id="stackedView" role="tabpanel" aria-labelledby="stackedTab" hidden>
+ <section class="card envelope-card">
+  <div class="plothead"><h2>Reconstructed EEG envelope</h2><span id="envelopeRange"></span></div>
+  <div class="envelope-canvas-wrap"><canvas id="eegEnvelope" height="140" aria-label="Reconstructed EEG envelope across fitted channels"></canvas></div>
+  <div class="legend" id="envelopeLegend"></div>
+  <div class="help" id="envelopeDescription" role="status"></div>
+ </section>
  <section class="card stacked-card">
   <div class="stacked-controls">
    <div class="control"><label for="stackCount">ICs displayed</label><input id="stackCount" type="number" min="1" step="1"></div>
@@ -160,6 +167,13 @@ const breakSamples=new Set(DATA.discontinuities.map(g=>g.retained_sample));
 let currentExclusions=new Set(DATA.initial_excluded||[]),reviewReady=false,reviewRevision=null;
 let changeSerial=0,savedSerial=0,saveInFlight=false,saveError='',saveConflict=false,savedAt='';
 let reviewVersions=[],activeVersion='',stableVersion='',versionBusy=false,versionRetry=null;
+let envelopeBefore=null,envelopeLastEdit=null,envelopeData=null,envelopeKey='',envelopePendingKey='',envelopeError='';
+let envelopeRequest=0,envelopeTimer=0,envelopeAbort=null;
+function cancelEnvelopeRequest(){
+ clearTimeout(envelopeTimer);envelopeTimer=0;envelopeAbort?.abort();envelopeAbort=null;envelopePendingKey='';envelopeRequest++;
+}
+function invalidateEnvelope(){cancelEnvelopeRequest();envelopeData=null;envelopeKey='';envelopeError='';}
+function resetEnvelopeComparison(){envelopeBefore=null;envelopeLastEdit=null;invalidateEnvelope();}
 const isRejected=c=>currentExclusions.has(c.id);
 const decisionSource=c=>isRejected(c)!==c.iclabel_auto_exclude?'manual decision':'ICLabel default';
 function updateVersionPicker(){
@@ -187,9 +201,10 @@ function checkedReview(record){
  if(!Array.isArray(record.versions)||!record.versions.some(v=>v.id===record.active_version)||!record.versions.some(v=>v.id===record.stable_version))throw new Error('Saved labeling versions are invalid. Restart the viewer service after updating its code.');
  return record;
 }
-function adoptReview(record){
+function adoptReview(record,resetComparison=true){
  currentExclusions=new Set(record.exclude);reviewRevision=record.revision;savedAt=record.updated_at_utc;
  reviewVersions=record.versions;activeVersion=record.active_version;stableVersion=record.stable_version;
+ if(resetComparison)resetEnvelopeComparison();
  changeSerial=0;savedSerial=0;saveConflict=false;reviewReady=true;updateReview();render();
 }
 async function loadReview(version=null){
@@ -209,7 +224,7 @@ async function changeReviewVersion(value){
   const creating=value==='__new__',body={expected_revision:reviewRevision};if(!creating)body.version=activeVersion;
   const response=await fetch(creating?'/api/review/versions':'/api/review/stable',{method:creating?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!response.ok){const detail=await response.json().catch(()=>({}));if(response.status===409)saveConflict=true;throw new Error(detail.error||`Version update failed (${response.status}).`);}
-  adoptReview(checkedReview(await response.json()));versionRetry=null;
+  adoptReview(checkedReview(await response.json()),creating);versionRetry=null;
  }catch(error){saveError=error.message;}
  finally{versionBusy=false;updatePersistence();}
 }
@@ -231,6 +246,7 @@ function applyDecision(c,rejected){
  if(!reviewReady||saveConflict||versionBusy)return;
  if(isRejected(c)===rejected)return;
  const restoreFocus=document.activeElement?.id==='rejectionToggle';
+ envelopeBefore=new Set(currentExclusions);envelopeLastEdit={name:c.name,rejected};invalidateEnvelope();
  if(rejected)currentExclusions.add(c.id);else currentExclusions.delete(c.id);
  changeSerial++;updateReview();render();savePending();if(restoreFocus)$('rejectionToggle')?.focus();
 }
@@ -418,6 +434,61 @@ function syncStackedControls(){
  thumb.style.left=(duration>stackState.seconds?stackState.start/(duration-stackState.seconds)*(width-thumbWidth):0)+'px';
  scroll.setAttribute('aria-valuemax',String(duration-stackState.seconds));scroll.setAttribute('aria-valuenow',String(stackState.start));scroll.setAttribute('aria-valuetext',`${fmt(stackState.start,2)} seconds`);
 }
+function envelopeSelection(){
+ return{start_s:stackState.start,end_s:stackState.start+stackState.seconds,exclude:Array.from(currentExclusions).sort((a,b)=>a-b),before_exclude:envelopeBefore===null?null:Array.from(envelopeBefore).sort((a,b)=>a-b)};
+}
+function drawEnvelope(){
+ const canvas=$('eegEnvelope'),w=canvas.getBoundingClientRect().width;if(!w)return;
+ const h=Math.round(Math.max(100,Math.min(160,window.innerHeight*.14))),dpr=window.devicePixelRatio||1;
+ canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);canvas.style.height=h+'px';
+ const q=canvas.getContext('2d');q.scale(dpr,dpr);q.fillStyle='#fff';q.fillRect(0,0,w,h);
+ const left=79,right=w-11,top=13,bottom=h-29,start=stackState.start,end=start+stackState.seconds;
+ const x=t=>left+(t-start)/(end-start)*(right-left),key=JSON.stringify(envelopeSelection());
+ const result=reviewReady&&envelopeKey===key?envelopeData:null,bands=result?[result.current,...(result.before?[result.before]:[])]:[];
+ let limit=0;for(const band of bands)for(const values of [band.lower_uv,band.upper_uv])for(const value of values)limit=Math.max(limit,Math.abs(value));
+ limit=limit?limit*1.05:1;
+ const y=v=>top+(limit-v)/(2*limit)*(bottom-top);
+ q.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.fillStyle='#748391';q.textAlign='right';q.strokeStyle='#e9eef2';q.lineWidth=.7;
+ for(const value of [-limit,0,limit]){q.beginPath();q.moveTo(left,y(value));q.lineTo(right,y(value));q.stroke();if(result)q.fillText(fmt(value,limit>=100?0:limit>=10?1:2),left-8,y(value)+3);}
+ q.save();q.translate(20,(top+bottom)/2);q.rotate(-Math.PI/2);q.textAlign='center';q.fillText('µV',0,0);q.restore();
+ q.textAlign='center';for(const time of ticks(start,end,10))q.fillText(fmt(time,stackState.seconds<=10?1:0),x(time),bottom+17);
+ q.save();q.beginPath();q.rect(left,top,right-left,bottom-top);q.clip();
+ function fillBand(band,color){
+  q.fillStyle=color;
+  for(const [a,b] of result.segments){
+   if(a===b)continue;q.beginPath();q.moveTo(x(result.bin_starts_s[a]),y(band.upper_uv[a]));
+   for(let i=a;i<b;i++){q.lineTo(x(result.bin_starts_s[i]),y(band.upper_uv[i]));q.lineTo(x(result.bin_ends_s[i]),y(band.upper_uv[i]));}
+   for(let i=b-1;i>=a;i--){q.lineTo(x(result.bin_ends_s[i]),y(band.lower_uv[i]));q.lineTo(x(result.bin_starts_s[i]),y(band.lower_uv[i]));}
+   q.closePath();q.fill();
+  }
+ }
+ if(result){if(result.before){fillBand(result.before,'rgba(0,0,0,.5)');fillBand(result.current,'rgba(0,150,70,.5)');}else fillBand(result.current,'rgba(0,0,0,.5)');}
+ q.restore();
+ drawGaps({ctx:q,left,right,top,bottom,w,h},start,end);
+ q.strokeStyle='#dce4eb';q.beginPath();q.moveTo(left,top);q.lineTo(left,bottom);q.lineTo(right,bottom);q.stroke();
+ if(!result){q.fillStyle=envelopeError?'#a82f3d':'#62798a';q.textAlign='left';q.fillText(envelopeError||(!reviewReady?'Loading saved decisions…':'Computing reconstructed EEG…'),left,top+22);}
+ $('envelopeRange').textContent=`${fmt(start,2)}–${fmt(end,2)} s · 20 ms extrema`;
+ $('envelopeLegend').innerHTML=envelopeBefore===null?'<span><i class="swatch" style="background:rgba(0,0,0,.5)"></i>Current</span>':'<span><i class="swatch" style="background:rgba(0,0,0,.5)"></i>Before</span><span><i class="swatch" style="background:rgba(0,150,70,.5)"></i>After</span>';
+ $('envelopeDescription').textContent=(envelopeLastEdit?`Last manual edit: ${envelopeLastEdit.rejected?'reject':'accept'} ${envelopeLastEdit.name}. `:'Current exclusions; no manual change in this session. ')+'Min/max across all fitted EEG channels and each 20 ms bin · 1–100 Hz fitting data at 250 Hz.';
+ canvas.setAttribute('aria-label',`${envelopeBefore===null?'Current':'Before and after the last manual edit'} reconstructed EEG envelope, ${fmt(start,2)} to ${fmt(end,2)} seconds${result?', shared limits ±'+fmt(limit,2)+' µV':''}.`);
+}
+function renderEnvelope(){
+ const request=envelopeSelection(),key=JSON.stringify(request);
+ if(envelopePendingKey&&envelopePendingKey!==key)cancelEnvelopeRequest();
+ if(reviewReady&&key!==envelopeKey&&key!==envelopePendingKey){
+  cancelEnvelopeRequest();envelopePendingKey=key;envelopeError='';const token=envelopeRequest;
+  envelopeTimer=setTimeout(async()=>{
+   envelopeTimer=0;const controller=new AbortController();envelopeAbort=controller;
+   try{
+    const response=await fetch('/api/envelope',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:controller.signal});
+    if(!response.ok){const detail=await response.json().catch(()=>({}));throw new Error(detail.error||`Envelope unavailable (${response.status}); restart the updated viewer service.`);}
+    const result=await response.json();if(token!==envelopeRequest)return;
+    envelopeData=result;envelopeKey=key;envelopePendingKey='';envelopeAbort=null;drawEnvelope();queueStacked();
+   }catch(error){if(token!==envelopeRequest||error.name==='AbortError')return;envelopePendingKey='';envelopeAbort=null;envelopeError=error.message;drawEnvelope();}
+  },80);
+ }
+ drawEnvelope();
+}
 function drawStacked(){
  const canvas=$('stackedCanvas'),w=canvas.getBoundingClientRect().width;
  if(!w)return;
@@ -463,7 +534,7 @@ function drawStacked(){
 }
 async function renderStacked(){
  if($('stackedView').hidden)return;
- clampStacked();syncStackedControls();drawStacked();
+ clampStacked();syncStackedControls();renderEnvelope();drawStacked();
  const token=++stackLoadToken,visible=DATA.components.slice(stackState.first,stackState.first+stackState.count),missing=visible.filter(c=>!c.signal);
  if(!missing.length){$('stackStatus').textContent='Native ICA activations · common amplitude scale · click a trace row to inspect; click an ICA label to change its decision.';return}
  $('stackStatus').textContent=`Loading ${missing.length} component waveform${missing.length===1?'':'s'}…`;

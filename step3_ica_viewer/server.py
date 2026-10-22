@@ -84,7 +84,36 @@ class _ViewerHandler(SimpleHTTPRequestHandler):
         self._mutate_review()
 
     def do_POST(self):
-        self._mutate_review()
+        if urlsplit(self.path).path == "/api/envelope":
+            try:
+                self._calculate_envelope()
+            except (BrokenPipeError, ConnectionResetError):
+                # A new scroll request can cancel the previous read-only view.
+                pass
+        else:
+            self._mutate_review()
+
+    def _calculate_envelope(self):
+        if not self._allowed():
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 65536:
+                raise ValueError("Invalid envelope request length.")
+            request = json.loads(self.rfile.read(length))
+            if (not isinstance(request, dict) or
+                    set(request) != {"start_s", "end_s", "exclude", "before_exclude"}):
+                raise ValueError("Send start_s, end_s, exclude, and before_exclude only.")
+            with self.server.envelope_lock:
+                if self.server.envelope_data is None:
+                    from .envelope import EnvelopeData
+                    self.server.envelope_data = EnvelopeData(self.cache_dir)
+                envelope = self.server.envelope_data
+            result = envelope.calculate(**request)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            self._json(400, {"error": str(error)})
+        else:
+            self._json(200, result)
 
     def _mutate_review(self):
         if not self._allowed():
@@ -143,6 +172,8 @@ def open_viewer(viewer_dir, *, open_browser=True):
             handler = partial(_ViewerHandler, viewer_dir=viewer_dir, cache_dir=cache_dir)
             server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
             server.daemon_threads = True
+            server.envelope_lock = threading.Lock()
+            server.envelope_data = None
             worker = threading.Thread(target=server.serve_forever, daemon=True,
                                       name="ICA viewer")
             worker.start()

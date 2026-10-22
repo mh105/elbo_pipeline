@@ -401,7 +401,7 @@ def _cache_id(manifest):
     from .build import BUILD_VERSION
     folder = Path(__file__).parent
     versions = {name: _file_hash(folder / name) for name in
-                ("build.py", "viewer_template.html")}
+                ("build.py", "viewer_template.html", "envelope.py")}
     return _fingerprint(dict(fit_id=manifest["fit_id"], build_version=BUILD_VERSION,
                              source_files=versions)).split(":", 1)[1]
 

@@ -44,6 +44,10 @@ sub-04/eeg/
             review_metadata.json
             summary.csv
             events.csv
+            reconstruction/
+              model.npz                        # physical mixing, mean, timing, residual PCA mixing
+              sources.npy                      # exact Float64 native IC activations
+              residual_sources.npy             # only when configured PCA residuals remain
             data/
               ICA000.js
               ...
@@ -67,6 +71,7 @@ Create missing viewer directories when preparing a bundle; do not modify or rena
 | ICLabel table | Preserve unrounded class results and the automatic baseline. | Durable. |
 | Epoch mapping CSV | Reconstruct retained-time/original-time relationship and discontinuities. | Durable. |
 | HTML/JSON, waveform JS, topomap PNGs, event/summary CSVs | Browser assets and derived diagnostics. | Rebuildable cache. |
+| Reconstruction NumPy arrays | Exact native activations and physical reconstruction factors for the Tab 2 envelope. | Rebuildable cache. |
 
 The hidden directory is not entirely temporary: it contains the manual review record. Deleting a cache is different from deleting a review. Rebuildable files may be removed only when their saved inputs remain available.
 
@@ -156,6 +161,8 @@ Use one active writer per bundle in v1. A stale revision from another tab/proces
 Do not depend on closing the page, downloads, or a final button to save decisions. Python does not wait for browser closure. Browser storage may hold view preferences or clearly identified pending recovery data, but must not silently override a newer disk decision file. Existing prototype `localStorage` decisions are not a new subject's baseline and are not automatically migrated.
 
 A minimal server contract is: fetch manifest/decision state; replace decisions with an expected revision; serve the immutable cache. `GET /api/review` selects stable, and `?version=v2` explicitly selects another version. `PUT /api/review` accepts `exclude`, `expected_revision`, and `version` (omitting version retains the stable default for legacy clients). `POST /api/review/versions` accepts `expected_revision` and creates/selects a baseline version. `PUT /api/review/stable` accepts `version` and `expected_revision`. Responses include `active_version`, `stable_version`, the version list, and the selected version's exclusions. No database, remote service, user accounts, or multi-reviewer merging is required for v1.
+
+`POST /api/envelope` is read-only: accept `start_s`, `end_s`, the complete current `exclude` list, and `before_exclude` (a complete prior list or null). Return physical µV lower/upper extrema for 20 ms bins in the visible retained-time window, splitting at omitted-time joins. Reconstruct on demand from memory-mapped exact native sources and physical mixing/mean/PCA residual factors. The browser's rounded robust Float32 traces are not the reconstruction input. Do not store full reconstructed channel recordings, comparison history, or envelope state in the decision JSON. Loading a labeling version starts with Current only; the browser supplies Before only after a manual toggle in that session.
 
 ## Explicit loading into Python
 

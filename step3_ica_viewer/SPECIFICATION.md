@@ -33,6 +33,10 @@ Switching tabs must preserve the selected IC and individual waveform position. R
 
 This is the multi-component, MNE-like review surface.
 
+Place a reconstructed EEG envelope panel between the shared exclusion summary and the IC-trace panel. It follows the stacked view's exact time window, with matching horizontal plot margins and no independent time navigation. Use all ICA-fitted EEG channels from the retained fitting epochs (1–100 Hz, 250 Hz), rather than the original broadband Raw or dropped channels. Reconstruct in physical µV with MNE's mean, pre-whitening and configured retained PCA residuals restored. Within each 20 ms bin, take the minimum and maximum over all fitted channels and samples; shade between them. Clip bins at the visible window and omitted-time boundaries, and do not connect bands across removed-time gaps.
+
+On initial load, reopening, or selecting/creating a labeling version, show one **Current** envelope in 50%-transparent black. After an actual manual rejection or acceptance, show **Before** in 50%-transparent black and **After** in 50%-transparent green. Before is the complete exclusion set immediately before that one toggle; After is the current complete set. Each subsequent toggle replaces the comparison, including toggles made in Tab 3. No-op accept/reject commands, save acknowledgments and marking the current version stable do not replace it. This comparison exists only in browser-session memory; it is not a saved labeling history. Auto-scale both bands on one shared symmetric µV axis using their visible extrema.
+
 | Control or behavior | Contract |
 | --- | --- |
 | ICs displayed | Default `n_components` (all ICs); positive integer, clamped to available components. |
