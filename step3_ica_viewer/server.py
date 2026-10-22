@@ -161,9 +161,12 @@ def open_viewer(viewer_dir, *, open_browser=True):
     """Serve one bundle, returning its URL; Python must remain running for saving."""
     viewer_dir = Path(viewer_dir).expanduser().resolve(strict=True)
     cache_dir = ensure_cache(viewer_dir).resolve()
+    complete = (cache_dir / ".complete.json").stat()
+    cache_stamp = (complete.st_ino, complete.st_mtime_ns)
     with _SERVERS_LOCK:
         existing = _SERVERS.get(viewer_dir)
-        if existing is not None and existing[2] != cache_dir:
+        if existing is not None and (existing[2] != cache_dir or
+                                     getattr(existing[0], "cache_stamp", None) != cache_stamp):
             existing[0].shutdown()
             existing[0].server_close()
             existing[1].join(timeout=2)
@@ -174,6 +177,7 @@ def open_viewer(viewer_dir, *, open_browser=True):
             server.daemon_threads = True
             server.envelope_lock = threading.Lock()
             server.envelope_data = None
+            server.cache_stamp = cache_stamp
             worker = threading.Thread(target=server.serve_forever, daemon=True,
                                       name="ICA viewer")
             worker.start()

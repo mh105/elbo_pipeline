@@ -104,13 +104,13 @@ Compute a density-scaled Hamming periodogram for each exact retained fitting epo
 
 Store shared frequency bins and method metadata in the viewer payload, with one dB spectrum per component. Redraw when the selected IC, tab, or viewport changes. Preserve existing topomap size and review controls. Use positive-frequency bins for vertical autoscaling so a numerical DC floor cannot flatten the rest of the plot; draw the full spectrum with clipping to the axes.
 
-Spectra are derived display assets. Updating this calculation or its layout changes the display cache, not the fit identity or durable rejection JSON. Reopening an existing bundle must rebuild from its archived exact ICA and fitting epochs without refitting or resetting manual decisions.
+Spectra are derived display assets. Updating this calculation or its layout replaces the single display cache, not the fit identity or durable rejection JSON. Reopening an existing bundle must rebuild from its archived ICA and double-precision fitting epochs without refitting or resetting manual decisions. Archive round-trip tolerances and separate original/archive fingerprints are specified in [STORAGE.md](STORAGE.md); duplicate exact-sample supplements are not required.
 
 ## Numerical units
 
 For native IC source `s`, store `m = median(s)` and `q = 1.4826 × median(abs(s-m))` across retained fitting samples. Store the source trace as little-endian Float32 `r = (s-m)/q`. Native reconstruction is `s = r*q + m`; the stacked plot's visible-mean removal cancels `m`.
 
-Compute source/delta statistics, detection, grouping, and counts at the original fitting-data precision before casting the display cache to Float32. The compressed waveform files are display assets, not the authoritative input for recomputing scientific event counts. Browser-rendered delta curves and ticks can use their stored trace/normalization parameters without replacing the prepared event records.
+Compute source/delta statistics, detection, grouping, and counts from the validated double-precision epoch archive before casting the display cache to Float32. The compressed waveform files are display assets, not the authoritative input for recomputing scientific event counts. Browser-rendered delta curves and ticks can use their stored trace/normalization parameters without replacing the prepared event records.
 
 For this pipeline's EEG fit with `ica.noise_cov is None`, define the physical mixing matrix:
 
@@ -176,4 +176,5 @@ Before calling the reusable implementation complete:
 - Review all three tabs, lazy loading, navigation limits, keyboard focus, trackpad directions, scrollbar, zero-event components, long groups, and negative µV polarity.
 - Confirm automatic rejection can be overridden in either review view and is restored after browser/server restart.
 - Verify disk-save failure is visible, cache rebuild preserves exclusions, changed fits do not inherit component indices, and explicit loading validates identity and replaces `ica.exclude`.
+- Verify unchanged preparation/reopening reuses one cache, a code change replaces it without retaining graphical versions, and a tolerated FIF round-trip reuses the analysis while changed channels, reference, geometry, epoch support, samples or transforms do not.
 - Verify metadata and event exports match displayed counts, and source data, annotations, reference, fitted ICA transform, and Raw are not modified by viewer preparation/review.

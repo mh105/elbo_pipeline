@@ -19,6 +19,10 @@ import pandas as pd
 
 SCHEMA_VERSION = 1
 REVIEW_SCHEMA_VERSION = 2
+ARCHIVE_VERSION = 2
+SAMPLE_RTOL = 1e-7
+SAMPLE_ATOL = 1e-15  # Volts; permit FIF calibration-header rounding only.
+MODEL_RTOL = 1e-12
 CLASSES = ("brain", "muscle artifact", "eye blink", "heart beat", "line noise",
            "channel noise", "other")
 
@@ -69,8 +73,7 @@ def _file_hash(path):
     return digest.hexdigest()
 
 
-def model_fingerprint(ica, reference_channel):
-    """Hash transform semantics, excluding mutable ICA exclusions and paths."""
+def _model_fields(ica, reference_channel, *, legacy=False):
     fields = dict(version=1, reference_channel=reference_channel,
                   n_components=int(ica.n_components_), ch_names=list(ica.ch_names),
                   channel_types=ica.info.get_channel_types(),
@@ -81,10 +84,60 @@ def model_fingerprint(ica, reference_channel):
                   noise_cov=None)
     if ica.noise_cov is not None:
         raise ValueError("The viewer supports standard ICA whitening (noise_cov=None).")
+    if not legacy:
+        fields.update(version=2, sfreq=float(ica.info["sfreq"]),
+                      highpass=float(ica.info["highpass"]),
+                      lowpass=float(ica.info["lowpass"]), bads=list(ica.info["bads"]),
+                      coord_frames=[int(ch["coord_frame"]) for ch in ica.info["chs"]])
+    return fields
+
+
+def _model_fingerprint(ica, reference_channel, *, legacy=False):
     arrays = [(name, getattr(ica, name)) for name in
               ("pre_whitener_", "pca_components_", "pca_mean_", "mixing_matrix_",
                "unmixing_matrix_")]
-    return _fingerprint(fields, arrays)
+    return _fingerprint(_model_fields(ica, reference_channel, legacy=legacy), arrays)
+
+
+def model_fingerprint(ica, reference_channel):
+    """Hash transform semantics, excluding mutable ICA exclusions and paths."""
+    return _model_fingerprint(ica, reference_channel)
+
+
+def _models_match(left, right, reference_channel):
+    if _canonical(_model_fields(left, reference_channel)) != _canonical(_model_fields(right, reference_channel)):
+        return False
+    if not np.allclose([ch["loc"][:3] for ch in left.info["chs"]],
+                       [ch["loc"][:3] for ch in right.info["chs"]], rtol=1e-7, atol=1e-9):
+        return False
+    for name in ("pre_whitener_", "pca_components_", "pca_mean_", "mixing_matrix_", "unmixing_matrix_"):
+        a, b = np.asarray(getattr(left, name)), np.asarray(getattr(right, name))
+        if a.shape != b.shape or not np.isfinite(a).all() or not np.isfinite(b).all():
+            return False
+        scale = float(np.max(np.abs(b))) if b.size else 0.0
+        if not np.allclose(a, b, rtol=MODEL_RTOL, atol=MODEL_RTOL * scale):
+            return False
+    return True
+
+
+def _samples_match(left, right):
+    if left.shape != right.shape:
+        return False
+    return all(np.allclose(left[start:start + 8], right[start:start + 8],
+                           rtol=SAMPLE_RTOL, atol=SAMPLE_ATOL)
+               for start in range(0, len(left), 8))
+
+
+def _training_fields(epochs):
+    return dict(ch_names=list(epochs.ch_names), channel_types=epochs.get_channel_types(),
+                n_epochs=len(epochs), n_times=len(epochs.times), tmin=float(epochs.times[0]),
+                sfreq=float(epochs.info["sfreq"]), highpass=float(epochs.info["highpass"]),
+                lowpass=float(epochs.info["lowpass"]), baseline=epochs.baseline,
+                event_id=epochs.event_id, bads=list(epochs.info["bads"]),
+                custom_ref_applied=int(epochs.info["custom_ref_applied"]),
+                coord_frames=[int(ch["coord_frame"]) for ch in epochs.info["chs"]],
+                projs=[dict(active=bool(p["active"]), kind=int(p["kind"]), data=_jsonable(p["data"]))
+                       for p in epochs.info["projs"]])
 
 
 @contextmanager
@@ -142,6 +195,8 @@ def _manifest(viewer_dir):
         raise ValueError("Unsupported ICA viewer manifest schema.")
     if type(manifest.get("n_components")) is not int or manifest["n_components"] < 1:
         raise ValueError("Invalid ICA component count in manifest.")
+    if manifest.get("archive_version", 1) not in (1, ARCHIVE_VERSION):
+        raise ValueError("Unsupported ICA archive version.")
     expected = _fingerprint({key: manifest[key] for key in
                              ("recording_identity", "model_identity", "training_identity")})
     if manifest.get("fit_id") != expected:
@@ -298,8 +353,8 @@ def load_exclusions(viewer_dir, ica=None, *, version=None):
     manifest = _manifest(viewer_dir)
     review = read_review(viewer_dir, version=version)
     if ica is not None:
-        if (ica.n_components_ != manifest["n_components"] or
-                model_fingerprint(ica, manifest["reference_channel"]) != manifest["model_identity"]):
+        archived_ica, _, _, _ = _load_archived(Path(viewer_dir), manifest)
+        if not _models_match(ica, archived_ica, manifest["reference_channel"]):
             raise ValueError("The target ICA decomposition does not match this saved review.")
     return _indices(review["exclude"], manifest["n_components"])
 
@@ -351,6 +406,11 @@ def _validate_inputs(ica, epochs, raw, reference_channel, labels):
     if any(not np.all(np.isfinite(ch["loc"][:3])) or np.linalg.norm(ch["loc"][:3]) == 0
            for ch in epochs.info["chs"]):
         raise ValueError("All fitted electrodes need finite nonzero positions for topomaps.")
+    if (not np.allclose([ch["loc"][:3] for ch in ica.info["chs"]],
+                        [ch["loc"][:3] for ch in epochs.info["chs"]], rtol=1e-7, atol=1e-9)
+            or [int(ch["coord_frame"]) for ch in ica.info["chs"]] !=
+               [int(ch["coord_frame"]) for ch in epochs.info["chs"]]):
+        raise ValueError("ICA and fitting epochs must have matching electrode geometry.")
     data = epochs.get_data(copy=False)
     if not np.all(np.isfinite(data)):
         raise ValueError("Fitting epochs contain nonfinite samples.")
@@ -397,19 +457,102 @@ def _verify_archived(viewer_dir, manifest):
             raise ValueError(f"Missing or changed archived ICA viewer input: {entry['path']}")
 
 
+def _load_archived(viewer_dir, manifest):
+    """Verify the saved representation, then load its fit and display inputs."""
+    viewer_dir = Path(viewer_dir)
+    _verify_archived(viewer_dir, manifest)
+    ica = mne.preprocessing.read_ica(viewer_dir / "inputs/fitted-ica.fif", verbose=False)
+    epochs = mne.read_epochs(viewer_dir / "inputs/training-epo.fif", preload=True, verbose=False)
+    if manifest.get("archive_version", 1) == ARCHIVE_VERSION:
+        expected_model = manifest["archive_model_identity"]
+        expected_samples = manifest["archive_training_samples_identity"]
+        model_matches = model_fingerprint(ica, manifest["reference_channel"]) == expected_model
+    else:
+        if manifest["files"].get("mixing_matrix"):
+            ica.mixing_matrix_ = np.load(viewer_dir / manifest["files"]["mixing_matrix"], allow_pickle=False)
+        if manifest["files"].get("exact_data"):
+            samples = np.load(viewer_dir / manifest["files"]["exact_data"], allow_pickle=False)
+            if samples.shape != epochs.get_data(copy=False).shape:
+                raise ValueError("The fitting-sample supplement has an incompatible shape.")
+            epochs._data = samples
+        model_matches = manifest["model_identity"] in {
+            model_fingerprint(ica, manifest["reference_channel"]),
+            _model_fingerprint(ica, manifest["reference_channel"], legacy=True),
+        }
+        expected_samples = manifest.get("training_samples_identity")
+    if not model_matches or ica.n_components_ != manifest["n_components"]:
+        raise ValueError("Archived ICA transform does not match its recorded identity.")
+    if expected_samples is not None and _fingerprint(
+            {}, (("samples", epochs.get_data(copy=False)),)) != expected_samples:
+        raise ValueError("Archived fitting samples do not match their recorded identity.")
+    for info in (ica.info, epochs.info):
+        for channel, xyz in zip(info["chs"], manifest["geometry"]):
+            channel["loc"][:3] = xyz
+    labels = pd.read_csv(viewer_dir / "inputs/iclabel.csv", float_precision="round_trip")
+    labels.attrs.update(manifest["iclabel_metadata"])
+    mapping = pd.read_csv(viewer_dir / "inputs/epochs.csv", float_precision="round_trip")
+    return ica, epochs, labels, mapping
+
+
+def _same_analysis(viewer_dir, manifest, ica, epochs, mapping):
+    archived, saved_epochs, _, saved_mapping = _load_archived(viewer_dir, manifest)
+    if (not _models_match(ica, archived, manifest["reference_channel"])
+            or _canonical(_training_fields(epochs)) != _canonical(_training_fields(saved_epochs))
+            or list(mapping.columns) != list(saved_mapping.columns)
+            or any(not np.array_equal(mapping[col].to_numpy(), saved_mapping[col].to_numpy())
+                   for col in mapping.columns)):
+        return False
+    xyz = np.array([ch["loc"][:3] for ch in epochs.info["chs"]])
+    if not np.allclose(xyz, manifest["geometry"], rtol=1e-7, atol=1e-9):
+        return False
+    return _samples_match(epochs.get_data(copy=False), saved_epochs.get_data(copy=False))
+
+
+def migrate_bundle(viewer_dir):
+    """Remove legacy supplements after validating the double-precision archive.
+
+    Fit identity and all saved labeling versions remain unchanged. The next
+    ensure_cache call rebuilds the single cache from the verified FIF archive.
+    """
+    viewer_dir = Path(viewer_dir).expanduser().resolve(strict=True)
+    with _locked(viewer_dir.parent / ".prepare.lock"), _locked(viewer_dir / ".cache.lock"):
+        manifest = _manifest(viewer_dir)
+        original, original_epochs, _, _ = _load_archived(viewer_dir, manifest)
+        if manifest.get("archive_version") == ARCHIVE_VERSION:
+            return viewer_dir
+        archived = mne.preprocessing.read_ica(viewer_dir / "inputs/fitted-ica.fif", verbose=False)
+        epochs = mne.read_epochs(viewer_dir / "inputs/training-epo.fif", preload=True, verbose=False)
+        if (not _models_match(original, archived, manifest["reference_channel"])
+                or not _samples_match(original_epochs.get_data(copy=False), epochs.get_data(copy=False))
+                or _canonical(_training_fields(original_epochs)) != _canonical(_training_fields(epochs))):
+            raise ValueError("The archived fit exceeds the permitted serialization rounding error.")
+        removed = [manifest["files"].pop(key) for key in ("exact_data", "mixing_matrix")
+                   if manifest["files"].get(key)]
+        manifest.update(archive_version=ARCHIVE_VERSION,
+                        archive_model_identity=model_fingerprint(archived, manifest["reference_channel"]),
+                        archive_training_samples_identity=_fingerprint({}, (("samples", epochs.get_data(copy=False)),)),
+                        training_metadata=_training_fields(original_epochs))
+        manifest["input_files"] = [entry for entry in manifest["input_files"] if entry["path"] not in removed]
+        _atomic_json(viewer_dir / "manifest.json", manifest)
+        for name in removed:
+            (viewer_dir / name).unlink()
+    return viewer_dir
+
+
 def _cache_id(manifest):
     from .build import BUILD_VERSION
     folder = Path(__file__).parent
     versions = {name: _file_hash(folder / name) for name in
                 ("build.py", "viewer_template.html", "envelope.py")}
     return _fingerprint(dict(fit_id=manifest["fit_id"], build_version=BUILD_VERSION,
-                             source_files=versions)).split(":", 1)[1]
+                             source_files=versions,
+                             archived_inputs=manifest["input_files"])).split(":", 1)[1]
 
 
 def cache_directory(viewer_dir):
-    """Return this code version's cache location; call ensure_cache to build it."""
-    manifest = _manifest(viewer_dir)
-    return Path(viewer_dir) / "cache" / _cache_id(manifest)
+    """Return the fit's single replaceable viewer cache location."""
+    _manifest(viewer_dir)
+    return Path(viewer_dir) / "cache"
 
 
 def find_latest_bundle(eeg_path):
@@ -435,12 +578,17 @@ def find_latest_bundle(eeg_path):
 
 
 def ensure_cache(viewer_dir):
-    """Rebuild missing derived assets from immutable archived fit inputs."""
+    """Reuse current assets or replace the fit's one cache after a full rebuild."""
     from .build import build_viewer
     viewer_dir = Path(viewer_dir)
     manifest = _manifest(viewer_dir)
     _initialize_review(viewer_dir, manifest)
     cache = cache_directory(viewer_dir)
+    fingerprint = _cache_id(manifest)
+    required = {"index.html", "review_metadata.json", "summary.csv", "events.csv",
+                "reconstruction/model.npz", "reconstruction/sources.npy"}
+    for component in range(manifest["n_components"]):
+        required.update({f"data/ICA{component:03d}.js", f"topomaps/ICA{component:03d}.png"})
     with _locked(viewer_dir / ".cache.lock"):
         if (cache / ".complete.json").is_file():
             try:
@@ -449,43 +597,22 @@ def ensure_cache(viewer_dir):
                 complete = {}
             files = complete.get("files", []) if isinstance(complete, dict) else []
             if (files and complete.get("fit_id") == manifest["fit_id"] and
-                    {"index.html", "review_metadata.json", "summary.csv", "events.csv"}.issubset(files) and
+                    complete.get("code_fingerprint") == fingerprint and
+                    required.issubset(files) and
                     all((cache / item).is_file() for item in files)):
                 return cache
-        _verify_archived(viewer_dir, manifest)
-        ica = mne.preprocessing.read_ica(viewer_dir / "inputs/fitted-ica.fif", verbose=False)
-        exact_mixing = manifest["files"].get("mixing_matrix")
-        if exact_mixing is not None:
-            ica.mixing_matrix_ = np.load(viewer_dir / exact_mixing, allow_pickle=False)
-        if model_fingerprint(ica, manifest["reference_channel"]) != manifest["model_identity"]:
-            raise ValueError("Archived ICA transform does not match the exact model identity.")
-        epochs = mne.read_epochs(viewer_dir / "inputs/training-epo.fif", preload=True, verbose=False)
-        exact_data = manifest["files"].get("exact_data")
-        if exact_data is not None:
-            samples = np.load(viewer_dir / exact_data, allow_pickle=False)
-            if samples.shape != epochs.get_data(copy=False).shape:
-                raise ValueError("The exact fitting-sample archive has an incompatible shape.")
-            epochs._data = samples
-        sample_identity = manifest.get("training_samples_identity")
-        if sample_identity is not None and _fingerprint(
-                {}, (("samples", epochs.get_data(copy=False)),)) != sample_identity:
-            raise ValueError("Archived fitting samples do not match the exact training identity.")
-        # FIF channel locations use single precision; retain captured map geometry.
-        for info in (ica.info, epochs.info):
-            for channel, xyz in zip(info["chs"], manifest["geometry"]):
-                channel["loc"][:3] = xyz
-        labels = pd.read_csv(viewer_dir / "inputs/iclabel.csv", float_precision="round_trip")
-        labels.attrs.update(manifest["iclabel_metadata"])
-        epoch_table = pd.read_csv(viewer_dir / "inputs/epochs.csv")
-        cache.parent.mkdir(exist_ok=True)
-        temporary = Path(tempfile.mkdtemp(prefix=".building-", dir=cache.parent))
+        ica, epochs, labels, epoch_table = _load_archived(viewer_dir, manifest)
+        temporary = Path(tempfile.mkdtemp(prefix=".building-cache-", dir=viewer_dir))
         try:
             build_viewer(temporary, ica, epochs, labels,
                          recording_filename=manifest["recording_filename"],
                          reference_channel=manifest["reference_channel"], epoch_table=epoch_table,
                          review_id=manifest["fit_id"], initial_excluded=manifest["initial_exclude"])
             files = [str(path.relative_to(temporary)) for path in temporary.rglob("*") if path.is_file()]
-            _atomic_json(temporary / ".complete.json", dict(fit_id=manifest["fit_id"], files=files))
+            if not required.issubset(files):
+                raise ValueError("The viewer rebuild did not produce all required assets.")
+            _atomic_json(temporary / ".complete.json", dict(
+                fit_id=manifest["fit_id"], code_fingerprint=fingerprint, files=files))
             if cache.exists():
                 shutil.rmtree(cache)
             os.replace(temporary, cache)
@@ -509,9 +636,7 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
     source_files = _source_files(eeg_path, raw_bads)
     recording_id = _fingerprint(dict(filename=eeg_path.name, files=source_files,
                                      reference_channel=reference_channel, raw=raw_metadata))
-    training_id = _fingerprint(dict(ch_names=fit_epochs.ch_names,
-                                    channel_types=fit_epochs.get_channel_types(), sfreq=250,
-                                    highpass=1, lowpass=100, epoch_tmin=float(fit_epochs.times[0]),
+    training_id = _fingerprint(dict(version=2, metadata=_training_fields(fit_epochs),
                                     mapping=epoch_table.to_dict("list")),
                                (("samples", samples), ("geometry", geometry)))
     training_samples_id = _fingerprint({}, (("samples", samples),))
@@ -526,8 +651,25 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
             manifest = _manifest(viewer_dir)
             if any(manifest.get(key) != value for key, value in identities.items()):
                 raise ValueError("ICA viewer directory identity collision.")
+            if not _same_analysis(viewer_dir, manifest, ica, fit_epochs, epoch_table):
+                raise ValueError("The supplied fit does not match its saved analysis metadata.")
             _initialize_review(viewer_dir, manifest)
         else:
+            matches = []
+            for path in sorted(parent.glob("*/manifest.json")):
+                if path.parent.name.startswith("."):
+                    continue
+                candidate = _manifest(path.parent)
+                if (candidate["recording_identity"] == recording_id and
+                        _same_analysis(path.parent, candidate, ica, fit_epochs, epoch_table)):
+                    matches.append(path.parent)
+            if len(matches) > 1:
+                raise ValueError("Multiple saved fits match this analysis within serialization tolerance.")
+            if matches:
+                viewer_dir = matches[0]
+                _initialize_review(viewer_dir, _manifest(viewer_dir))
+                ensure_cache(viewer_dir)
+                return viewer_dir
             temporary = Path(tempfile.mkdtemp(prefix=".preparing-", dir=parent))
             try:
                 inputs = temporary / "inputs"
@@ -538,25 +680,13 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                 epoch_paths = fit_epochs.copy().save(inputs / "training-epo.fif", fmt="double",
                                                       overwrite=False, verbose=False)
                 restored = mne.read_epochs(inputs / "training-epo.fif", preload=True, verbose=False)
-                exact_data = None
-                if not np.array_equal(restored.get_data(copy=False), samples):
-                    # FIF divides/multiplies channel calibration even in double
-                    # precision. Preserve the original bits when that rounds.
-                    np.save(inputs / "training-data.npy", samples, allow_pickle=False)
-                    exact_data = "inputs/training-data.npy"
-                    restored._data = np.load(temporary / exact_data, allow_pickle=False)
-                if _fingerprint({}, (("samples", restored.get_data(copy=False)),)) != training_samples_id:
-                    raise ValueError("Exact fitting samples did not round-trip correctly.")
+                if not _samples_match(samples, restored.get_data(copy=False)):
+                    raise ValueError("Fitting samples exceed the permitted FIF rounding error.")
+                if _canonical(_training_fields(fit_epochs)) != _canonical(_training_fields(restored)):
+                    raise ValueError("Fitting metadata changed during FIF serialization.")
                 restored_ica = mne.preprocessing.read_ica(inputs / "fitted-ica.fif", verbose=False)
-                exact_mixing = None
-                if not np.array_equal(restored_ica.mixing_matrix_, ica.mixing_matrix_):
-                    # FIF stores unmixing, then recomputes its pseudoinverse on
-                    # read. Preserve rounding from the original component sort.
-                    np.save(inputs / "mixing-matrix.npy", ica.mixing_matrix_, allow_pickle=False)
-                    exact_mixing = "inputs/mixing-matrix.npy"
-                    restored_ica.mixing_matrix_ = np.load(temporary / exact_mixing, allow_pickle=False)
-                if model_fingerprint(restored_ica, reference_channel) != model_id:
-                    raise ValueError("The archived ICA transform did not round-trip exactly.")
+                if not _models_match(ica, restored_ica, reference_channel):
+                    raise ValueError("ICA transform exceeds the permitted FIF rounding error.")
                 labels.to_csv(inputs / "iclabel.csv", index=False)
                 epoch_table.to_csv(inputs / "epochs.csv", index=False)
                 input_files = [dict(path=str(path.relative_to(temporary)), sha256=_file_hash(path))
@@ -566,6 +696,10 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                 decision_name = eeg_path.stem + "_ica_exclude.json"
                 manifest = dict(schema_version=SCHEMA_VERSION, recording_filename=eeg_path.name,
                                 source_path=str(eeg_path), fit_id=fit_id, **identities,
+                                archive_version=ARCHIVE_VERSION,
+                                archive_model_identity=model_fingerprint(restored_ica, reference_channel),
+                                archive_training_samples_identity=_fingerprint({}, (("samples", restored.get_data(copy=False)),)),
+                                training_metadata=_training_fields(fit_epochs),
                                 n_components=int(ica.n_components_), reference_channel=reference_channel,
                                 original_raw=raw_metadata, geometry=geometry[:, :3].tolist(),
                                 source_files=source_files,
@@ -576,10 +710,6 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                                 input_files=input_files, created_at_utc=_now(),
                                 files=dict(decision=decision_name, epochs=[str(Path(p).relative_to(temporary))
                                                                           for p in epoch_paths]))
-                if exact_data is not None:
-                    manifest["files"]["exact_data"] = exact_data
-                if exact_mixing is not None:
-                    manifest["files"]["mixing_matrix"] = exact_mixing
                 review = {key: manifest[key] for key in
                           ("schema_version", "recording_filename", "fit_id", "n_components", "initial_auto_exclude")}
                 review.update(revision=0, updated_at_utc=_now(), exclude=initial_exclude)

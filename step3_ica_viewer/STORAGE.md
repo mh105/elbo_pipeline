@@ -33,27 +33,24 @@ sub-04/eeg/
         sub-04_task-ColorPrecMemStudy_run-1_eeg_ica_exclude.json
         inputs/
           fitted-ica.fif
-          mixing-matrix.npy                      # only if FIF recomputes different mixing values
           training-epo.fif
-          training-data.npy                      # only if FIF needs exact-sample supplementation
           iclabel.csv
           epochs.csv
         cache/
-          <cache-id>/
-            index.html
-            review_metadata.json
-            summary.csv
-            events.csv
-            reconstruction/
-              model.npz                        # physical mixing, mean, timing, residual PCA mixing
-              sources.npy                      # exact Float64 native IC activations
-              residual_sources.npy             # only when configured PCA residuals remain
-            data/
-              ICA000.js
-              ...
-            topomaps/
-              ICA000.png
-              ...
+          index.html
+          review_metadata.json
+          summary.csv
+          events.csv
+          reconstruction/
+            model.npz                          # physical mixing, mean, timing, residual PCA mixing
+            sources.npy                        # Float64 native IC activations from the archive
+            residual_sources.npy               # only when configured PCA residuals remain
+          data/
+            ICA000.js
+            ...
+          topomaps/
+            ICA000.png
+            ...
 ```
 
 The recording directory includes the exact original basename **including its extension**, avoiding `.set`/`.fif` collisions. The decision filename visibly includes that recording's stem and is a UTF-8 text file. JSON is the recommended text representation because it carries both the exclusion list and the identity needed to interpret its indices safely.
@@ -67,19 +64,21 @@ Create missing viewer directories when preparing a bundle; do not modify or rena
 | Decision JSON | Authoritative labeling versions, final designation, and save revision. | Durable; never delete/reset during cache regeneration. |
 | Manifest | Recording identity, fit identity, preprocessing/timing metadata, software versions, files, and checksums. | Durable. |
 | Fitted ICA | Immutable transform snapshot for this fit; its original exclusions are only an initial snapshot. | Durable by default. |
-| Exact fitting epochs | Rebuild sources, metrics, and plots without rerunning preprocessing. | Durable by default. |
+| Double-precision fitting epochs | Rebuild sources, metrics, and plots without rerunning preprocessing. | Durable by default. |
 | ICLabel table | Preserve unrounded class results and the automatic baseline. | Durable. |
 | Epoch mapping CSV | Reconstruct retained-time/original-time relationship and discontinuities. | Durable. |
 | HTML/JSON, waveform JS, topomap PNGs, event/summary CSVs | Browser assets and derived diagnostics. | Rebuildable cache. |
-| Reconstruction NumPy arrays | Exact native activations and physical reconstruction factors for the Tab 2 envelope. | Rebuildable cache. |
+| Reconstruction NumPy arrays | Native Float64 activations and physical reconstruction factors for the Tab 2 envelope. | Rebuildable cache. |
 
 The hidden directory is not entirely temporary: it contains the manual review record. Deleting a cache is different from deleting a review. Rebuildable files may be removed only when their saved inputs remain available.
 
-V1 saves ICA and exact fitting epochs inside the bundle. Referencing existing external files by path and checksum is a possible future storage extension, not a current preparation option. Save epoch samples at double precision when using FIF (`fmt="double"`) if exact regeneration from the in-memory fit is required, and verify the round-trip. Avoid relying on default single-precision epoch serialization for exact data identity. Record any FIF split-file parts.
+Archive one ICA FIF and one double-precision epoch FIF (`fmt="double"`), including any FIF split parts. Referencing existing external snapshots is not a preparation option. Save an epochs copy because MNE's writer can temporarily rescale its supplied buffer. Do not write duplicate `training-data.npy` or `mixing-matrix.npy` input supplements. Captured electrode XYZ coordinates restore geometry rounded by FIF metadata serialization; caller objects remain unchanged.
 
-The implemented v1 always archives a copy of the ICA and fitting epochs. MNE's epoch writer can temporarily rescale the supplied buffer, so save an epochs copy. Even double-precision FIF can round calibrated samples; when its round-trip is not bit-exact, save `inputs/training-data.npy` with the original samples. Rebuilding overlays that array only onto newly loaded epochs and verifies its canonical sample fingerprint. Caller objects remain unchanged, and the manifest/checksums cover the optional array. Captured electrode XYZ coordinates also restore geometry rounded by FIF metadata serialization.
+Validate the saved/reloaded samples against the originals with `rtol=1e-7`, `atol=1e-15` V. Validate every numerical ICA transform array with relative tolerance `1e-12` and an absolute tolerance of `1e-12` times that array's scale. Channel/component order, reference/projection/whitening configuration, geometry, epoch selection/events/time mapping and sampling/filter metadata must also match; numerical tolerance is not permission to reuse labels for a different decomposition. MNE's recomputation of the mixing matrix on read is accepted within this bound.
 
-MNE saves the unmixing matrix in ICA FIF files and recomputes the mixing matrix on read. After component sorting, that recomputation can differ from the original mixing matrix by floating-point round-off. When needed, archive the original matrix in `inputs/mixing-matrix.npy` and restore it only onto newly loaded ICA objects. Verify the full model fingerprint after restoration, retaining exact transform identity and existing review decisions. The FIF and optional array together form the exact ICA archive; a bare `mne.read_ica()` does not restore the supplement.
+Archive format 2 records fingerprints of the actual reloaded FIF representation separately from the original analysis fingerprints. Verify archived-file SHA-256 checksums and those archived fingerprints when loading. Original fingerprints remain the durable fit identity; do not replace them merely because serialization changed a few low-order bits.
+
+`migrate_bundle()` validates a legacy archive and its sidecars, checks that the bare FIF representation matches within the same numerical tolerances, then records archive format 2 while preserving the fit ID and decision JSON. It removes the obsolete input supplements. Call `ensure_cache()` or reopen afterward to replace old graphical caches with the single current `cache/`. Migration does not renumber or discard manual labeling versions.
 
 The initial source Raw need not be saved again. For EEGLAB source identity, account for both `.set` and its external `.fdt` where present; checking only the small header file is insufficient if samples live elsewhere.
 
@@ -93,13 +92,15 @@ Use separate, versioned identities:
 2. **Model identity:** a canonical fingerprint of ordered fitted channel names/types, effective reference and projection/whitening configuration, component count, `pre_whitener_`, `pca_components_`, `pca_mean_`, `mixing_matrix_`, and `unmixing_matrix_`. Include the exact transform semantics. Exclude `ica.exclude`, display state, timestamps, and incidental filesystem paths.
 3. **Training identity:** exact fitting samples, ordered channel metadata, original event/sample map, sampling/filter information, and retained support. Include geometry used for the displayed maps/scales in the bundle metadata.
 4. **Fit ID:** combine the recording, model, and training identities. Store full fingerprints in the manifest; a short directory label is allowed only if full identities are still checked and collisions are handled.
-5. **Cache ID:** fit identity plus detector, rendering, and schema versions/settings. Changing display styling or detector settings can regenerate the cache without discarding this fit's manual exclusions.
+5. **Cache fingerprint:** fit identity plus detector, rendering, and schema versions/settings, including the contents of `build.py`, `viewer_template.html`, and `envelope.py`. It determines whether the single `cache/` needs replacement. It is not analysis identity and does not create another permanent cache directory. Changing display styling or detector settings must preserve this fit's manual exclusions.
 
-Define canonical fingerprint encoding once: stable field order, explicit array shape/dtype/endianness, and normalized serialization. Do not use Python's process-randomized `hash()`. Preserve saved numerical values exactly enough for the identity contract and verify load/save round-trips.
+Define canonical fingerprint encoding once: stable field order, explicit array shape/dtype/endianness, and normalized serialization. Do not use Python's process-randomized `hash()` or rounded-array hashes. Store exact original fingerprints and verify the save/load round-trip with the explicit numerical tolerances above.
 
 **Do not use the complete ICA FIF file hash as the durable model identity.** Saving a changed `ica.exclude` can change that file hash without changing the decomposition. File hashes still verify archived inputs, but they are different from the immutable numerical model fingerprint.
 
-A changed fit identity creates a separate review even if subject, channel count, component count, or filenames match. A deterministic rerun with exactly identical recorded inputs and transforms may correctly match the same content fingerprint. Do not automatically transfer rejected indices across different fits. Updated ICLabel results or detector versions do not silently reset an existing final review of the same fit; retain the original automatic baseline with its provenance.
+Preparation first checks the original content fingerprint. If that differs because inputs came through a FIF round-trip, compare candidate bundles' complete analysis metadata and numerical arrays under the same tolerances. A matching analysis reuses the existing fit directory, decision JSON and current cache; it does not resave the archives. A genuinely different analysis creates a separate review even if subject, channel count, component count, or filenames match. Do not transfer rejected indices across different fits. Updated ICLabel results or detector versions do not silently reset an existing final review of the same fit; retain the original automatic baseline with its provenance.
+
+Build replacement assets in a temporary staging directory and publish only a complete cache. After a successful replacement, retain no past viewer-cache versions. Repeating preparation or reopening with unchanged code/inputs reuses the same current cache without growing the folder. Manual labeling versions remain independent in their durable JSON.
 
 ## Decision text format
 

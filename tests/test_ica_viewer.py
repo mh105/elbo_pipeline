@@ -100,20 +100,44 @@ class TestViewerReviewStorage(unittest.TestCase):
         # Preserve formatting too: preparation must never rewrite the review.
         decision.write_text(json.dumps(saved, indent=4) + "\n", encoding="utf-8")
         before = decision.read_bytes()
+        complete_path = storage.cache_directory(viewer_dir) / ".complete.json"
+        complete_before = (complete_path.read_bytes(), complete_path.stat().st_mtime_ns)
         changed_exclusions = self.ica.copy()
         changed_exclusions.exclude = [0, 1, 3]
         self.assertEqual(self.prepare(changed_exclusions), viewer_dir)
+        self.assertEqual((complete_path.read_bytes(), complete_path.stat().st_mtime_ns), complete_before)
         self.assertEqual(decision.read_bytes(), before)
         self.assertEqual(storage.load_exclusions(viewer_dir, ica=changed_exclusions), [2])
         self.assertEqual(changed_exclusions.exclude, [0, 1, 3])
         previous_cache = storage.cache_directory(viewer_dir)
+        previous_complete = (previous_cache / ".complete.json").read_bytes()
+        obsolete = previous_cache / "obsolete-graphical-asset.txt"
+        obsolete.write_text("from the old viewer design")
         with patch.object(builder, "BUILD_VERSION", builder.BUILD_VERSION + "-upgrade"):
             rebuilt = storage.ensure_cache(viewer_dir)
-            self.assertNotEqual(rebuilt, previous_cache)
+            self.assertEqual(rebuilt, viewer_dir / "cache")
+            self.assertEqual(rebuilt, previous_cache)
+            self.assertNotEqual((rebuilt / ".complete.json").read_bytes(), previous_complete)
+            self.assertFalse(obsolete.exists())
             payload = json.loads((rebuilt / "review_metadata.json").read_text())
             self.assertIn("psd", payload)
             self.assertEqual(decision.read_bytes(), before)
         self.assertTrue(previous_cache.is_dir())
+
+    def test_server_reuses_unchanged_cache_and_restarts_after_same_path_rebuild(self):
+        viewer_dir = self.prepare()
+        self.addCleanup(server.close_viewer, viewer_dir)
+        server.open_viewer(viewer_dir, open_browser=False)
+        previous, thread, cache = server._SERVERS[viewer_dir.resolve()]
+        server.open_viewer(viewer_dir, open_browser=False)
+        self.assertIs(server._SERVERS[viewer_dir.resolve()][0], previous)
+        with patch.object(builder, "BUILD_VERSION", builder.BUILD_VERSION + "-upgrade"):
+            server.open_viewer(viewer_dir, open_browser=False)
+            current, _, rebuilt = server._SERVERS[viewer_dir.resolve()]
+            self.assertIsNot(current, previous)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(cache, rebuilt)
+            self.assertIsNone(current.envelope_data)
 
     def test_empty_review_is_complete_list_and_loader_does_not_mutate_ica(self):
         viewer_dir = self.prepare()
@@ -380,7 +404,7 @@ class TestViewerReviewStorage(unittest.TestCase):
 
 
 class TestViewerBuild(unittest.TestCase):
-    def test_fresh_fit_preserves_native_mixing_matrix_across_fif_round_trip(self):
+    def test_fresh_fit_validates_native_mixing_matrix_without_numpy_supplement(self):
         ica, epochs, raw, labels = make_inputs(mixed=True)
         original_mixing = ica.mixing_matrix_.copy()
         original_maps = ica.get_components().copy()
@@ -401,10 +425,10 @@ class TestViewerBuild(unittest.TestCase):
                 reference_channel="Cz", iclabel_table=labels,
             )
             manifest = json.loads((viewer_dir / "manifest.json").read_text())
-            np.testing.assert_array_equal(
-                np.load(viewer_dir / manifest["files"]["mixing_matrix"], allow_pickle=False),
-                original_mixing,
-            )
+            self.assertNotIn("mixing_matrix", manifest["files"])
+            self.assertFalse((viewer_dir / "inputs/mixing-matrix.npy").exists())
+            np.testing.assert_allclose(restored.mixing_matrix_, original_mixing,
+                                       rtol=1e-12, atol=1e-12 * np.max(np.abs(original_mixing)))
             storage.save_review(viewer_dir, [], expected_revision=0)
             decision_path = viewer_dir / manifest["files"]["decision"]
             saved_bytes = decision_path.read_bytes()
@@ -421,22 +445,17 @@ class TestViewerBuild(unittest.TestCase):
                 index = component["id"]
                 channel = np.argmax(np.abs(voltage_maps[:, index]))
                 self.assertEqual(component["voltage_channel"], ica.ch_names[channel])
-                self.assertEqual(component["voltage_uV_per_source_unit"], voltage_maps[channel, index])
-            direct = tmp / "direct"
-            direct.mkdir()
-            builder._topomaps(direct, ica)
-            for image in (direct / "topomaps").glob("*.png"):
-                self.assertEqual((cache / "topomaps" / image.name).read_bytes(), image.read_bytes())
+                self.assertAlmostEqual(component["voltage_uV_per_source_unit"],
+                                       voltage_maps[channel, index], places=10)
         np.testing.assert_array_equal(ica.mixing_matrix_, original_mixing)
         np.testing.assert_array_equal(ica.unmixing_matrix_, original_unmixing)
         np.testing.assert_array_equal(ica.get_components(), original_maps)
         self.assertEqual(ica.exclude, [0])
 
-    def test_nonunity_fif_calibration_preserves_exact_samples_when_rebuilding(self):
+    def test_nonunity_fif_calibration_uses_tolerated_samples_without_numpy_supplement(self):
         ica, epochs, raw, labels = make_inputs()
         epochs.info["chs"][0]["cal"] = 2.415431e-5
         original = epochs.get_data(copy=True)
-        original_sources = ica.get_sources(epochs).get_data().transpose(1, 0, 2).reshape(4, -1)
         with tempfile.TemporaryDirectory(prefix="ica-viewer-calibration-") as tmp:
             eeg_path = Path(tmp) / "sub-calibration_eeg.fif"
             eeg_path.write_bytes(b"source recording")
@@ -450,14 +469,16 @@ class TestViewerBuild(unittest.TestCase):
             # than accidentally testing the already exact unity-calibration path.
             self.assertFalse(np.array_equal(archived.get_data(), original))
             manifest = json.loads((viewer_dir / "manifest.json").read_text())
-            np.testing.assert_array_equal(
-                np.load(viewer_dir / manifest["files"]["exact_data"], allow_pickle=False),
-                original,
-            )
+            self.assertNotIn("exact_data", manifest["files"])
+            self.assertFalse((viewer_dir / "inputs/training-data.npy").exists())
+            np.testing.assert_allclose(archived.get_data(), original, rtol=1e-7, atol=1e-15)
+            archived_ica = mne.preprocessing.read_ica(
+                viewer_dir / "inputs/fitted-ica.fif", verbose=False)
+            archived_sources = archived_ica.get_sources(archived).get_data().transpose(1, 0, 2).reshape(4, -1)
             shutil.rmtree(storage.cache_directory(viewer_dir))
             rebuilt = storage.ensure_cache(viewer_dir)
             payload = json.loads((rebuilt / "review_metadata.json").read_text())
-            for component, source in zip(payload["components"], original_sources):
+            for component, source in zip(payload["components"], archived_sources):
                 center = np.median(source)
                 scale = 1.4826 * np.median(np.abs(source - center))
                 self.assertEqual(component["source_median"], center)
