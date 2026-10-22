@@ -356,7 +356,7 @@ def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-10"
+    subject_id = "sub-03"
     eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     raw = load_raw_data(subject_id)
@@ -403,6 +403,7 @@ if __name__ == "__main__":
         iclabel_table=iclabel_table,
     )
     open_ica_viewer(viewer_dir)
+    # open_ica_viewer(eeg_path=eeg_path)
 
     # %% Run this cell after reviewing; loading replaces, rather than unions, exclusions
     input("Review ICs in the interactive viewer,"
