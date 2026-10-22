@@ -43,7 +43,7 @@ Pass the explicit original `.set`/EEG path. MNE's `raw_bads.filenames[0]` can re
 
 CSV files are useful exports, but they are not substitutes for the fitted ICA and exact epochs. The current browser loads embedded JSON (including median component spectra), lazy per-IC Float32 waveform files, and topomap PNGs. It does not read `summary.csv` to draw its waveforms.
 
-The Full time traces tab also shows a synchronized reconstructed EEG envelope in µV across all fitted channels, using 20 ms extrema. It starts as one black **Current** band. After a manual reject/keep toggle in either review tab, it compares black **Before** and green **After** bands for that last change. Reopening or loading a labeling version resets this temporary comparison to Current. Exact native source and reconstruction arrays are rebuildable cache files; no additional Raw recording is needed.
+The Full time traces tab also shows a synchronized reconstructed EEG envelope in µV across all fitted channels, using 20 ms extrema. It starts as one 50%-opacity black **Current** band. After a manual reject/keep toggle in either review tab, it compares 50%-opacity red **Before** and green **After** bands for that last change. Reopening or loading a labeling version resets this temporary comparison to Current. Exact native source and reconstruction arrays are rebuildable cache files; no additional Raw recording is needed.
 
 ## Intended workflow
 

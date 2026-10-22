@@ -481,13 +481,13 @@ function drawEnvelope(){
    q.closePath();q.fill();
   }
  }
- if(result){if(result.before){fillBand(result.before,'rgba(0,0,0,.5)');fillBand(result.current,'rgba(0,150,70,.5)');}else fillBand(result.current,'rgba(0,0,0,.5)');}
+ if(result){if(result.before){fillBand(result.before,'rgba(255,0,0,.5)');fillBand(result.current,'rgba(0,150,70,.5)');}else fillBand(result.current,'rgba(0,0,0,.5)');}
  q.restore();
  drawGaps({ctx:q,left,right,top,bottom,w,h},start,end);
  q.strokeStyle='#dce4eb';q.beginPath();q.moveTo(left,top);q.lineTo(left,bottom);q.lineTo(right,bottom);q.stroke();
  if(!result){q.fillStyle=envelopeError?'#a82f3d':'#62798a';q.textAlign='left';q.fillText(envelopeError||(!reviewReady?'Loading saved decisions…':'Computing reconstructed EEG…'),left,top+22);}
  $('envelopeRange').textContent=`${fmt(start,2)}–${fmt(end,2)} s · 20 ms extrema`;
- $('envelopeLegend').innerHTML=envelopeBefore===null?'<span><i class="swatch" style="background:rgba(0,0,0,.5)"></i>Current</span>':'<span><i class="swatch" style="background:rgba(0,0,0,.5)"></i>Before</span><span><i class="swatch" style="background:rgba(0,150,70,.5)"></i>After</span>';
+ $('envelopeLegend').innerHTML=envelopeBefore===null?'<span><i class="swatch" style="background:rgba(0,0,0,.5)"></i>Current</span>':'<span><i class="swatch" style="background:rgba(255,0,0,.5)"></i>Before</span><span><i class="swatch" style="background:rgba(0,150,70,.5)"></i>After</span>';
  $('envelopeDescription').textContent=(envelopeLastEdit?`Last manual edit: ${envelopeLastEdit.rejected?'reject':'accept'} ${envelopeLastEdit.name}. `:'Current exclusions; no manual change in this session. ')+'Min/max across all fitted EEG channels and each 20 ms bin · 1–100 Hz fitting data at 250 Hz.';
  canvas.setAttribute('aria-label',`${envelopeBefore===null?'Current':'Before and after the last manual edit'} reconstructed EEG envelope, ${fmt(start,2)} to ${fmt(end,2)} seconds${result?', shared limits ±'+fmt(limit,2)+' µV':''}.`);
 }
