@@ -230,14 +230,26 @@ def prepare_ica_viewer(
     )
 
 
-def open_ica_viewer(viewer_dir, *, open_browser=True):
-    """Serve a prepared viewer with disk autosaving; return its local URL.
+def open_ica_viewer(viewer_dir=None, *, eeg_path=None, open_browser=True):
+    """Serve a saved viewer from its directory or EEG path; return its local URL.
 
+    Pass eeg_path to select its newest archived fit by creation time, without
+    fitting or preparing again. An existing EEG file also works positionally.
+    A current display cache is reused; missing/outdated assets rebuild from
+    the archived ICA and epochs. Saved labeling versions are preserved.
     The local service runs in the background while this Python process remains
     alive. Reopening the same directory restores its saved review decisions.
     """
     from step3_ica_viewer.server import open_viewer
+    from step3_ica_viewer.storage import find_latest_bundle
 
+    if (viewer_dir is None) == (eeg_path is None):
+        raise ValueError("Provide exactly one of viewer_dir or eeg_path.")
+    if eeg_path is None and Path(viewer_dir).expanduser().is_file():
+        eeg_path = viewer_dir
+    if eeg_path is not None:
+        viewer_dir = find_latest_bundle(eeg_path)
+        print(f"ICA viewer directory: {viewer_dir}")
     url = open_viewer(viewer_dir, open_browser=open_browser)
     print(f"ICA viewer: {url}")
     return url

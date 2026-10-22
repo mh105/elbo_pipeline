@@ -87,7 +87,20 @@ A new session can reopen an existing bundle without an active Python kernel or f
 
 The Step 3 example separates preparation/opening and explicit loading into `# %%` cells. The final cell asks for Enter before loading, so running the entire file also allows time for review. The server stays alive while its Python process is running.
 
-To reopen a viewer without rerunning preprocessing, run this from the pipeline directory:
+To reopen the newest saved fit for an EEG recording without running preprocessing, `fit_ica`, or `prepare_ica_viewer` again:
+
+```python
+from step3_ica_cleaning import open_ica_viewer
+
+viewer_url = open_ica_viewer(eeg_path=eeg_path)
+# An existing EEG file also works positionally: open_ica_viewer(eeg_path)
+```
+
+This searches only `eeg_path.parent / '.ica_viewer' / eeg_path.name`, matches the saved recording path, and prints the selected fit directory. "Newest" means the manifest's fit-creation time, with manifest modification time breaking same-second ties; editing an older fit's labels does not make it the newest fit. The existing display cache is reused without reading the original EEG or loading the ICA/epochs. Missing or outdated display assets rebuild from the archived inputs. Saved labeling versions are preserved, and the viewer opens the final version. If no saved fit exists, prepare one first; this shortcut never fits ICA automatically.
+
+To choose a particular saved decomposition, keep using `open_ica_viewer(viewer_dir)`. Loading exclusions into an ICA object still requires its explicit matching `viewer_dir`.
+
+Alternatively, reopen a specific fit from the command line, from the pipeline directory:
 
 ```bash
 python -m step3_ica_viewer /absolute/path/to/the/recording/fit-directory

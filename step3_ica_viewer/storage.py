@@ -412,6 +412,28 @@ def cache_directory(viewer_dir):
     return Path(viewer_dir) / "cache" / _cache_id(manifest)
 
 
+def find_latest_bundle(eeg_path):
+    """Find the newest archived fit for this EEG path without loading its data."""
+    eeg_path = Path(eeg_path).expanduser().resolve()
+    parent = eeg_path.parent / ".ica_viewer" / eeg_path.name
+    candidates = []
+    for path in parent.glob("*/manifest.json"):
+        if path.parent.name.startswith("."):
+            continue
+        manifest = _manifest(path.parent)
+        if (manifest["recording_filename"] != eeg_path.name or
+                Path(manifest["source_path"]).resolve() != eeg_path):
+            continue
+        created = datetime.fromisoformat(manifest["created_at_utc"].replace("Z", "+00:00"))
+        candidates.append((created, path.stat().st_mtime_ns, path.parent))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No prepared ICA viewer found for {eeg_path}. "
+            "Run prepare_ica_viewer once for this recording first."
+        )
+    return max(candidates)[2]
+
+
 def ensure_cache(viewer_dir):
     """Rebuild missing derived assets from immutable archived fit inputs."""
     from .build import build_viewer

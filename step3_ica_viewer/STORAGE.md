@@ -58,7 +58,7 @@ sub-04/eeg/
 
 The recording directory includes the exact original basename **including its extension**, avoiding `.set`/`.fif` collisions. The decision filename visibly includes that recording's stem and is a UTF-8 text file. JSON is the recommended text representation because it carries both the exclusion list and the identity needed to interpret its indices safely.
 
-Create missing viewer directories when preparing a bundle; do not modify or rename the original EEG or its companion data files. If several fits exist, require an explicit fit selection or exact match rather than picking the newest directory and assuming its component numbers still apply.
+Create missing viewer directories when preparing a bundle; do not modify or rename the original EEG or its companion data files. `open_ica_viewer(eeg_path=...)` explicitly requests the newest saved fit under that recording's directory, matched by resolved source path and recording filename. Order by immutable manifest `created_at_utc`, then manifest `st_mtime_ns` for same-second creations and directory name for a deterministic remaining tie. Ignore dot-prefixed staging directories; invalid manifests raise instead of silently falling back. Label saves and cache rebuilds do not affect fit selection. An existing EEG file can also be passed positionally. Keep `open_ica_viewer(viewer_dir)` to select an exact fit. This convenience selects only the viewer to open; loading exclusions into a live ICA still requires explicit bundle selection and transform validation.
 
 ## Durable records versus rebuildable cache
 
@@ -146,6 +146,8 @@ Record the original automatic list separately from the final list so manual acce
 Plain static HTML and the current read-only file server cannot reliably write arbitrary subject-local files. The reusable viewer needs a small local HTTP service configured with one bundle directory. Serve browser assets and read/write that bundle's decision file; the browser must not supply arbitrary output paths.
 
 On open:
+
+For an EEG-path shortcut, discover the saved fit using manifest metadata only, without reading or hashing the source EEG. Do not call `fit_ica` or `prepare_ica_viewer`. If no matching saved bundle exists, raise an error directing the caller to prepare it once. Reuse a complete current cache without loading ICA/epoch archives; otherwise rebuild the display from saved inputs through the existing cache lifecycle. Print the selected bundle directory and retain the helper's URL return value.
 
 1. Validate the bundle manifest and fit identity.
 2. If a valid decision file exists, load its final version. If no decision file exists, initialize Version 1 from the captured current `ica.exclude`, recording the distinct initial automatic baseline from the ICLabel table. The first launch may already contain deliberate manual decisions made in Python.
