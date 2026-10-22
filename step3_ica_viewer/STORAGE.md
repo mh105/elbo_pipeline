@@ -64,7 +64,7 @@ Create missing viewer directories when preparing a bundle; do not modify or rena
 
 | Artifact | Purpose | Retention |
 | --- | --- | --- |
-| Decision JSON | Authoritative labeling versions, stable designation, and save revision. | Durable; never delete/reset during cache regeneration. |
+| Decision JSON | Authoritative labeling versions, final designation, and save revision. | Durable; never delete/reset during cache regeneration. |
 | Manifest | Recording identity, fit identity, preprocessing/timing metadata, software versions, files, and checksums. | Durable. |
 | Fitted ICA | Immutable transform snapshot for this fit; its original exclusions are only an initial snapshot. | Durable by default. |
 | Exact fitting epochs | Rebuild sources, metrics, and plots without rerunning preprocessing. | Durable by default. |
@@ -131,9 +131,11 @@ Versioned file, `<recording-stem>_ica_exclude.json` (illustrative values):
 }
 ```
 
-Each version's `exclude` is its **complete current final list**, sorted and unique, using zero-based integer indices. The root `exclude` mirrors the stable version for compatibility and is validated against it; it is not the last-edited version. `[]` is a valid saved decision to keep every component; it must not be mistaken for a missing review. Reject booleans, noninteger values, duplicate/out-of-range indices, corrupt files, and identity mismatches rather than guessing. Version IDs are durable within this exact fit, and `stable_version` must identify a stored version.
+Each version's `exclude` is its **complete current final list**, sorted and unique, using zero-based integer indices. The root `exclude` mirrors the final version for compatibility and is validated against it; it is not the last-edited version. `[]` is a valid saved decision to keep every component; it must not be mistaken for a missing review. Reject booleans, noninteger values, duplicate/out-of-range indices, corrupt files, and identity mismatches rather than guessing. Version IDs are durable within this exact fit, and `stable_version` must identify a stored version.
 
-Legacy schema-1 single-list files remain readable and are presented as Version 1 (stable), preserving all saved decisions and the original revision. Reading, reopening, preparation, or cache rebuilding does not rewrite their bytes. The first actual save/version action upgrades the same file atomically to review schema 2. Older services reject that schema, preventing an older single-list writer from corrupting multiple versions. The manifest schema and fit hash remain unchanged. New versions are numbered sequentially and start from the manifest's original `initial_auto_exclude`, not from the active/stable/manual list. Creating a version leaves stable unchanged; marking one stable only changes the default selection and its root mirror. Versions are editable labelings, not an undo log of every toggle.
+Legacy schema-1 single-list files remain readable and are presented as Version 1 (final), preserving all saved decisions and the original revision. Reading, reopening, preparation, or cache rebuilding does not rewrite their bytes. The first actual save/version action upgrades the same file atomically to review schema 2. Older services reject that schema, preventing an older single-list writer from corrupting multiple versions. The manifest schema and fit hash remain unchanged. New versions are numbered sequentially and start from the manifest's original `initial_auto_exclude`, not from the active/final/manual list. Creating a version leaves final unchanged; marking one final only changes the default selection and its root mirror. Versions are editable labelings, not an undo log of every toggle.
+
+The viewer calls this designation **final**. For compatibility with existing bundles and clients, the stored key remains `stable_version`, the endpoint remains `PUT /api/review/stable`, and the Python storage helper remains `set_stable_review_version`; these legacy internal names all refer to the final version. No schema or decision-file migration is needed.
 
 One authoritative structured text file avoids an exclusion-only `.txt` and separate identity sidecar drifting apart. A plain list or Python assignment can still be copied/exported for convenience, but must not become a competing saved state.
 
@@ -146,7 +148,7 @@ Plain static HTML and the current read-only file server cannot reliably write ar
 On open:
 
 1. Validate the bundle manifest and fit identity.
-2. If a valid decision file exists, load its stable version. If no decision file exists, initialize Version 1 from the captured current `ica.exclude`, recording the distinct initial automatic baseline from the ICLabel table. The first launch may already contain deliberate manual decisions made in Python.
+2. If a valid decision file exists, load its final version. If no decision file exists, initialize Version 1 from the captured current `ica.exclude`, recording the distinct initial automatic baseline from the ICLabel table. The first launch may already contain deliberate manual decisions made in Python.
 3. A corrupt/mismatched existing file is an error requiring resolution, not an invitation to overwrite it with ICLabel defaults.
 
 On every toggle:
@@ -156,11 +158,11 @@ On every toggle:
 3. Validate component indices/fit identity, write a temporary file in the same directory, and atomically replace the authoritative JSON. Acknowledge only after a durable write; return the new revision.
 4. Show **Saved** with the acknowledged revision/time. On failure, show **Unsaved changes** and keep a retryable pending decision; never claim the file was saved.
 
-Use one active writer per bundle in v1. A stale revision from another tab/process must trigger a reload/conflict message instead of silently overwriting newer decisions. Saves, version creation, and stable designation share one revision counter and the same file lock/atomic writer. Reopening the browser or restarting the service selects the last acknowledged stable version, even if a newer version exists.
+Use one active writer per bundle in v1. A stale revision from another tab/process must trigger a reload/conflict message instead of silently overwriting newer decisions. Saves, version creation, and final designation share one revision counter and the same file lock/atomic writer. Reopening the browser or restarting the service selects the last acknowledged final version, even if a newer version exists.
 
 Do not depend on closing the page, downloads, or a final button to save decisions. Python does not wait for browser closure. Browser storage may hold view preferences or clearly identified pending recovery data, but must not silently override a newer disk decision file. Existing prototype `localStorage` decisions are not a new subject's baseline and are not automatically migrated.
 
-A minimal server contract is: fetch manifest/decision state; replace decisions with an expected revision; serve the immutable cache. `GET /api/review` selects stable, and `?version=v2` explicitly selects another version. `PUT /api/review` accepts `exclude`, `expected_revision`, and `version` (omitting version retains the stable default for legacy clients). `POST /api/review/versions` accepts `expected_revision` and creates/selects a baseline version. `PUT /api/review/stable` accepts `version` and `expected_revision`. Responses include `active_version`, `stable_version`, the version list, and the selected version's exclusions. No database, remote service, user accounts, or multi-reviewer merging is required for v1.
+A minimal server contract is: fetch manifest/decision state; replace decisions with an expected revision; serve the immutable cache. `GET /api/review` selects final, and `?version=v2` explicitly selects another version. `PUT /api/review` accepts `exclude`, `expected_revision`, and `version` (omitting version retains the final default for legacy clients). `POST /api/review/versions` accepts `expected_revision` and creates/selects a baseline version. `PUT /api/review/stable` accepts `version` and `expected_revision`. Responses include `active_version`, `stable_version`, the version list, and the selected version's exclusions. No database, remote service, user accounts, or multi-reviewer merging is required for v1.
 
 `POST /api/envelope` is read-only: accept `start_s`, `end_s`, the complete current `exclude` list, and `before_exclude` (a complete prior list or null). Return physical µV lower/upper extrema for 20 ms bins in the requested retained-time window, splitting at omitted-time joins. The browser requests the complete recording once per exclusion comparison, retains its bins in session memory, and pans locally without further requests. Reconstruct on demand in chunks of at most 500 bins (10 seconds) from memory-mapped exact native sources and physical mixing/mean/PCA residual factors. The browser's rounded robust Float32 traces are not the reconstruction input. Do not store full reconstructed channel recordings, comparison history, or envelope state in the decision JSON. Loading a labeling version starts with Current only; the browser supplies Before only after a manual toggle in that session.
 
@@ -168,7 +170,7 @@ A minimal server contract is: fetch manifest/decision state; replace decisions w
 
 The user selected **explicit loading when ready**, rather than blocking Python until review finishes.
 
-The implemented loader accepts an explicitly selected bundle and target ICA. It checks the bundle's manifest/decision identity internally, verifies the target ICA's numerical model/component fingerprint, validates the saved list, and returns the stable version's exclusions by default. `load_ica_exclusions(viewer_dir, ica=ica, version="v2")` explicitly selects another stored labeling. The caller assigns the returned result to `ica.exclude`. It must not silently choose among multiple fits, union in ICLabel exclusions, apply ICA, or modify the archived transform snapshot.
+The implemented loader accepts an explicitly selected bundle and target ICA. It checks the bundle's manifest/decision identity internally, verifies the target ICA's numerical model/component fingerprint, validates the saved list, and returns the final version's exclusions by default. `load_ica_exclusions(viewer_dir, ica=ica, version="v2")` explicitly selects another stored labeling. The caller assigns the returned result to `ica.exclude`. It must not silently choose among multiple fits, union in ICLabel exclusions, apply ICA, or modify the archived transform snapshot.
 
 An ICA object alone cannot independently prove which recording or training samples produced it. The bundle records that provenance; independently checking a live recording or training set requires passing its corresponding metadata/epochs too. Do not promise that `load_ica_exclusions(bundle, ica=ica)` can establish provenance absent from its inputs.
 

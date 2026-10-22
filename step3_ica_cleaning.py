@@ -244,7 +244,7 @@ def open_ica_viewer(viewer_dir, *, open_browser=True):
 
 
 def load_ica_exclusions(viewer_dir, *, ica, version=None):
-    """Return stable-version exclusions after validating the target ICA.
+    """Return final-version exclusions after validating the target ICA.
 
     Assign the result to ica.exclude to replace its previous contents, including
     when the saved list is empty. This helper does not modify or apply ICA.

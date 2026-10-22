@@ -197,10 +197,10 @@ def _validate_review(review, manifest):
     if len(ids) != len(set(ids)):
         raise ValueError("Saved ICA exclusions contain duplicate labeling versions.")
     if review.get("stable_version") not in ids:
-        raise ValueError("Saved ICA exclusions have an unknown stable labeling version.")
+        raise ValueError("Saved ICA exclusions have an unknown final labeling version.")
     stable = next(version for version in versions if version["id"] == review["stable_version"])
     if _indices(review["exclude"], manifest["n_components"]) != _indices(stable["exclude"], manifest["n_components"]):
-        raise ValueError("Saved ICA exclusions do not match their stable labeling version.")
+        raise ValueError("Saved ICA exclusions do not match their final labeling version.")
     return review
 
 
@@ -219,7 +219,7 @@ def _review_response(review, version=None):
 
 
 def read_review(viewer_dir, version=None):
-    """Read a labeling version (stable by default) without rewriting saved data."""
+    """Read a labeling version (final by default) without rewriting saved data."""
     manifest = _manifest(viewer_dir)
     return _review_response(_review_document(viewer_dir, manifest), version)
 
@@ -251,7 +251,7 @@ def _write_review(viewer_dir, manifest, review, expected_revision):
 
 
 def save_review(viewer_dir, exclude, expected_revision, version=None):
-    """Replace one complete list (stable by default), checking the global revision."""
+    """Replace one complete list (final by default), checking the global revision."""
     viewer_dir = Path(viewer_dir)
     with _locked(viewer_dir / ".review.lock"):
         manifest = _manifest(viewer_dir)
@@ -294,7 +294,7 @@ def set_stable_review_version(viewer_dir, version, expected_revision):
 
 
 def load_exclusions(viewer_dir, ica=None, *, version=None):
-    """Return a complete list (stable by default), optionally checking the transform."""
+    """Return a complete list (final by default), optionally checking the transform."""
     manifest = _manifest(viewer_dir)
     review = read_review(viewer_dir, version=version)
     if ica is not None:

@@ -50,7 +50,7 @@ The Full time traces tab also shows a synchronized reconstructed EEG envelope in
 1. Run preprocessing and `fit_ica(..., return_details=True)`. Preparation must not silently rerun preprocessing, refit ICA, change the reference, or apply ICA.
 2. Prepare a recording-specific, fit-specific bundle under the original EEG file's sibling `.ica_viewer` folder. Preserve the exact fit inputs and ICLabel table, then build the derived viewer cache.
 3. Start the local viewer service for that bundle. It serves the HTML and atomically saves every exclusion change to the bundle's human-readable decision file.
-4. Review through the three tabs. The top-right **Labeling version** menu switches between saved versions, creates a new version from the original ICLabel decisions, or marks the selected version as stable. Reopening always restores stable, including manual acceptance of ICLabel-rejected components in that version. Existing reviews become Version 1 without losing decisions.
+4. Review through the three tabs. The top-right **Labeling version** menu switches between saved versions, creates a new version from the original ICLabel decisions, or marks the selected version as final. Reopening always restores final, including manual acceptance of ICLabel-rejected components in that version. Existing reviews become Version 1 without losing decisions.
 5. **Explicitly load the saved list when ready.** This was the user's selected workflow. The open/load helpers do not block for review, automatically alter an ICA object in another Python process, or apply ICA to `raw_bads`.
 6. Assign the validated list to `ica.exclude`, replacing its existing contents. Apply ICA separately when ready.
 
@@ -74,7 +74,7 @@ viewer_url = open_ica_viewer(viewer_dir)
 
 # Later, after review, validate the target ICA and replace its exclusions.
 ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-# Defaults to stable. To explicitly use another saved labeling:
+# Defaults to final. To explicitly use another saved labeling:
 # ica.exclude = load_ica_exclusions(viewer_dir, ica=ica, version="v2")
 exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
 # Applying ICA remains a separate analysis step:

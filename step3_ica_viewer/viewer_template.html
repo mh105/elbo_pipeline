@@ -179,16 +179,16 @@ const decisionSource=c=>isRejected(c)!==c.iclabel_auto_exclude?'manual decision'
 function updateVersionPicker(){
  const picker=$('reviewVersion');picker.replaceChildren();
  if(!reviewVersions.length){picker.add(new Option('Loading versions…',''));picker.disabled=true;return;}
- for(const version of reviewVersions)picker.add(new Option(version.name+(version.id===stableVersion?' · stable':''),version.id));
+ for(const version of reviewVersions)picker.add(new Option(version.name+(version.id===stableVersion?' · final':''),version.id));
  const actions=document.createElement('optgroup');actions.label='Version actions';
  actions.appendChild(new Option('Create new version (ICLabel defaults)','__new__'));
- const stable=new Option('Mark current version as stable','__stable__');stable.disabled=activeVersion===stableVersion;actions.appendChild(stable);picker.appendChild(actions);
+ const stable=new Option('Mark current version as final','__stable__');stable.disabled=activeVersion===stableVersion;actions.appendChild(stable);picker.appendChild(actions);
  picker.value=activeVersion;picker.disabled=!reviewReady||versionBusy||saveInFlight||changeSerial>savedSerial||saveConflict;
 }
 function updatePersistence(){
  const pending=changeSerial>savedSerial;
- const version=reviewVersions.find(v=>v.id===activeVersion),name=version?version.name+(activeVersion===stableVersion?' (stable)':''):'';
- $('decisionPersistence').textContent=saveError?`Unsaved changes: ${saveError}`:versionBusy?'Updating labeling version…':!reviewReady?'Loading saved review…':pending||saveInFlight?'Saving decisions to the subject’s .ica_viewer folder…':`${name} saved to the subject’s .ica_viewer folder · revision ${reviewRevision}${savedAt?' · '+savedAt:''}. Python loads the stable version by default.`;
+ const version=reviewVersions.find(v=>v.id===activeVersion),name=version?version.name+(activeVersion===stableVersion?' (final)':''):'';
+ $('decisionPersistence').textContent=saveError?`Unsaved changes: ${saveError}`:versionBusy?'Updating labeling version…':!reviewReady?'Loading saved review…':pending||saveInFlight?'Saving decisions to the subject’s .ica_viewer folder…':`${name} saved to the subject’s .ica_viewer folder · revision ${reviewRevision}${savedAt?' · '+savedAt:''}. Python loads the final version by default.`;
  $('decisionPersistence').style.color=saveError?'#a82f3d':'';
  $('saveActions').hidden=!saveError;$('retrySave').hidden=saveConflict;$('reloadReview').hidden=!saveConflict;
  $('retrySave').textContent=versionRetry?'Retry version action':'Retry save';
