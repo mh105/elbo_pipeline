@@ -108,18 +108,8 @@ class EnvelopeData:
             raise ValueError("The envelope window contains no samples.")
         excluded = self._indices(exclude)
         previous = None if before_exclude is None else self._indices(before_exclude)
-        current = self._reconstruct(start, end, excluded)
-        before = None
-        if previous is not None:
-            changed = excluded ^ previous
-            if len(changed) == 1:
-                index = changed.pop()
-                contribution = self.mixing_uv[:, index, None] * self.sources[index, start:end]
-                before = current + contribution if index in excluded else current - contribution
-            else:
-                before = self._reconstruct(start, end, previous)
-        if not np.isfinite(current).all() or (before is not None and not np.isfinite(before).all()):
-            raise ValueError("Reconstructed envelope data contain nonfinite samples.")
+        changed = set() if previous is None else excluded ^ previous
+        changed_index = next(iter(changed)) if len(changed) == 1 else None
 
         # Global five-sample boundaries survive panning. Clip edge bins to the
         # visible window, and split a bin at every real removed-time join.
@@ -129,11 +119,36 @@ class EnvelopeData:
             self.segments[1:, 0][(self.segments[1:, 0] > start) &
                                     (self.segments[1:, 0] < end)], end])
         starts, ends = boundaries[:-1], boundaries[1:]
-        local_starts = starts - start
-        def extrema(data):
-            lower = np.minimum.reduceat(data.min(axis=0), local_starts)
-            upper = np.maximum.reduceat(data.max(axis=0), local_starts)
-            return dict(lower_uv=lower.tolist(), upper_uv=upper.tolist())
+        current = dict(lower_uv=np.empty(len(starts)), upper_uv=np.empty(len(starts)))
+        before = (None if previous is None else
+                  dict(lower_uv=np.empty(len(starts)), upper_uv=np.empty(len(starts))))
+        # At most 500 bins / 10 seconds of channel data are materialized at a
+        # time, even when preparing the complete recording for smooth panning.
+        for first in range(0, len(starts), 500):
+            last = min(first + 500, len(starts))
+            chunk_start, chunk_end = starts[first], ends[last - 1]
+            chunk_current = self._reconstruct(chunk_start, chunk_end, excluded)
+            chunk_before = None
+            if previous is not None:
+                if changed_index is not None:
+                    contribution = (self.mixing_uv[:, changed_index, None] *
+                                    self.sources[changed_index, chunk_start:chunk_end])
+                    chunk_before = (chunk_current + contribution if changed_index in excluded
+                                    else chunk_current - contribution)
+                else:
+                    chunk_before = self._reconstruct(chunk_start, chunk_end, previous)
+            local_starts = starts[first:last] - chunk_start
+            for target, data in ((current, chunk_current), (before, chunk_before)):
+                if target is None:
+                    continue
+                if not np.isfinite(data).all():
+                    raise ValueError("Reconstructed envelope data contain nonfinite samples.")
+                target["lower_uv"][first:last] = np.minimum.reduceat(data.min(axis=0), local_starts)
+                target["upper_uv"][first:last] = np.maximum.reduceat(data.max(axis=0), local_starts)
+        for target in (current, before):
+            if target is not None:
+                for key in target:
+                    target[key] = target[key].tolist()
 
         bin_segments = []
         for segment_start, segment_end in self.segments:
@@ -145,4 +160,4 @@ class EnvelopeData:
                     sfreq=self.sfreq, bin_samples=self.bin_samples,
                     bin_starts_s=(starts / self.sfreq).tolist(),
                     bin_ends_s=(ends / self.sfreq).tolist(), segments=bin_segments,
-                    current=extrema(current), before=None if before is None else extrema(before))
+                    current=current, before=before)

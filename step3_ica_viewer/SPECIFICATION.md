@@ -37,6 +37,8 @@ Place a reconstructed EEG envelope panel between the shared exclusion summary an
 
 On initial load, reopening, or selecting/creating a labeling version, show one **Current** envelope in 50%-transparent black. After an actual manual rejection or acceptance, show **Before** in 50%-transparent black and **After** in 50%-transparent green. Before is the complete exclusion set immediately before that one toggle; After is the current complete set. Each subsequent toggle replaces the comparison, including toggles made in Tab 3. No-op accept/reject commands, save acknowledgments and marking the current version stable do not replace it. This comparison exists only in browser-session memory; it is not a saved labeling history. Auto-scale both bands on one shared symmetric µV axis using their visible extrema.
 
+Load full-recording envelope bins once for each exclusion comparison and retain them in browser memory. Horizontal panning, resizing and changing the displayed duration redraw the visible bins locally in the same animation frame as the IC traces. These actions must not clear the envelope, wait for scrolling to stop, or request another reconstruction. Reconstruct the full envelope in bounded chunks on the server; do not materialize a full channel-by-time recording. Only a new decision comparison or version load invalidates it.
+
 | Control or behavior | Contract |
 | --- | --- |
 | ICs displayed | Default `n_components` (all ICs); positive integer, clamped to available components. |

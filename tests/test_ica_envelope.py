@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import warnings
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -142,6 +143,36 @@ class TestIcaEnvelope(unittest.TestCase):
         self.assertEqual(result["bin_starts_s"], [3.972, 3.98, 3.988, 4.0, 4.02])
         self.assertEqual(result["bin_ends_s"], [3.98, 3.988, 4.0, 4.02, 4.028])
         self.assertEqual(result["segments"], [[0, 2], [2, 5]])
+
+    def test_full_recording_is_reconstructed_in_bounded_chunks(self):
+        epochs = mne.concatenate_epochs([self.epochs] * 3, verbose="ERROR")
+        segments = [[0, 2497], [2497, 4500]]
+        cache = Path(self.tmp.name) / "cache"
+        cache.mkdir()
+        sources = self.reduced.get_sources(epochs).get_data().transpose(1, 0, 2).reshape(
+            self.reduced.n_components_, -1
+        )
+        envelope._write_reconstruction(cache, self.reduced, epochs, sources, segments)
+        data = envelope.EnvelopeData(cache)
+        # Include clipped edge bins and a real join next to a chunk boundary.
+        first, last = 0.012, 17.988
+        for previous, excluded in (([0], [0, 1]), ([0, 1], [1])):
+            with self.subTest(previous=previous, excluded=excluded):
+                with mock.patch.object(data, "_reconstruct", wraps=data._reconstruct) as reconstruct:
+                    result = data.calculate(first, last, excluded, previous)
+                self.assertGreater(len(reconstruct.call_args_list), 1)
+                for call in reconstruct.call_args_list:
+                    self.assertLessEqual(call.args[1] - call.args[0], 2500)
+                for key, exclusions in (("current", excluded), ("before", previous)):
+                    expected = expected_bins(mne_reconstruction(self.reduced, epochs, exclusions),
+                                             250, first, last, segments)
+                    np.testing.assert_array_equal(result["bin_starts_s"], expected[0])
+                    np.testing.assert_array_equal(result["bin_ends_s"], expected[1])
+                    np.testing.assert_allclose(result[key]["lower_uv"], expected[2],
+                                               rtol=1e-11, atol=1e-9)
+                    np.testing.assert_allclose(result[key]["upper_uv"], expected[3],
+                                               rtol=1e-11, atol=1e-9)
+                    self.assertEqual(result["segments"], expected[4])
 
     def test_http_envelope_is_read_only_and_rejects_invalid_requests(self):
         eeg_path = Path(self.tmp.name) / "sub-envelope_eeg.fif"

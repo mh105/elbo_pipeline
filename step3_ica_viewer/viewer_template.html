@@ -435,7 +435,7 @@ function syncStackedControls(){
  scroll.setAttribute('aria-valuemax',String(duration-stackState.seconds));scroll.setAttribute('aria-valuenow',String(stackState.start));scroll.setAttribute('aria-valuetext',`${fmt(stackState.start,2)} seconds`);
 }
 function envelopeSelection(){
- return{start_s:stackState.start,end_s:stackState.start+stackState.seconds,exclude:Array.from(currentExclusions).sort((a,b)=>a-b),before_exclude:envelopeBefore===null?null:Array.from(envelopeBefore).sort((a,b)=>a-b)};
+ return{start_s:0,end_s:duration,exclude:Array.from(currentExclusions).sort((a,b)=>a-b),before_exclude:envelopeBefore===null?null:Array.from(envelopeBefore).sort((a,b)=>a-b)};
 }
 function drawEnvelope(){
  const canvas=$('eegEnvelope'),w=canvas.getBoundingClientRect().width;if(!w)return;
@@ -445,7 +445,14 @@ function drawEnvelope(){
  const left=79,right=w-11,top=13,bottom=h-29,start=stackState.start,end=start+stackState.seconds;
  const x=t=>left+(t-start)/(end-start)*(right-left),key=JSON.stringify(envelopeSelection());
  const result=reviewReady&&envelopeKey===key?envelopeData:null,bands=result?[result.current,...(result.before?[result.before]:[])]:[];
- let limit=0;for(const band of bands)for(const values of [band.lower_uv,band.upper_uv])for(const value of values)limit=Math.max(limit,Math.abs(value));
+ let first=0,last=0;
+ if(result){
+  let lo=0,hi=result.bin_ends_s.length;
+  while(lo<hi){const mid=(lo+hi)>>>1;if(result.bin_ends_s[mid]<=start)lo=mid+1;else hi=mid;}first=lo;
+  hi=result.bin_starts_s.length;
+  while(lo<hi){const mid=(lo+hi)>>>1;if(result.bin_starts_s[mid]<end)lo=mid+1;else hi=mid;}last=lo;
+ }
+ let limit=0;for(const band of bands)for(const values of [band.lower_uv,band.upper_uv])for(let i=first;i<last;i++)limit=Math.max(limit,Math.abs(values[i]));
  limit=limit?limit*1.05:1;
  const y=v=>top+(limit-v)/(2*limit)*(bottom-top);
  q.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';q.fillStyle='#748391';q.textAlign='right';q.strokeStyle='#e9eef2';q.lineWidth=.7;
@@ -455,8 +462,9 @@ function drawEnvelope(){
  q.save();q.beginPath();q.rect(left,top,right-left,bottom-top);q.clip();
  function fillBand(band,color){
   q.fillStyle=color;
-  for(const [a,b] of result.segments){
-   if(a===b)continue;q.beginPath();q.moveTo(x(result.bin_starts_s[a]),y(band.upper_uv[a]));
+  for(const [segmentStart,segmentEnd] of result.segments){
+   const a=Math.max(first,segmentStart),b=Math.min(last,segmentEnd);
+   if(a>=b)continue;q.beginPath();q.moveTo(x(result.bin_starts_s[a]),y(band.upper_uv[a]));
    for(let i=a;i<b;i++){q.lineTo(x(result.bin_starts_s[i]),y(band.upper_uv[i]));q.lineTo(x(result.bin_ends_s[i]),y(band.upper_uv[i]));}
    for(let i=b-1;i>=a;i--){q.lineTo(x(result.bin_ends_s[i]),y(band.lower_uv[i]));q.lineTo(x(result.bin_starts_s[i]),y(band.lower_uv[i]));}
    q.closePath();q.fill();
