@@ -363,9 +363,9 @@ def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-26"
-    eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
+    set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
-    # open_ica_viewer(eeg_path=eeg_path)  # open ICA viewer on archieved fit
+    # open_ica_viewer(eeg_path=set_file)  # open ICA viewer on archieved fit
     raw = load_raw_data(subject_id)
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
@@ -411,7 +411,7 @@ if __name__ == "__main__":
     # Prepare and open the interactive viewer; each choice autosaves to JSON
     viewer_dir = prepare_ica_viewer(
         ica, fit_epochs, raw_bads,
-        eeg_path=eeg_path,
+        eeg_path=set_file,
         reference_channel=reference_channel,
         iclabel_table=iclabel_table,
     )

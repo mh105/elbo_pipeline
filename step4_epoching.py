@@ -4,9 +4,11 @@ Run Steps 0-3 to prepare ICA-cleaned continuous data for epoching.
 Epoch definitions and rejection settings remain to be specified.
 """
 
+import warnings
 from pathlib import Path
 
 import mne
+from autoreject import AutoReject
 
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (
@@ -32,8 +34,9 @@ from step3_ica_cleaning import (
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-26"
-    eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
+    set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
+    epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
     raw, behavior = load_raw_data(subject_id, return_behav=True)
 
     # %% Detect nonfinite data and sparse flat spans before preprocessing
@@ -79,7 +82,7 @@ if __name__ == "__main__":
     # Prepare and open the interactive viewer; each choice autosaves to JSON
     viewer_dir = prepare_ica_viewer(
         ica, fit_epochs, raw_bads,
-        eeg_path=eeg_path,
+        eeg_path=set_file,
         reference_channel=reference_channel,
         iclabel_table=iclabel_table,
         check_identity=True,
@@ -99,7 +102,7 @@ if __name__ == "__main__":
         skip_by_annotation=skip_annotations,
     )
 
-    events_from_annot, event_dict = mne.events_from_annotations(raw)
+    events_from_annot, event_dict = mne.events_from_annotations(raw_bads)
     stim_events = mne.pick_events(events_from_annot, include=event_dict["encm"])
     if len(behavior) != len(stim_events):
         raise ValueError(
@@ -107,12 +110,43 @@ if __name__ == "__main__":
             f"({len(stim_events)})."
         )
     epochs = mne.Epochs(
-        raw,
+        raw_bads,
         stim_events,
-        tmin=0,
+        tmin=-0.5,
         tmax=2.5,
         preload=True,
-        baseline=(None, None),
+        baseline=(None, 0),
     )
-    assert epochs.info["sfreq"] == 1000, "Expected 1000 Hz sampling rate."
-    epochs.decimate(decim=10)  # goes from 1000 Hz to 100 Hz sampling rate
+    if epochs.info["sfreq"] != 1000:
+        raise ValueError("Expected 1000 Hz sampling rate.")
+    with warnings.catch_warnings():
+        # The low-pass stopband starts at the new Nyquist frequency (50 Hz).
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning,
+            message=r"The measurement information indicates a low-pass frequency "
+                    r"of 45\.0 Hz\. The decim=10 parameter will result in a sampling "
+                    r"frequency of 100\.0 Hz, which can cause aliasing artifacts\.$",
+        )
+        epochs.decimate(decim=10)
+    if epochs.info["sfreq"] != 100:
+        raise ValueError("Expected 100 Hz sampling rate.")
+
+    # %% Reject bad epochs
+    ar = AutoReject(random_state=42)
+    epochs, reject_log = ar.fit_transform(epochs, return_log=True)
+
+    # Manual review of epochs
+    frontal_cluster = [
+        "E3", "E4", "E5", "E10", "E11", "E12", "E16", "E18", "E19", "E23",
+    ]
+    available_channels = set(epochs.ch_names) - set(epochs.info["bads"])
+    valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
+    epochs.plot(
+        picks=valid_frontal_cluster,
+        n_epochs=10,
+        block=True,
+    )
+
+    # Save the epoch file after manual review
+    epochs.save(epochs_file)
+    print(f"Saved reviewed epochs: {epochs_file}")
