@@ -31,7 +31,7 @@ from step3_ica_cleaning import (
 )
 
 
-def prepare_epoch(raw, behavior):
+def prepare_epochs(raw, behavior):
     """Filter raw in place and return baseline-corrected 100 Hz encm epochs.
 
     Require one behavior row per encm event and 1000 Hz input data.
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     ica.apply(raw_bads)
 
     # %% Epoching
-    epochs = prepare_epoch(raw_bads, behavior)
+    epochs = prepare_epochs(raw_bads, behavior)
 
     # Reject bad epochs
     ar = AutoReject(random_state=999)
