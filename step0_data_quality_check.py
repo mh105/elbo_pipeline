@@ -19,12 +19,14 @@ import pandas as pd
 from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
 
 
-def load_raw_data(subject_id):
+def load_raw_data(subject_id, return_behav=False):
     """Load a subject's preloaded ColorPrecMemStudy run-1 EEG and crop to the task.
 
     Require 1000 Hz sampling and record the export's 100 Hz amplifier low-pass
     in MNE metadata. Crop from 3 seconds before the first enci annotation to
     2.5 seconds after the last encm annotation, preserving the native reference.
+    Return raw by default, or (raw, behavior) when return_behav=True, loading
+    the subject's labelled behavioral CSV without converting NA strings.
     """
     project_dir = Path(__file__).resolve().parents[3]
     set_file = (project_dir / subject_id / "eeg"
@@ -42,6 +44,11 @@ def load_raw_data(subject_id):
     crop_tmin = enci_onsets.min() - raw.first_time - 3.0
     crop_tmax = encm_onsets.max() - raw.first_time + 2.5
     raw.crop(tmin=crop_tmin, tmax=crop_tmax)
+    if return_behav:
+        behavior_file = (project_dir / subject_id / "beh"
+                         / f"{subject_id}_task-ColorPrecMemStudy_labelled_beh.csv")
+        behavior = pd.read_csv(behavior_file, keep_default_na=False)
+        return raw, behavior
     return raw
 
 
