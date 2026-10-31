@@ -68,7 +68,7 @@ if __name__ == "__main__":
     raw_bads = raw.copy()
     raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
-    # %% Bad-channel detection and ASR correction in validated native reference
+    # Bad-channel detection and ASR correction in validated native reference
     asr_details, reference_channel = bad_ch_time_detection_inplace(
         raw_bads, bad_ch_report, flatlines,
     )
