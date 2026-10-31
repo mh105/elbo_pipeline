@@ -4,6 +4,7 @@ Run Steps 0-3 to prepare ICA-cleaned continuous data for epoching.
 Epoch definitions and rejection settings remain to be specified.
 """
 
+import argparse
 import warnings
 from pathlib import Path
 
@@ -77,8 +78,12 @@ def prepare_epochs(raw, behavior):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run ELBO preprocessing and save epochs.")
+    parser.add_argument("subject_id", nargs="?", default="sub-06")
+    args = parser.parse_args()
+
     # %% Load example data
-    subject_id = "sub-06"
+    subject_id = args.subject_id
     set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
