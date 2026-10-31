@@ -1,6 +1,6 @@
 """ELBO step 4: epoching scaffold.
 
-Run Steps 0–3 to prepare ICA-cleaned continuous data for epoching.
+Run Steps 0-3 to prepare ICA-cleaned continuous data for epoching.
 Epoch definitions and rejection settings remain to be specified.
 """
 
