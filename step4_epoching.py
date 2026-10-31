@@ -33,7 +33,7 @@ from step3_ica_cleaning import (
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-26"
+    subject_id = "sub-06"
     set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
@@ -133,21 +133,21 @@ if __name__ == "__main__":
         raise ValueError("Expected 100 Hz sampling rate.")
 
     # %% Reject bad epochs
-    ar = AutoReject(random_state=42)
+    ar = AutoReject(random_state=999)
     epochs, reject_log = ar.fit_transform(epochs, return_log=True)
 
-    # Manual review of epochs
-    frontal_cluster = [
-        "E3", "E4", "E5", "E10", "E11", "E12", "E16", "E18", "E19", "E23",
-    ]
-    available_channels = set(epochs.ch_names) - set(epochs.info["bads"])
-    valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
-    epochs.plot(
-        picks=valid_frontal_cluster,
-        n_epochs=10,
-        block=True,
-    )
+    # # Manual review of epochs
+    # frontal_cluster = [
+    #     "E3", "E4", "E5", "E10", "E11", "E12", "E16", "E18", "E19", "E23",
+    # ]
+    # available_channels = set(epochs.ch_names) - set(epochs.info["bads"])
+    # valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
+    # epochs.plot(
+    #     picks=valid_frontal_cluster,
+    #     n_epochs=10,
+    #     block=True,
+    # )
 
-    # Save the epoch file after manual review
+    # Save the epoch file
     epochs.save(epochs_file)
     print(f"Saved reviewed epochs: {epochs_file}")
