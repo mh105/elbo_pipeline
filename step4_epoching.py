@@ -31,6 +31,51 @@ from step3_ica_cleaning import (
 )
 
 
+def prepare_epoch(raw, behavior):
+    """Filter raw in place and return baseline-corrected 100 Hz encm epochs.
+
+    Require one behavior row per encm event and 1000 Hz input data.
+    """
+    skip_annotations = ("edge", "bad_acq_skip", "BAD")
+    raw.filter(
+        l_freq=None,
+        h_freq=45,
+        h_trans_bandwidth=5,
+        skip_by_annotation=skip_annotations,
+        verbose=False,
+    )
+
+    events_from_annot, event_dict = mne.events_from_annotations(raw)
+    stim_events = mne.pick_events(events_from_annot, include=event_dict["encm"])
+    if len(behavior) != len(stim_events):
+        raise ValueError(
+            f"Behavior rows ({len(behavior)}) do not match encm events "
+            f"({len(stim_events)})."
+        )
+    epochs = mne.Epochs(
+        raw,
+        stim_events,
+        tmin=-0.5,
+        tmax=2.5,
+        preload=True,
+        baseline=(None, 0),
+    )
+    if epochs.info["sfreq"] != 1000:
+        raise ValueError("Expected 1000 Hz sampling rate.")
+    with warnings.catch_warnings():
+        # The low-pass stopband starts at the new Nyquist frequency (50 Hz).
+        warnings.filterwarnings(
+            "ignore", category=RuntimeWarning,
+            message=r"The measurement information indicates a low-pass frequency "
+                    r"of 45\.0 Hz\. The decim=10 parameter will result in a sampling "
+                    r"frequency of 100\.0 Hz, which can cause aliasing artifacts\.$",
+        )
+        epochs.decimate(decim=10)
+    if epochs.info["sfreq"] != 100:
+        raise ValueError("Expected 100 Hz sampling rate.")
+    return epochs
+
+
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-06"
@@ -94,59 +139,11 @@ if __name__ == "__main__":
     ica.apply(raw_bads)
 
     # %% Epoching
-    skip_annotations = ("edge", "bad_acq_skip", "BAD")
-    raw_bads.filter(
-        l_freq=None,
-        h_freq=45,
-        h_trans_bandwidth=5,
-        skip_by_annotation=skip_annotations,
-        verbose=False,
-    )
+    epochs = prepare_epoch(raw_bads, behavior)
 
-    events_from_annot, event_dict = mne.events_from_annotations(raw_bads)
-    stim_events = mne.pick_events(events_from_annot, include=event_dict["encm"])
-    if len(behavior) != len(stim_events):
-        raise ValueError(
-            f"Behavior rows ({len(behavior)}) do not match encm events "
-            f"({len(stim_events)})."
-        )
-    epochs = mne.Epochs(
-        raw_bads,
-        stim_events,
-        tmin=-0.5,
-        tmax=2.5,
-        preload=True,
-        baseline=(None, 0),
-    )
-    if epochs.info["sfreq"] != 1000:
-        raise ValueError("Expected 1000 Hz sampling rate.")
-    with warnings.catch_warnings():
-        # The low-pass stopband starts at the new Nyquist frequency (50 Hz).
-        warnings.filterwarnings(
-            "ignore", category=RuntimeWarning,
-            message=r"The measurement information indicates a low-pass frequency "
-                    r"of 45\.0 Hz\. The decim=10 parameter will result in a sampling "
-                    r"frequency of 100\.0 Hz, which can cause aliasing artifacts\.$",
-        )
-        epochs.decimate(decim=10)
-    if epochs.info["sfreq"] != 100:
-        raise ValueError("Expected 100 Hz sampling rate.")
-
-    # %% Reject bad epochs
+    # Reject bad epochs
     ar = AutoReject(random_state=999)
     epochs, reject_log = ar.fit_transform(epochs, return_log=True)
-
-    # # Manual review of epochs
-    # frontal_cluster = [
-    #     "E3", "E4", "E5", "E10", "E11", "E12", "E16", "E18", "E19", "E23",
-    # ]
-    # available_channels = set(epochs.ch_names) - set(epochs.info["bads"])
-    # valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
-    # epochs.plot(
-    #     picks=valid_frontal_cluster,
-    #     n_epochs=10,
-    #     block=True,
-    # )
 
     # Save the epoch file
     epochs.save(epochs_file)
