@@ -15,6 +15,7 @@ pipeline_dir = Path(__file__).resolve().parents[1]
 if str(pipeline_dir) not in sys.path:
     sys.path.insert(0, str(pipeline_dir))
 
+from step3_ica_cleaning import prepare_ica_viewer
 from step3_ica_viewer import storage
 from test_ica_viewer import make_inputs
 
@@ -35,17 +36,93 @@ class TestViewerArchiveIdentity(unittest.TestCase):
         cache.start()
         self.addCleanup(cache.stop)
 
-    def prepare(self, ica=None, epochs=None, raw=None, reference_channel="Cz"):
+    def prepare(self, ica=None, epochs=None, raw=None, reference_channel="Cz",
+                check_identity=False):
         return storage.prepare_bundle(
             self.ica if ica is None else ica,
             self.epochs if epochs is None else epochs,
             self.raw if raw is None else raw,
             eeg_path=self.eeg_path, reference_channel=reference_channel,
-            iclabel_table=self.labels,
+            iclabel_table=self.labels, check_identity=check_identity,
         )
 
     def manifest(self, bundle):
         return json.loads((bundle / "manifest.json").read_text())
+
+    def test_identity_check_requires_a_saved_fit_without_creating_an_archive(self):
+        with self.assertRaises(ValueError):
+            prepare_ica_viewer(
+                self.ica, self.epochs, self.raw, eeg_path=self.eeg_path,
+                reference_channel="Cz", iclabel_table=self.labels, check_identity=True,
+            )
+        parent = self.eeg_path.parent / ".ica_viewer"
+        self.assertFalse(list(parent.rglob("manifest.json")))
+        self.assertFalse([path for path in parent.rglob("*.fif") if path.is_file()])
+
+    def test_identity_check_reuses_saved_review_despite_live_exclusion_changes(self):
+        bundle = self.prepare()
+        storage.save_review(bundle, [1, 3], expected_revision=0)
+        decisions = bundle / self.manifest(bundle)["files"]["decision"]
+        previous = decisions.read_bytes()
+        changed = self.ica.copy()
+        changed.exclude = [0, 2]
+        self.assertEqual(self.prepare(ica=changed, check_identity=True), bundle)
+        self.assertEqual(storage.load_exclusions(bundle, ica=changed), [1, 3])
+        self.assertEqual(changed.exclude, [0, 2])
+        self.assertEqual(decisions.read_bytes(), previous)
+        self.assertEqual(list(bundle.parent.glob("*/manifest.json")), [bundle / "manifest.json"])
+
+    def test_identity_check_rejects_changed_analysis_without_writing_saved_files(self):
+        bundle = self.prepare()
+        storage.save_review(bundle, [1, 3], expected_revision=0)
+        previous = {path: path.read_bytes() for path in bundle.parent.rglob("*") if path.is_file()}
+        numerical = self.ica.copy()
+        numerical.unmixing_matrix_[0, 0] += 0.01
+        numerical._update_mixing_matrix()
+        samples = self.epochs.copy()
+        samples._data[1, 2, 75] += 1e-9
+        mapping = self.epochs.copy()
+        mapping.events[-1, 0] -= 1000
+        selection = self.epochs.copy()
+        selection.selection[-1] += 1
+        selection.drop_log = ((), (), ("USER",), ())
+        event_id = self.epochs.copy()
+        event_id.event_id = {"different event meaning": 1}
+        geometry = self.epochs.copy()
+        geometry.info["chs"][0]["loc"][0] += 1e-3
+        geometry_model = self.ica.copy()
+        geometry_model.info["chs"][0]["loc"][0] += 1e-3
+        alternate_reference = self.raw.copy()
+        zero = mne.io.RawArray(np.zeros((1, self.raw.n_times)),
+                                mne.create_info(["Pz"], 1000, "eeg"),
+                                first_samp=self.raw.first_samp, verbose=False)
+        alternate_reference.add_channels([zero], force_update_info=True)
+        for label, kwargs in (
+                ("transform", dict(ica=numerical)), ("samples", dict(epochs=samples)),
+                ("event samples", dict(epochs=mapping)), ("retained epochs", dict(epochs=selection)),
+                ("event meaning", dict(epochs=event_id)),
+                ("electrodes", dict(epochs=geometry, ica=geometry_model)),
+                ("reference", dict(raw=alternate_reference, reference_channel="Pz"))):
+            with self.subTest(identity=label), self.assertRaises(ValueError):
+                self.prepare(**kwargs, check_identity=True)
+        self.eeg_path.write_bytes(b"different original recording")
+        with self.assertRaises(ValueError):
+            self.prepare(check_identity=True)
+        current = {path: path.read_bytes() for path in bundle.parent.rglob("*") if path.is_file()}
+        self.assertEqual(current, previous)
+
+    def test_identity_check_can_reuse_an_older_match_among_saved_fits(self):
+        with patch.object(storage, "_now", return_value="2026-10-20T10:00:00Z"):
+            original = self.prepare()
+        changed = self.ica.copy()
+        changed.unmixing_matrix_[0, 0] += 0.01
+        changed._update_mixing_matrix()
+        with patch.object(storage, "_now", return_value="2026-10-21T10:00:00Z"):
+            newer = self.prepare(ica=changed)
+        self.assertNotEqual(original, newer)
+        self.assertEqual(self.prepare(check_identity=True), original)
+        self.assertEqual(self.prepare(ica=changed, check_identity=True), newer)
+        self.assertEqual(len(list(original.parent.glob("*/manifest.json"))), 2)
 
     def test_fif_rounding_reuses_original_fit_and_preserves_saved_labels(self):
         epochs = self.epochs.copy()
@@ -61,7 +138,8 @@ class TestViewerArchiveIdentity(unittest.TestCase):
         restored_ica = mne.preprocessing.read_ica(bundle / "inputs/fitted-ica.fif", verbose=False)
         self.assertFalse(np.array_equal(restored_epochs.get_data(), epochs.get_data()))
         self.assertFalse(np.array_equal(restored_ica.mixing_matrix_, self.ica.mixing_matrix_))
-        self.assertEqual(self.prepare(ica=restored_ica, epochs=restored_epochs), bundle)
+        self.assertEqual(self.prepare(ica=restored_ica, epochs=restored_epochs,
+                                      check_identity=True), bundle)
         self.assertEqual(storage.load_exclusions(bundle, ica=restored_ica), [1, 3])
         self.assertEqual(decisions.read_bytes(), previous)
         self.assertEqual(list(bundle.parent.glob("*/manifest.json")), [bundle / "manifest.json"])

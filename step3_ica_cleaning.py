@@ -213,12 +213,17 @@ def prepare_ica_viewer(
     eeg_path,
     reference_channel,
     iclabel_table,
+    check_identity=False,
 ):
     """Save this fit and prepare its subject-local interactive review directory.
 
     Return a Path under eeg_path.parent / '.ica_viewer'. Repeating preparation
     for the same fit preserves its saved exclusions. The input ICA, fitting
     epochs and Raw are not modified, and ICA is neither refitted nor applied.
+    With check_identity=True, require an existing matching saved analysis;
+    raise ValueError instead of creating a new fit when none matches. Compare
+    the recording, transform, fitting samples and metadata with the existing
+    FIF rounding tolerances; mutable ICA exclusions do not affect identity.
     """
     from step3_ica_viewer.storage import prepare_bundle
 
@@ -227,6 +232,7 @@ def prepare_ica_viewer(
         eeg_path=eeg_path,
         reference_channel=reference_channel,
         iclabel_table=iclabel_table,
+        check_identity=check_identity,
     )
 
 

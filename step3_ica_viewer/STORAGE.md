@@ -100,6 +100,8 @@ Define canonical fingerprint encoding once: stable field order, explicit array s
 
 Preparation first checks the original content fingerprint. If that differs because inputs came through a FIF round-trip, compare candidate bundles' complete analysis metadata and numerical arrays under the same tolerances. A matching analysis reuses the existing fit directory, decision JSON and current cache; it does not resave the archives. A genuinely different analysis creates a separate review even if subject, channel count, component count, or filenames match. Do not transfer rejected indices across different fits. Updated ICLabel results or detector versions do not silently reset an existing final review of the same fit; retain the original automatic baseline with its provenance.
 
+`prepare_ica_viewer(..., check_identity=True)` requires an existing matching analysis under these same comparisons. If no bundle matches, including when none exists, raise `ValueError` before archiving inputs or creating a new fit/cache. Any matching saved fit for the recording is eligible; the match need not be the newest. The default `check_identity=False` retains normal new-fit preparation. This guard does not require a manual-review revision or change how saved exclusions are loaded.
+
 Build replacement assets in a temporary staging directory and publish only a complete cache. After a successful replacement, retain no past viewer-cache versions. Repeating preparation or reopening with unchanged code/inputs reuses the same current cache without growing the folder. Manual labeling versions remain independent in their durable JSON.
 
 ## Decision text format

@@ -622,8 +622,9 @@ def ensure_cache(viewer_dir):
     return cache
 
 
-def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, iclabel_table):
-    """Archive one exact ICA fit and build its viewer without overwriting reviews."""
+def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel,
+                   iclabel_table, check_identity=False):
+    """Prepare a fit without overwriting reviews; optionally require a saved match."""
     eeg_path = Path(eeg_path).expanduser().resolve(strict=True)
     labels, samples = _validate_inputs(ica, fit_epochs, raw_bads, reference_channel, iclabel_table)
     epoch_table = _epoch_table(fit_epochs, raw_bads)
@@ -670,6 +671,13 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel, ic
                 _initialize_review(viewer_dir, _manifest(viewer_dir))
                 ensure_cache(viewer_dir)
                 return viewer_dir
+            if check_identity:
+                raise ValueError(
+                    f"No saved ICA viewer matches the supplied ICA and fitting inputs for {eeg_path}. "
+                    "check_identity=True requires an existing matching fit; preprocessing or "
+                    "ICA fitting inputs may have changed. No new viewer was created. "
+                    "Use check_identity=False to prepare a new fit for review."
+                )
             temporary = Path(tempfile.mkdtemp(prefix=".preparing-", dir=parent))
             try:
                 inputs = temporary / "inputs"

@@ -82,6 +82,7 @@ if __name__ == "__main__":
         eeg_path=eeg_path,
         reference_channel=reference_channel,
         iclabel_table=iclabel_table,
+        check_identity=True,
     )
 
     # Run these after reviewing; loading replaces, rather than unions, exclusions
