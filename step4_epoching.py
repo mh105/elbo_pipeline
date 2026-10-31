@@ -61,7 +61,7 @@ def prepare_epoch(raw, behavior):
         baseline=(None, 0),
     )
     if epochs.info["sfreq"] != 1000:
-        raise ValueError("Expected 1000 Hz sampling rate.")
+        raise ValueError("Expected 1000 Hz sampling rate in raw data.")
     with warnings.catch_warnings():
         # The low-pass stopband starts at the new Nyquist frequency (50 Hz).
         warnings.filterwarnings(
@@ -72,7 +72,7 @@ def prepare_epoch(raw, behavior):
         )
         epochs.decimate(decim=10)
     if epochs.info["sfreq"] != 100:
-        raise ValueError("Expected 100 Hz sampling rate.")
+        raise ValueError("Expected 100 Hz sampling rate after decimation.")
     return epochs
 
 
