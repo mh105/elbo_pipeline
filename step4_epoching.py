@@ -100,6 +100,7 @@ if __name__ == "__main__":
         h_freq=45,
         h_trans_bandwidth=5,
         skip_by_annotation=skip_annotations,
+        verbose=False,
     )
 
     events_from_annot, event_dict = mne.events_from_annotations(raw_bads)
