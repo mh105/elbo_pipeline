@@ -356,7 +356,7 @@ def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
 
 if __name__ == "__main__":
     # %% Load example data
-    subject_id = "sub-02"
+    subject_id = "sub-26"
     eeg_path = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     # open_ica_viewer(eeg_path=eeg_path)  # open ICA viewer on archieved fit
@@ -373,11 +373,17 @@ if __name__ == "__main__":
     # %% Line noise removal
     raw_prep = raw.copy()
     raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    clean = ZapLine_notch(raw_prep, line_freq=30.0)
-    clean = ZapLine_notch(clean, line_freq=90.0)
-    clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-    # clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-    # clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    if subject_id == "sub-02":
+        clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+    elif subject_id == "sub-26":
+        clean = ZapLine_notch(raw_prep, line_freq=30.0)
+        clean = Interpolate_fft(clean, line_freq=90.0)
+        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    else:
+        clean = ZapLine_notch(raw_prep, line_freq=30.0)
+        clean = ZapLine_notch(clean, line_freq=90.0)
+        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
     remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
     del raw_prep, clean  # Free two full-recording copies.
 
