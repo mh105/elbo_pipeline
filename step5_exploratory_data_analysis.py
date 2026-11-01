@@ -114,9 +114,9 @@ if __name__ == "__main__":
         pm, ax=axes_spectrogram, label=r"PSD (dB re 1 $\mu V^2$/Hz)", shrink=0.8
     )
 
-    # Plot the HIT minus MISS spectrogram beside the mean spectra
-    hit_spectrum = np.mean(hit_spectrogram, axis=1)
-    miss_spectrum = np.mean(miss_spectrogram, axis=1)
+    # Plot the HIT minus MISS spectrogram beside the median spectra
+    hit_spectrum = np.median(hit_spectrogram, axis=1)
+    miss_spectrum = np.median(miss_spectrogram, axis=1)
     hit_spectrum_db = 10 * np.log10(hit_spectrum)
     miss_spectrum_db = 10 * np.log10(miss_spectrum)
 
@@ -152,7 +152,7 @@ if __name__ == "__main__":
         xlabel="Frequency (Hz)",
         ylabel=r"PSD (dB re 1 $\mu V^2$/Hz)",
         xlim=(0, 30),
-        title="HIT vs MISS Mean Spectrum",
+        title="HIT vs MISS Median Spectrum",
     )
 
     for theta_edge in (4, 8):
