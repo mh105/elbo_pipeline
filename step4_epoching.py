@@ -251,8 +251,8 @@ if __name__ == "__main__":
     epoch_figures = plot_epoch_rejection(epochs, epochs_clean, frontal_cluster)
 
     # Optional manual rejection of additional bad epochs
-    # available_channels = set(epochs_clean.ch_names) - set(epochs_clean.info["bads"])
-    # valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
+    available_channels = set(epochs_clean.ch_names) - set(epochs_clean.info["bads"])
+    valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
     # epochs_clean.plot(
     #     picks=valid_frontal_cluster,
     #     n_epochs=10,
