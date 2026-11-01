@@ -260,5 +260,5 @@ if __name__ == "__main__":
     # )
 
     # Save AutoReject and any additional manual rejections for Step 5.
-    epochs_clean.save(epochs_clean_file, overwrite=True)
+    epochs_clean.save(epochs_clean_file)
     print(f"Saved cleaned epochs: {epochs_clean_file}")
