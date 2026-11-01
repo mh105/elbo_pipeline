@@ -174,64 +174,71 @@ if __name__ == "__main__":
     set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
-    raw, behavior = load_raw_data(subject_id, return_behav=True)
-
-    # %% Detect nonfinite data and sparse flat spans before preprocessing
-    bad_ch_report = {}
-    # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
-    bad_ch_report.update(bad_ch_by_nan(raw))
-    flatlines = detect_flatline_inplace(raw)
-    mask_segment_by_flatline(raw, flatlines)
-    bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
-
-    # %% Line noise removal
-    raw_prep = raw.copy()
-    raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
-    if subject_id == "sub-02":
-        clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
-        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
-    elif subject_id == "sub-26":
-        clean = ZapLine_notch(raw_prep, line_freq=30.0)
-        clean = Interpolate_fft(clean, line_freq=90.0)
-        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+    epochs_clean_file = set_file.with_name(f"{set_file.stem}-epo_clean.fif")
+    if epochs_clean_file.exists():
+        epochs = mne.read_epochs(epochs_file, preload=True)
+        print(f"Loaded pre-AutoReject epochs: {epochs_file}")
     else:
-        clean = ZapLine_notch(raw_prep, line_freq=30.0)
-        clean = ZapLine_notch(clean, line_freq=90.0)
-        clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
-    remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
-    del raw_prep, clean  # Free two full-recording copies.
+        raw, behavior = load_raw_data(subject_id, return_behav=True)
 
-    # %% High-pass filter at 0.3 Hz for bad-channel detection
-    raw_bads = raw.copy()
-    raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+        # %% Detect nonfinite data and sparse flat spans before preprocessing
+        bad_ch_report = {}
+        # bad_ch_report.update(bad_ch_by_impedance(raw, initial_impedance))
+        bad_ch_report.update(bad_ch_by_nan(raw))
+        flatlines = detect_flatline_inplace(raw)
+        mask_segment_by_flatline(raw, flatlines)
+        bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
 
-    # Bad-channel detection and ASR correction in validated native reference
-    asr_details, reference_channel = bad_ch_time_detection_inplace(
-        raw_bads, bad_ch_report, flatlines,
-    )
+        # %% Line noise removal
+        raw_prep = raw.copy()
+        raw_prep.filter(l_freq=1.0, h_freq=None, verbose=False)
+        if subject_id == "sub-02":
+            clean = Interpolate_fft(raw_prep, line_freq=[30.0, 90.0])
+            clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=4.0)
+        elif subject_id == "sub-26":
+            clean = ZapLine_notch(raw_prep, line_freq=30.0)
+            clean = Interpolate_fft(clean, line_freq=90.0)
+            clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+        else:
+            clean = ZapLine_notch(raw_prep, line_freq=30.0)
+            clean = ZapLine_notch(clean, line_freq=90.0)
+            clean = Interpolate_fft(clean, line_freq=60.0, bandwidth=1.5)
+        remove_line_noise_inplace(raw, raw_prep, clean)  # without high-pass
+        del raw_prep, clean  # Free two full-recording copies.
 
-    # %% Fit ICA and select artifact components
-    ica, fit_epochs, iclabel_table = fit_ica(
-        raw_bads, reference_channel, return_details=True,
-    )
-    ica.plot_components()
+        # %% High-pass filter at 0.3 Hz for bad-channel detection
+        raw_bads = raw.copy()
+        raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
 
-    # Prepare and open the interactive viewer; each choice autosaves to JSON
-    viewer_dir = prepare_ica_viewer(
-        ica, fit_epochs, raw_bads,
-        eeg_path=set_file,
-        reference_channel=reference_channel,
-        iclabel_table=iclabel_table,
-        check_identity=True,
-    )
+        # Bad-channel detection and ASR correction in validated native reference
+        asr_details, reference_channel = bad_ch_time_detection_inplace(
+            raw_bads, bad_ch_report, flatlines,
+        )
 
-    # Run these after reviewing; loading replaces, rather than unions, exclusions
-    ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-    exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
-    ica.apply(raw_bads)
+        # %% Fit ICA and select artifact components
+        ica, fit_epochs, iclabel_table = fit_ica(
+            raw_bads, reference_channel, return_details=True,
+        )
+        ica.plot_components()
 
-    # %% Epoching
-    epochs = prepare_epochs(raw_bads, behavior)
+        # Prepare and open the interactive viewer; each choice autosaves to JSON
+        viewer_dir = prepare_ica_viewer(
+            ica, fit_epochs, raw_bads,
+            eeg_path=set_file,
+            reference_channel=reference_channel,
+            iclabel_table=iclabel_table,
+            check_identity=True,
+        )
+
+        # Run these after reviewing; loading replaces, rather than unions, exclusions
+        ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
+        exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
+        ica.apply(raw_bads)
+
+        # %% Epoching
+        epochs = prepare_epochs(raw_bads, behavior)
+        epochs.save(epochs_file)
+        print(f"Saved pre-AutoReject epochs: {epochs_file}")
 
     # Reject bad epochs
     ar = AutoReject(random_state=999)
@@ -244,14 +251,14 @@ if __name__ == "__main__":
     epoch_figures = plot_epoch_rejection(epochs, epochs_clean, frontal_cluster)
 
     # Optional manual rejection of additional bad epochs
-    # available_channels = set(epochs.ch_names) - set(epochs.info["bads"])
+    # available_channels = set(epochs_clean.ch_names) - set(epochs_clean.info["bads"])
     # valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
-    # epochs.plot(
+    # epochs_clean.plot(
     #     picks=valid_frontal_cluster,
     #     n_epochs=10,
     #     block=True,
     # )
 
-    # Save only the cleaned epochs for Step 5.
-    epochs_clean.save(epochs_file)
-    print(f"Saved reviewed epochs: {epochs_file}")
+    # Save AutoReject and any additional manual rejections for Step 5.
+    epochs_clean.save(epochs_clean_file, overwrite=True)
+    print(f"Saved cleaned epochs: {epochs_clean_file}")

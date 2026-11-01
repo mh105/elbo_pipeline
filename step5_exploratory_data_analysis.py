@@ -33,7 +33,7 @@ if __name__ == "__main__":
     subject_id = "sub-05"
     project_dir = Path(__file__).resolve().parents[3]
     epochs_file = (project_dir / subject_id / "eeg"
-                   / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg-epo.fif")
+                   / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg-epo_clean.fif")
     if not epochs_file.exists():
         raise FileNotFoundError(f"Epochs file not found: {epochs_file}")
 
