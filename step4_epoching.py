@@ -244,7 +244,7 @@ if __name__ == "__main__":
     ar = AutoReject(random_state=999)
     epochs_clean, reject_log = ar.fit_transform(epochs, return_log=True)
 
-    # Inspect the original traces, including epochs rejected by AutoReject.
+    # Inspect the original traces, including epochs rejected by AutoReject
     frontal_cluster = [
         "E3", "E4", "E5", "E10", "E11", "E12", "E16", "E18", "E19", "E23",
     ]
@@ -259,6 +259,6 @@ if __name__ == "__main__":
     #     block=True,
     # )
 
-    # Save AutoReject and any additional manual rejections for Step 5.
+    # Save AutoReject and any additional manual rejections for Step 5
     epochs_clean.save(epochs_clean_file)
     print(f"Saved cleaned epochs: {epochs_clean_file}")
