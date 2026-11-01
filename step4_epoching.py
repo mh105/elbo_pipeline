@@ -4,7 +4,7 @@ Run Steps 0-3 to prepare ICA-cleaned continuous data for epoching.
 Epoch definitions and rejection settings remain to be specified.
 """
 
-import argparse
+# import argparse
 import warnings
 from pathlib import Path
 
@@ -165,18 +165,18 @@ def plot_epoch_rejection(epochs, epochs_clean, candidate_channels, n_epochs=20):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run ELBO preprocessing and save epochs.")
-    parser.add_argument("subject_id", nargs="?", default="sub-06")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser(description="Run ELBO preprocessing and save epochs.")
+    # parser.add_argument("subject_id", nargs="?", default="sub-06")
+    # args = parser.parse_args()
 
     # %% Load example data
-    subject_id = args.subject_id
+    subject_id = "sub-02"
     set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
     epochs_clean_file = set_file.with_name(f"{set_file.stem}-epo_clean.fif")
     if epochs_clean_file.exists():
-        epochs = mne.read_epochs(epochs_file, preload=True)
+        epochs = mne.read_epochs(epochs_file, preload=True, verbose=False)
         print(f"Loaded pre-AutoReject epochs: {epochs_file}")
     else:
         raw, behavior = load_raw_data(subject_id, return_behav=True)
@@ -253,12 +253,12 @@ if __name__ == "__main__":
     # Optional manual rejection of additional bad epochs
     available_channels = set(epochs_clean.ch_names) - set(epochs_clean.info["bads"])
     valid_frontal_cluster = [c for c in frontal_cluster if c in available_channels]
-    # epochs_clean.plot(
-    #     picks=valid_frontal_cluster,
-    #     n_epochs=10,
-    #     block=True,
-    # )
+    epochs_clean.plot(
+        picks=valid_frontal_cluster,
+        n_epochs=20,
+        block=True,
+    )
 
     # Save AutoReject and any additional manual rejections for Step 5
-    epochs_clean.save(epochs_clean_file)
+    epochs_clean.save(epochs_clean_file, overwrite=True)
     print(f"Saved cleaned epochs: {epochs_clean_file}")
