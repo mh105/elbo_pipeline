@@ -170,11 +170,11 @@ if __name__ == "__main__":
     # args = parser.parse_args()
 
     # %% Load example data
-    subject_id = "sub-02"
+    subject_id = "sub-03"
     set_file = (Path(__file__).resolve().parents[3] / subject_id / "eeg"
                 / f"{subject_id}_task-ColorPrecMemStudy_run-1_eeg.set")
     epochs_file = set_file.with_name(f"{set_file.stem}-epo.fif")
-    epochs_clean_file = set_file.with_name(f"{set_file.stem}-epo_clean.fif")
+    epochs_clean_file = set_file.with_name(f"{set_file.stem}-clean-epo.fif")
     if epochs_clean_file.exists():
         epochs = mne.read_epochs(epochs_file, preload=True, verbose=False)
         print(f"Loaded pre-AutoReject epochs: {epochs_file}")
