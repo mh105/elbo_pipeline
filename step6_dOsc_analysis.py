@@ -75,28 +75,28 @@ if __name__ == "__main__":
         miss_oscillators.append(do1)
 
     # %% Collect HIT and MISS frequencies within 3.5-7.5 Hz
-    hit_frequencies = np.empty(len(hit_oscillators), dtype=object)
+    hit_theta_freq = np.empty(len(hit_oscillators), dtype=object)
     for trial_idx, hit_oscillator in enumerate(hit_oscillators):
         freqs = hit_oscillator.get_knee_osc().freq
-        hit_frequencies[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
+        hit_theta_freq[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
 
-    miss_frequencies = np.empty(len(miss_oscillators), dtype=object)
+    miss_theta_freq = np.empty(len(miss_oscillators), dtype=object)
     for trial_idx, miss_oscillator in enumerate(miss_oscillators):
         freqs = miss_oscillator.get_knee_osc().freq
-        miss_frequencies[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
+        miss_theta_freq[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
 
-    n_hits_with_band_oscillator = sum(freqs.size > 0 for freqs in hit_frequencies)
-    n_hits_without_band_oscillator = len(hit_frequencies) - n_hits_with_band_oscillator
+    n_hits_with_band_oscillator = sum(freqs.size > 0 for freqs in hit_theta_freq)
+    n_hits_without_band_oscillator = len(hit_theta_freq) - n_hits_with_band_oscillator
     print(
         f"HIT trials with a 3.5-7.5 Hz oscillator: "
-        f"{n_hits_with_band_oscillator / len(hit_frequencies):.1%} "
+        f"{n_hits_with_band_oscillator / len(hit_theta_freq):.1%} "
         f"({n_hits_with_band_oscillator}/{n_hits_without_band_oscillator} with/without)"
     )
 
-    n_misses_with_band_oscillator = sum(freqs.size > 0 for freqs in miss_frequencies)
-    n_misses_without_band_oscillator = len(miss_frequencies) - n_misses_with_band_oscillator
+    n_misses_with_band_oscillator = sum(freqs.size > 0 for freqs in miss_theta_freq)
+    n_misses_without_band_oscillator = len(miss_theta_freq) - n_misses_with_band_oscillator
     print(
         f"MISS trials with a 3.5-7.5 Hz oscillator: "
-        f"{n_misses_with_band_oscillator / len(miss_frequencies):.1%} "
+        f"{n_misses_with_band_oscillator / len(miss_theta_freq):.1%} "
         f"({n_misses_with_band_oscillator}/{n_misses_without_band_oscillator} with/without)"
     )
