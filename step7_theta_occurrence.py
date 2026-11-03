@@ -175,6 +175,8 @@ def compare_subjects(summary, output_dir):
                   xlim=(-0.5, 1.5), ylim=(-2, 102),
                   ylabel="Trials with theta oscillator (%)",
                   title=f"Paired subject percentages (n={len(summary)})")
+    ax_paired.text(0.5, 0.95, f"Paired t-test: p = {test.pvalue:.4f}",
+                   transform=ax_paired.transAxes, ha="center", va="top")
     bin_width = 2.5
     bin_min = bin_width * np.floor(differences.min() / bin_width)
     bin_max = bin_width * (np.floor(differences.max() / bin_width) + 1)
