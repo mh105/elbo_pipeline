@@ -2089,6 +2089,7 @@ def bad_ch_by_flatline(
     reference_channel=None,
     *,
     flatlines,
+    voltage_mask=False,
     return_details=False,
 ):
     """Return {"flatline": names} for channels whose exact flat samples exceed
@@ -2099,12 +2100,15 @@ def bad_ch_by_flatline(
     detect_flatline_inplace, followed by mask_segment_by_flatline to annotate
     this Raw's global dropouts as BAD_by_flatline. Count samples in
     segments_exact, without including joined channel gaps or filter padding.
-    Exclude samples in BAD annotations, including global dropouts, and the
-    temporary 0.1-second voltage mask, built from this native data with the
-    resolved reference excluded, as in bad_ch_by_voltage. Keep local flat
-    samples in both the count and denominator. Score all retained samples,
-    including a partial tail, and flag only when the fraction is strictly
-    greater than occurrence_cutoff.
+    Exclude samples in BAD annotations, including global dropouts. With
+    voltage_mask=True, also exclude the temporary 0.1-second voltage mask,
+    built from this native data with the resolved reference excluded, as in
+    bad_ch_by_voltage. Default to False because this detector runs before
+    high-pass filtering, when offsets and slow drift can exceed the voltage
+    threshold. Existing BAD_voltage_mask annotations are always excluded.
+    Keep local flat samples in both the count and denominator. Score all
+    retained samples, including a partial tail, and flag only when the
+    fraction is strictly greater than occurrence_cutoff.
 
     Add detections to info['bads']; leave data/annotations unchanged. With
     return_details=True, return (report, details): ch_names of the evaluated
@@ -2117,13 +2121,16 @@ def bad_ch_by_flatline(
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
-    shared = _voltage_mask_inputs(raw)
+    shared = _voltage_mask_inputs(raw) if voltage_mask else None
     reference_channel = _reference_channel(
-        raw, "native", reference_channel, known_zeros=shared["zeros"]
+        raw, "native", reference_channel,
+        known_zeros=shared["zeros"] if voltage_mask else None,
     )
-    spans, _ = _temporary_voltage_mask(
-        raw, reference_channel=reference_channel, shared=shared
-    )
+    spans = ()
+    if voltage_mask:
+        spans, _ = _temporary_voltage_mask(
+            raw, reference_channel=reference_channel, shared=shared
+        )
     _validate_flatlines(raw, flatlines)
     picks = _mask_eeg_picks(raw, reference_channel)
     retained_samples = ~_rejected_samples(raw, spans)

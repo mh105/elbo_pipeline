@@ -139,37 +139,71 @@ class TestPublicFlatlineStages(unittest.TestCase):
         raw = native_raw()
         raw._data[0] = 0  # A dead electrode alongside the named Cz reference.
         flatlines = flatlines_for(raw, {"E0": [[0, raw.n_times]]})
-        with patch.object(step2, "_zero_eeg_channels", wraps=step2._zero_eeg_channels) as zeros:
-            report = step2.bad_ch_by_flatline(raw, reference_channel="Cz", flatlines=flatlines)
-        self.assertEqual(report, {"flatline": ["E0"]})
-        uncached = [call for call in zeros.call_args_list
-                    if call.kwargs.get("known_zeros", call.args[2] if len(call.args) > 2 else None)
-                    is None]
-        self.assertEqual(len(uncached), 1)
+        for voltage_mask in (False, True):
+            with self.subTest(voltage_mask=voltage_mask):
+                with patch.object(step2, "_zero_eeg_channels", wraps=step2._zero_eeg_channels) as zeros:
+                    report = step2.bad_ch_by_flatline(
+                        raw.copy(), reference_channel="Cz", flatlines=flatlines,
+                        voltage_mask=voltage_mask,
+                    )
+                self.assertEqual(report, {"flatline": ["E0"]})
+                uncached = [call for call in zeros.call_args_list
+                            if call.kwargs.get("known_zeros", call.args[2] if len(call.args) > 2 else None)
+                            is None]
+                self.assertEqual(len(uncached), 1)
 
-    def test_flatline_denominator_excludes_the_temporary_voltage_mask(self):
+    def test_flatline_temporary_voltage_mask_is_opt_in(self):
         raw = native_raw()  # 12 channels besides Cz, four 2-s windows.
         raw._data[0, WINDOW:2 * WINDOW] = 3e-6  # E0 flat in window 1.
         raw._data[1:5, 100:105] += 600e-6  # 4 of 12 channels exceed 500 uV in window 0.
         flatlines = step2.detect_flatline_inplace(raw)
         step2.mask_segment_by_flatline(raw, flatlines)
-        annotations = raw.annotations.copy()
+        for kwargs, n_retained, bads in (
+            ({}, raw.n_times, []),
+            ({"voltage_mask": False}, raw.n_times, []),
+            ({"voltage_mask": True}, raw.n_times - 25, ["E0"]),
+        ):
+            with self.subTest(kwargs=kwargs):
+                scored = raw.copy()
+                report, details = step2.bad_ch_by_flatline(
+                    scored, flatlines=flatlines, return_details=True, **kwargs,
+                )
+                self.assertEqual(details["flat_fraction"][0], WINDOW / n_retained)
+                self.assertEqual(report, {"flatline": bads})  # 500/1975 > 25%.
+                self.assertEqual(scored.annotations, raw.annotations)
+                np.testing.assert_array_equal(scored.get_data(), raw.get_data())
+
+    def test_flatline_default_ignores_unfiltered_offsets_and_slow_drift(self):
+        raw = native_raw()
+        raw._data[0, WINDOW:3 * WINDOW] = 3e-6
+        raw._data[1:5] += 1e-3 + np.linspace(0, 1e-3, raw.n_times)
+        flatlines = step2.detect_flatline_inplace(raw)
+        step2.mask_segment_by_flatline(raw, flatlines)
+        original = raw.copy()
         report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines,
                                                    return_details=True)
-        self.assertEqual(details["flat_fraction"][0], WINDOW / (raw.n_times - 25))
-        self.assertEqual(report, {"flatline": ["E0"]})  # 500/1975 > 25%.
-        self.assertEqual(raw.annotations, annotations)
+        self.assertEqual(report, {"flatline": ["E0"]})
+        self.assertEqual(details["flat_fraction"][0], 0.5)
+        self.assertEqual(raw.annotations, original.annotations)
+        np.testing.assert_array_equal(raw.get_data(), original.get_data())
+        with self.assertRaisesRegex(ValueError, "No unmasked samples"):
+            step2.bad_ch_by_flatline(original, flatlines=flatlines, voltage_mask=True)
 
     def test_partial_bad_and_voltage_masks_remove_only_their_samples(self):
-        raw = native_raw()
-        raw.set_annotations(mne.Annotations([0.4], [0.1], ["BAD_manual"]))
-        raw._data[1:5, 1100:1105] += 600e-6
-        flatlines = flatlines_for(raw, {"E0": [[50, 150], [1000, 1200]]})
-        report, details = step2.bad_ch_by_flatline(raw, flatlines=flatlines, return_details=True)
-        self.assertEqual(report, {"flatline": []})
-        # The 25-sample BAD period and 25-sample voltage block each intersect
-        # E0's exact flats. Valid samples elsewhere in both 2-s windows remain.
-        self.assertEqual(details["flat_fraction"][0], 250 / 1950)
+        for label in ("BAD_manual", "BAD_voltage_mask"):
+            for voltage_mask, expected in ((False, 275 / 1975), (True, 250 / 1950)):
+                with self.subTest(label=label, voltage_mask=voltage_mask):
+                    raw = native_raw()
+                    raw.set_annotations(mne.Annotations([0.4], [0.1], [label]))
+                    raw._data[1:5, 1100:1105] += 600e-6
+                    flatlines = flatlines_for(raw, {"E0": [[50, 150], [1000, 1200]]})
+                    report, details = step2.bad_ch_by_flatline(
+                        raw, flatlines=flatlines, voltage_mask=voltage_mask,
+                        return_details=True,
+                    )
+                    self.assertEqual(report, {"flatline": []})
+                    # Each 25-sample mask intersects E0's exact flats.
+                    self.assertEqual(details["flat_fraction"][0], expected)
 
     def test_flatline_mask_accepts_another_all_zero_channel_with_a_named_reference(self):
         raw = native_raw()
