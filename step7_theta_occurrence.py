@@ -1,6 +1,6 @@
 """Compare HIT/MISS theta detection rates, excluding sub-10, sub-15, sub-29.
 
-Use the Step 6 fit settings, 3.5-7.5 Hz inclusive, and the index-0 adjustment.
+Use the Step 6 fit settings, 3.5-7.5 Hz inclusive, and original knee selection.
 Reuse valid per-subject model caches; fit uncached subjects from cleaned epochs.
 """
 
@@ -16,6 +16,28 @@ from somata.oscillator_search import DecomposedOscillatorModel as DecOsc
 
 
 EXCLUDED_SUBJECTS = ("sub-10", "sub-15", "sub-29")
+
+
+def summarize_oscillators(subject_id, result):
+    """Summarize theta detection using each fitted model's selected oscillator."""
+    summary = {"subject_id": subject_id}
+    for prefix in ("hit", "miss"):
+        oscillators = result[f"{prefix}_oscillators"]
+        theta_freq = np.empty(len(oscillators), dtype=object)
+        for trial_idx, model in enumerate(oscillators):
+            freqs = model.get_knee_osc().freq
+            theta_freq[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
+        result[f"{prefix}_theta_freq"] = theta_freq
+        n_with_theta = sum(freqs.size > 0 for freqs in theta_freq)
+        summary[f"n_{prefix}"] = len(oscillators)
+        summary[f"n_{prefix}_theta"] = n_with_theta
+        summary[f"n_{prefix}_without_theta"] = len(oscillators) - n_with_theta
+        summary[f"{prefix}_theta_pct"] = 100 * n_with_theta / len(oscillators)
+    summary["hit_minus_miss_pct_points"] = (
+        summary["hit_theta_pct"] - summary["miss_theta_pct"]
+    )
+    result["summary"] = summary
+    return summary
 
 
 def fit_subject(subject_dir, cache_dir):
@@ -36,14 +58,13 @@ def fit_subject(subject_dir, cache_dir):
         "fit_settings": fit_settings,
         "fit_start": 0.0,
         "theta_range": (3.5, 7.5),
-        "zero_knee_fallback": "max_ll",
     }
     cache_file = cache_dir / f"{subject_id}_dosc.pkl"
     if cache_file.exists():
         with cache_file.open("rb") as stream:
-            result = pickle.load(stream)
-        if result["signature"] == signature:
-            return result["summary"]
+            cached = pickle.load(stream)
+        if cached["signature"] == signature:
+            return cached["summary"]
 
     behavior = pd.read_csv(behavior_file, keep_default_na=False)
     epochs = mne.read_epochs(epochs_file, preload=True, verbose=False)
@@ -59,35 +80,18 @@ def fit_subject(subject_dir, cache_dir):
         raise ValueError(f"{subject_id}: at least one HIT and MISS trial is required.")
     Fs = epochs.info["sfreq"]
     stimulus_onset_idx = epochs.time_as_index(0, use_rounding=True)[0]
-    result = {"signature": signature, "frontal_channels": valid_frontal_cluster}
-    summary = {"subject_id": subject_id}
-
+    result = {"frontal_channels": valid_frontal_cluster}
     for response_type, prefix in (("HIT", "hit"), ("MISS", "miss")):
         condition_mask = response_types == response_type
-        signals = frontal_epoch_signals[condition_mask]
         oscillators = []
-        theta_freq = np.empty(len(signals), dtype=object)
-        for trial_idx, signal in enumerate(signals):
+        for signal in frontal_epoch_signals[condition_mask]:
             y = signal[stimulus_onset_idx:]
-            do1 = DecOsc(y, Fs, **fit_settings)
-            if do1.knee_index == 0:
-                do1.knee_index = np.argmax(do1.ll)
-            oscillators.append(do1)
-            freqs = do1.get_knee_osc().freq
-            theta_freq[trial_idx] = freqs[(freqs >= 3.5) & (freqs <= 7.5)]
+            oscillators.append(DecOsc(y, Fs, **fit_settings))
         result[f"{prefix}_oscillators"] = oscillators
-        result[f"{prefix}_theta_freq"] = theta_freq
         result[f"{prefix}_trial_indices"] = epochs.selection[condition_mask]
-        n_with_theta = sum(freqs.size > 0 for freqs in theta_freq)
-        summary[f"n_{prefix}"] = len(signals)
-        summary[f"n_{prefix}_theta"] = n_with_theta
-        summary[f"n_{prefix}_without_theta"] = len(signals) - n_with_theta
-        summary[f"{prefix}_theta_pct"] = 100 * n_with_theta / len(signals)
 
-    summary["hit_minus_miss_pct_points"] = (
-        summary["hit_theta_pct"] - summary["miss_theta_pct"]
-    )
-    result["summary"] = summary
+    result["signature"] = signature
+    summary = summarize_oscillators(subject_id, result)
     temporary_file = cache_file.with_suffix(".tmp")
     with temporary_file.open("wb") as stream:
         pickle.dump(result, stream, protocol=pickle.HIGHEST_PROTOCOL)
@@ -120,7 +124,7 @@ def compare_subjects(summary, output_dir):
     interval = test.confidence_interval()
     report = (
         "Excluded subjects: sub-10, sub-15, sub-29.\n"
-        "Selection: if knee_index is 0, use argmax(ll).\n"
+        "Selection: original SOMATA knee.\n"
         f"Subjects: {len(summary)}\n"
         f"Mean subject theta percentage: HIT {hit_pct.mean():.2f}%; "
         f"MISS {miss_pct.mean():.2f}%\n"
@@ -189,7 +193,7 @@ def compare_subjects(summary, output_dir):
                       title="Within-subject differences")
     ax_difference.legend()
     fig.suptitle("Theta occurrence: 3.5-7.5 Hz, stimulus 0-2.5 s\n"
-                 "Excluding sub-10, sub-15, sub-29; index-0 adjustment")
+                 "Excluding sub-10, sub-15, sub-29; original knee selection")
     fig.savefig(output_dir / "theta_distribution.png", dpi=180)
     return fig
 

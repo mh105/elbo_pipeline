@@ -25,11 +25,11 @@ class DummyDecOsc:
 
     calls = []
     profiles = {
-        0: (0, [1, 5, 2], 1, [1, 3.5, 7.5, 9]),
-        2: (2, [1, 5, 2], 2, [3.499, 7.501]),
+        0: (0, [1, 5, 2], 0, [1, 9]),
+        2: (2, [2, 6, 3], 2, [3.499, 7.501]),
         3: (0, [5, 2, 1], 0, [1, 8]),
-        4: (1, [1, 5, 2], 1, [4, 6, 12]),
-        5: (0, [1, 5, 2], 1, [5, 15]),
+        4: (1, [3, 7, 4], 1, [3.5, 7.5, 12]),
+        5: (0, [4, 8, 5], 0, [1, 8]),
     }
 
     def __init__(self, y, Fs, **settings):
@@ -80,7 +80,7 @@ def subject_files(tmp_path, monkeypatch):
                            behavior_file=behavior_file, data=data)
 
 
-def test_fit_preserves_step6_signal_selection_and_full_models(subject_files):
+def test_fit_preserves_epoch_signals_and_native_knee_selection(subject_files):
     files = subject_files
     summary = step7.fit_subject(files.subject_dir, files.output_dir)
     with (files.output_dir / "sub-99_dosc.pkl").open("rb") as stream:
@@ -92,7 +92,8 @@ def test_fit_preserves_step6_signal_selection_and_full_models(subject_files):
     models = saved["hit_oscillators"] + saved["miss_oscillators"]
     assert len(DummyDecOsc.calls) == len(models) == 5
     assert [model.original_trial for model in models] == [0, 2, 4, 3, 5]
-    assert [model.knee_index for model in models] == [1, 2, 1, 0, 1]
+    assert [model.knee_index for model in models] == [0, 2, 1, 0, 0]
+    assert "zero_knee_fallback" not in saved["signature"]
     for model in models:
         assert isinstance(model, DummyDecOsc)
         assert model.Fs == 100
@@ -102,20 +103,21 @@ def test_fit_preserves_step6_signal_selection_and_full_models(subject_files):
         np.testing.assert_allclose(model.y, expected, rtol=1e-12)
         np.testing.assert_array_equal(model.plot_trace(), model.y)
 
-    for name, expected in (("hit_theta_freq", [[3.5, 7.5], [], [4, 6]]),
-                           ("miss_theta_freq", [[], [5]])):
+    for name, expected in (("hit_theta_freq", [[], [], [3.5, 7.5]]),
+                           ("miss_theta_freq", [[], []])):
         assert saved[name].dtype == object
         assert saved[name].shape == (len(expected),)
         for actual, frequencies in zip(saved[name], expected):
             np.testing.assert_array_equal(actual, frequencies)
     assert summary["n_hit"] == 3
-    assert summary["n_hit_theta"] == 2
-    assert summary["n_hit_without_theta"] == 1
-    assert summary["hit_theta_pct"] == pytest.approx(200 / 3)
+    assert summary["n_hit_theta"] == 1
+    assert summary["n_hit_without_theta"] == 2
+    assert summary["hit_theta_pct"] == pytest.approx(100 / 3)
     assert summary["n_miss"] == 2
-    assert summary["n_miss_theta"] == summary["n_miss_without_theta"] == 1
-    assert summary["miss_theta_pct"] == 50
-    assert summary["hit_minus_miss_pct_points"] == pytest.approx(50 / 3)
+    assert summary["n_miss_theta"] == 0
+    assert summary["n_miss_without_theta"] == 2
+    assert summary["miss_theta_pct"] == 0
+    assert summary["hit_minus_miss_pct_points"] == pytest.approx(100 / 3)
     assert saved["summary"] == summary
 
 
@@ -138,9 +140,47 @@ def test_cache_reuses_completed_fit_and_invalidates_changed_input(subject_files,
     assert len(DummyDecOsc.calls) == 10
     assert updated["n_hit"] == 2
     assert updated["n_miss"] == 3
-    assert updated["hit_theta_pct"] == 50
-    assert updated["miss_theta_pct"] == pytest.approx(200 / 3)
-    assert updated["hit_minus_miss_pct_points"] == pytest.approx(-50 / 3)
+    assert updated["hit_theta_pct"] == 0
+    assert updated["miss_theta_pct"] == pytest.approx(100 / 3)
+    assert updated["hit_minus_miss_pct_points"] == pytest.approx(-100 / 3)
+
+
+@pytest.mark.parametrize("old_fallback", [None, "max_ll"])
+def test_old_selection_cache_is_refitted(subject_files, monkeypatch, old_fallback):
+    files = subject_files
+    native_summary = step7.fit_subject(files.subject_dir, files.output_dir)
+    cache_file = files.output_dir / "sub-99_dosc.pkl"
+    saved = pickle.loads(cache_file.read_bytes())
+    saved["signature"]["zero_knee_fallback"] = old_fallback
+    for prefix, index in (("hit", 0), ("miss", 1)):
+        model = saved[f"{prefix}_oscillators"][index]
+        assert model.knee_index == 0
+        model.knee_index = int(np.argmax(model.ll))
+        saved[f"{prefix}_theta_freq"][index] = model.get_knee_osc().freq
+    saved["summary"].update(
+        n_hit_theta=2, n_hit_without_theta=1, hit_theta_pct=200 / 3,
+        n_miss_theta=1, n_miss_without_theta=1, miss_theta_pct=50,
+        hit_minus_miss_pct_points=50 / 3,
+    )
+    cache_file.write_bytes(pickle.dumps(saved))
+
+    assert step7.fit_subject(files.subject_dir, files.output_dir) == native_summary
+    assert len(DummyDecOsc.calls) == 10
+    refreshed = pickle.loads(cache_file.read_bytes())
+    assert "zero_knee_fallback" not in refreshed["signature"]
+    assert refreshed["hit_oscillators"][0].knee_index == 0
+    assert refreshed["miss_oscillators"][1].knee_index == 0
+    assert refreshed["hit_theta_freq"][0].size == 0
+    assert refreshed["miss_theta_freq"][1].size == 0
+    assert refreshed["summary"] == native_summary
+
+    def unexpected_call(*args, **kwargs):
+        raise AssertionError("A refreshed cache must bypass data loading and fitting.")
+
+    monkeypatch.setattr(step7, "DecOsc", unexpected_call)
+    monkeypatch.setattr(step7.mne, "read_epochs", unexpected_call)
+    assert step7.fit_subject(files.subject_dir, files.output_dir) == native_summary
+    assert len(DummyDecOsc.calls) == 10
 
 
 def test_analysis_skips_requested_subjects_before_loading(tmp_path, monkeypatch):
