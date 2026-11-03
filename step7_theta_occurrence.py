@@ -176,7 +176,7 @@ def compare_subjects(summary, output_dir):
     ax_paired.scatter(hit_x, hit_pct, color="C0", s=28, zorder=3)
     ax_paired.scatter(miss_x, miss_pct, color="C1", s=28, zorder=3)
     ax_paired.set(xticks=[0, 1], xticklabels=["HIT", "MISS"],
-                  xlim=(-0.5, 1.5), ylim=(-2, 102),
+                  xlim=(-0.5, 1.5), ylim=(-2, 75),
                   ylabel="Trials with theta oscillator (%)",
                   title=f"Paired subject percentages (n={len(summary)})")
     ax_paired.text(0.5, 0.95, f"Paired t-test: p = {test.pvalue:.4f}",
