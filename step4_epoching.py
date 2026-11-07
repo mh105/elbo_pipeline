@@ -30,8 +30,7 @@ from step2_bad_ch_time_detection import (
 from step3_ica_cleaning import (
     fit_ica,
     prepare_ica_viewer,
-    load_ica_exclusions,
-    summarize_ica_exclusions,
+    apply_reviewed_ica,
 )
 
 
@@ -232,9 +231,8 @@ if __name__ == "__main__":
         )
 
         # Run these after reviewing; loading replaces, rather than unions, exclusions
-        ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-        exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
-        ica.apply(raw_bads)
+        raw_bads, exclusion_figure = apply_reviewed_ica(
+            raw_bads, ica, fit_epochs, viewer_dir, reference_channel=reference_channel)
 
         # %% Epoching
         epochs = prepare_epochs(raw_bads, behavior)

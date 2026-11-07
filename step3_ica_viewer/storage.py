@@ -348,15 +348,23 @@ def set_stable_review_version(viewer_dir, version, expected_revision):
         return _review_response(review, selected_id)
 
 
-def load_exclusions(viewer_dir, ica=None, *, version=None):
-    """Return a complete list (final by default), optionally checking the transform."""
+def load_review_choice(viewer_dir, ica=None, *, version=None):
+    """Read one complete labeling snapshot, including its fit, version and revision."""
     manifest = _manifest(viewer_dir)
-    review = read_review(viewer_dir, version=version)
+    review = _review_response(_review_document(viewer_dir, manifest), version)
     if ica is not None:
         archived_ica, _, _, _ = _load_archived(Path(viewer_dir), manifest)
         if not _models_match(ica, archived_ica, manifest["reference_channel"]):
             raise ValueError("The target ICA decomposition does not match this saved review.")
-    return _indices(review["exclude"], manifest["n_components"])
+    return dict(fit_id=manifest["fit_id"], reference_channel=manifest["reference_channel"],
+                original_raw=manifest.get("original_raw"), version=review["active_version"],
+                revision=review["revision"], updated_at_utc=review["updated_at_utc"],
+                exclude=_indices(review["exclude"], manifest["n_components"]))
+
+
+def load_exclusions(viewer_dir, ica=None, *, version=None):
+    """Return a complete list (final by default), optionally checking the transform."""
+    return load_review_choice(viewer_dir, ica, version=version)["exclude"]
 
 
 def _epoch_table(fit_epochs, raw_bads):
@@ -622,6 +630,15 @@ def ensure_cache(viewer_dir):
     return cache
 
 
+def recording_sample_digest(raw):
+    """Hash the processed samples in bounded blocks, independent of paths and storage format."""
+    digest = hashlib.sha256(_canonical({"channels": raw.ch_names, "n_times": raw.n_times}))
+    for start in range(0, raw.n_times, 8192):
+        data = raw.get_data(start=start, stop=min(start + 8192, raw.n_times))
+        digest.update(np.ascontiguousarray(data.T, dtype="<f8"))
+    return digest.hexdigest()
+
+
 def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel,
                    iclabel_table, check_identity=False):
     """Prepare a fit without overwriting reviews; optionally require a saved match."""
@@ -635,8 +652,11 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel,
     raw_metadata = dict(sfreq=float(raw_bads.info["sfreq"]), first_samp=int(raw_bads.first_samp),
                         n_times=int(raw_bads.n_times), crop_origin_s=float(raw_bads.first_time))
     source_files = _source_files(eeg_path, raw_bads)
-    recording_id = _fingerprint(dict(filename=eeg_path.name, files=source_files,
-                                     reference_channel=reference_channel, raw=raw_metadata))
+    recording_fields = dict(filename=eeg_path.name, files=source_files,
+                            reference_channel=reference_channel, raw=raw_metadata)
+    legacy_recording_id = _fingerprint(recording_fields)
+    raw_metadata["samples_sha256"] = recording_sample_digest(raw_bads)
+    recording_id = _fingerprint(recording_fields)
     training_id = _fingerprint(dict(version=2, metadata=_training_fields(fit_epochs),
                                     mapping=epoch_table.to_dict("list")),
                                (("samples", samples), ("geometry", geometry)))
@@ -661,7 +681,9 @@ def prepare_bundle(ica, fit_epochs, raw_bads, *, eeg_path, reference_channel,
                 if path.parent.name.startswith("."):
                     continue
                 candidate = _manifest(path.parent)
-                if (candidate["recording_identity"] == recording_id and
+                expected_id = (recording_id if "samples_sha256" in (candidate.get("original_raw") or {})
+                               else legacy_recording_id)
+                if (candidate["recording_identity"] == expected_id and
                         _same_analysis(path.parent, candidate, ica, fit_epochs, epoch_table)):
                     matches.append(path.parent)
             if len(matches) > 1:
