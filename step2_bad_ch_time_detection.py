@@ -134,6 +134,7 @@ from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin, firwin2, minimum_phase, oaconvolve
 from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
+from step2_capture import filter_step2_inplace, repair_piece
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (  # noqa: F401
     ZapLine_notch,
@@ -3456,7 +3457,7 @@ def bad_ch_under_robust_ref(
 
 def interpolate_local_artifacts_inplace(
     raw, flatlines, *, pop_intervals=None, reference_channel=None,
-    pop_repair_width=4.0,
+    pop_repair_width=4.0, capture=None,
 ):
     """Jointly repair local flats and pops; return detected pop intervals.
 
@@ -3591,8 +3592,13 @@ def interpolate_local_artifacts_inplace(
         ])
         for name in {*local_flat, *pop_intervals}
     }
-    _interpolate_local_intervals_inplace(raw, targets, {}, global_flat)
+    if capture is not None:
+        capture.check_raw(raw)
+    _interpolate_local_intervals_inplace(raw, targets, {}, global_flat, capture=capture)
     re_reference_inplace(raw, reference_channel)
+    if capture is not None:
+        capture.record_reference(reference_channel)
+        capture.repairs_observed = True
     if detect_pops:
         print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
               f"reference {final_reference} "
@@ -3601,7 +3607,7 @@ def interpolate_local_artifacts_inplace(
         return pop_intervals
 
 
-def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
+def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat, *, capture=None):
     """Repair channel intervals using the shared spherical-spline plan.
 
     targets and invalid map EEG names to half-open sample intervals. Only
@@ -3611,8 +3617,6 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
     blend with its input. Read all estimates before writing any target so no
     repaired samples feed another target's estimate in that piece.
     """
-    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-    sample_chunk = 8192
     geometry = _spline_geometry(raw)
     bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
     good = geometry["picks"][~np.isin(geometry["picks"], bads)]
@@ -3626,22 +3630,18 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
         donors = good[~np.isin(good, excluded)]
         weights = _spline_weights(geometry, donors, repair)
         common_rows = [row for row, target in enumerate(repair) if target in other]
+        other_donors, other_weights = None, None
         if weight is not None and common_rows:
             other_donors = good[~np.isin(good, other_excluded)]
             other_weights = _spline_weights(
                 geometry, other_donors, [repair[row] for row in common_rows],
             )
-        for first in range(start, stop, sample_chunk):
-            last = min(first + sample_chunk, stop)
-            projected = weights @ raw._data[donors, first:last]
-            if weight is None:
-                raw._data[repair, first:last] = projected
-            else:
-                previous = raw._data[repair, first:last]
-                if common_rows:
-                    previous[common_rows] = other_weights @ raw._data[other_donors, first:last]
-                part = weight[first - start:last - start]
-                raw._data[repair, first:last] = part * projected + (1 - part) * previous
+        piece = dict(start=start, stop=stop, targets=repair, donors=donors, weights=weights,
+                     common=common_rows, other_donors=other_donors,
+                     other_weights=other_weights, fade=weight)
+        repair_piece(raw._data, **piece)
+        if capture is not None:
+            capture.operations.append(dict(kind="repair", **piece))
 
 
 def _candidate_reference_replacement(raw, reference_channel):
@@ -3663,7 +3663,7 @@ def _candidate_reference_replacement(raw, reference_channel):
     return good[0], candidates
 
 
-def validate_reference_inplace(raw, flatlines):
+def validate_reference_inplace(raw, flatlines, *, capture=None):
     """Keep a good native reference; re-reference a bad one in place to the
     nearest good electrode among its five nearest.
     Return the reference channel name in effect.
@@ -3689,7 +3689,12 @@ def validate_reference_inplace(raw, flatlines):
     reference_channel = _reference_channel(
         raw, "native", flatlines["reference_channel"]
     )
+    if capture is not None:
+        capture.check_raw(raw)
+        capture.bad_channels = list(raw.info["bads"])
     if reference_channel not in raw.info["bads"]:
+        if capture is not None:
+            capture.reference_check_observed = True
         return reference_channel
     replacement, candidates = _candidate_reference_replacement(raw, reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
@@ -3697,6 +3702,9 @@ def validate_reference_inplace(raw, flatlines):
     # Row by row, so that no full EEG temporary is made.
     for i in eeg:
         raw._data[i] -= new_reference
+    if capture is not None:
+        capture.record_reference(replacement)
+        capture.reference_check_observed = True
     warnings.warn(
         f"The native reference {reference_channel} is bad; re-referenced every "
         f"EEG channel to {replacement}, the nearest good electrode of {candidates}.",
@@ -3917,7 +3925,7 @@ def _asr_filter_channels(data, b, a, zi=None):
 
 def apply_asr_inplace(
     raw, reference_channel=None, flatlines=None, pop_intervals=None,
-    *, calibration_cutoff=20.0,
+    *, calibration_cutoff=20.0, capture=None,
 ):
     """Correct good EEG channels with ASR in place; return details.
 
@@ -3962,6 +3970,8 @@ def apply_asr_inplace(
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
+    if capture is not None:
+        capture.check_raw(raw)
     if pop_intervals is None:
         pop_intervals = {}
     if flatlines is None:
@@ -3987,6 +3997,8 @@ def apply_asr_inplace(
 
     def require_calibration(n_samples):
         if n_samples < minimum_samples:
+            if capture is not None:
+                capture.skip_asr("Insufficient retained calibration support.")
             raise ValueError(
                 f"ASR requires at least 60 seconds of retained calibration data; "
                 f"only {n_samples / sfreq:.3f} seconds remain."
@@ -4034,7 +4046,17 @@ def apply_asr_inplace(
 
     state = update_initial_state(state, data)
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
-        corrected, processing = process_asr(data, sfreq, state)
+        if capture is None:
+            corrected, processing = process_asr(data, sfreq, state)
+        else:
+            corrected, processing = process_asr(data, sfreq, state, store_reconstruction_matrices=True)
+            try:
+                capture.record_asr(data, corrected, picks, state, processing, process_asr)
+            except (ValueError, KeyError, AssertionError) as error:
+                capture.asr_status, capture.asr_reason = "unavailable", str(error)
+                warnings.warn(f"ASR corrected the EEG; replay is unavailable: {error}", stacklevel=2)
+            # The capture owns the applied matrices; keep the ordinary report compact.
+            processing.pop("reconstruction_matrices", None)
     raw._data[picks] = corrected
     plot_asr_effect(raw, data, names)
     raw.compute_psd(
@@ -4076,7 +4098,7 @@ def apply_asr_inplace(
     return details
 
 
-def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
+def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines, *, capture=None):
     """Detect bad channels, repair the good channels' electrode pops, and apply
     ASR in place; return ASR details and the effective reference channel.
 
@@ -4093,11 +4115,12 @@ def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
 
     bad_ch_under_robust_ref(raw, bad_ch_report, flatlines=flatlines)
 
-    pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines)
-    reference_channel = validate_reference_inplace(raw, flatlines)
+    capture_kwargs = {} if capture is None else {"capture": capture}
+    pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines, **capture_kwargs)
+    reference_channel = validate_reference_inplace(raw, flatlines, **capture_kwargs)
     mask_segment_by_voltage(raw, reference_channel=reference_channel)
     asr_details = apply_asr_inplace(
-        raw, reference_channel, flatlines, pop_intervals,
+        raw, reference_channel, flatlines, pop_intervals, **capture_kwargs,
     )
     return asr_details, reference_channel
 
@@ -4127,7 +4150,7 @@ if __name__ == "__main__":
 
     # %% High-pass filter at 0.3 Hz for bad-channel detection
     raw_bads = raw.copy()
-    raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+    filter_step2_inplace(raw_bads)
 
     # %% Bad-channel detection and ASR correction in validated native reference
     asr_details, reference_channel = bad_ch_time_detection_inplace(

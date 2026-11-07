@@ -33,6 +33,7 @@ from step1_line_noise_removal import (
     Interpolate_fft,
     remove_line_noise_inplace,
 )
+from step2_capture import filter_step2_inplace
 from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
     bad_ch_by_flatline,
@@ -395,7 +396,7 @@ if __name__ == "__main__":
 
     # %% High-pass filter at 0.3 Hz for bad-channel detection
     raw_bads = raw.copy()
-    raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+    filter_step2_inplace(raw_bads)
 
     # %% Bad-channel detection and ASR correction in validated native reference
     asr_details, reference_channel = bad_ch_time_detection_inplace(
