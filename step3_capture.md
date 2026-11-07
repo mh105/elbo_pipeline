@@ -78,3 +78,6 @@ with a zero denominator are reported as undefined. The original viewer's
 variance-reduction summary retains its own unannotated-sample convention.
 
 Run the synthetic checks with `python -m pytest tests/test_step3_capture.py`.
+
+Use the [synthetic ERP assessment](erp_preservation/README.md) to evaluate one
+or more saved ICA choices on the same event trains and model waveforms.

@@ -4002,6 +4002,8 @@ def apply_asr_inplace(
         raise ValueError("Pass the flatlines dictionary from detect_flatline_inplace.")
     _validate_flatlines(raw, flatlines)
     reference_channel = _reference_channel(raw, "native", reference_channel)
+    if capture is not None:
+        capture.output_reference = reference_channel
     if reference_channel in raw.info["bads"]:
         raise ValueError("The reference is bad; run validate_reference_inplace first.")
     picks = _mask_eeg_picks(raw, reference_channel)

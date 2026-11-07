@@ -94,9 +94,14 @@ and calibrated state exposes that matrix: the reflected tail is made explicit
 and diagnostic lookahead is set to zero. The visible matrices must agree exactly
 with the ordinary pass, and replay must reproduce the corrected EEG
 (`atol=1e-12` V, `rtol=1e-10`). Only applied transitions are retained.
+Checkpoint replay returns only endpoints observed continuously from the Step 2 input.
+Standalone local and ASR replay accept a known signal at the corresponding stage input.
 Loading the archive for a synthetic signal does not invoke ASR fitting or
 processing. FIR replay uses MNE's overlap-add implementation; MNE and
 mne-denoise versions are saved with the archive.
 
 Run the artificial checks from this checkout with
 `python -m pytest tests/test_step2_capture.py tests/test_step2_recovery.py`.
+
+The [synthetic ERP assessment](erp_preservation/README.md) uses this capture to
+measure the filter, repairs, ASR and whole-stage effects on independent model waveforms.

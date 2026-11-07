@@ -164,8 +164,10 @@ class Step2Capture:
     def replay(self, data, *, stage="post_asr"):
         """Replay on volts in the saved channel order, with the original sample zero.
 
-        filtered: FIR only. pre_asr: FIR, repairs and references. post_asr:
-        all applied operations. asr_only: ASR applied to a pre-ASR input.
+        Replay stored operations up to the requested stage. For complete-chain
+        comparisons use stage_availability and replay_checkpoints: an archive
+        can start partway through cleaning. asr_only takes an input in the
+        pre-ASR reference.
         """
         if stage not in ("filtered", "pre_asr", "post_asr", "asr_only"):
             raise ValueError(f"Unknown replay stage: {stage}")
@@ -194,12 +196,48 @@ class Step2Capture:
                                             copy=False, pad=op["pad"])
             elif stage == "filtered":
                 continue
-            elif kind == "repair":
-                repair_piece(result, **{k: v for k, v in op.items() if k != "kind"})
-            elif kind == "reference":
-                result[self.eeg_picks] -= result[op["pick"]].copy()
             else:
-                raise ValueError(f"Unknown captured operation: {kind}")
+                self._apply_local_operation(result, op)
+        return result
+
+    def _apply_local_operation(self, result, op):
+        if op["kind"] == "repair":
+            repair_piece(result, **{k: v for k, v in op.items() if k != "kind"})
+        elif op["kind"] == "reference":
+            result[self.eeg_picks] -= result[op["pick"]].copy()
+        else:
+            raise ValueError(f"Unknown captured operation: {op['kind']}")
+
+    def replay_local(self, signal):
+        """Apply observed local repairs and reference changes to a signal at their input."""
+        if not self.stage_availability["repair_increment"]:
+            raise ValueError("Local repairs and the reference check were not both captured.")
+        result = np.array(signal, dtype=float, copy=True)
+        if result.shape != (len(self.channels), self.n_times):
+            raise ValueError("Expected a channels-by-samples array on the recorded grid.")
+        for op in self.operations:
+            if op["kind"] in ("repair", "reference"):
+                self._apply_local_operation(result, op)
+        return result
+
+    def replay_checkpoints(self, data):
+        """Return only endpoints for which the chain from the Step 2 input was observed."""
+        phases = {"filter": 0, "repair": 1, "reference": 1, "asr": 2}
+        order = [phases[op["kind"]] for op in self.operations]
+        if order != sorted(order):
+            raise ValueError("Checkpoint replay requires filtering, then local operations, then ASR.")
+        observed = self.stage_availability
+        if not observed["filter_only"]:
+            return {}
+        filtered = self.replay(data, stage="filtered")
+        result = {"filtered": filtered}
+        if observed["repair_increment"]:
+            pre = self.replay_local(filtered)
+            result["pre_asr"] = pre
+            if self.asr_status == "applied":
+                result["post_asr"] = self.replay(pre, stage="asr_only")
+            elif self.asr_status == "skipped":
+                result["post_asr"] = pre
         return result
 
     def save(self, filename):
