@@ -38,16 +38,55 @@ after_asr = capture.replay(before_asr, stage="asr_only")
 Use `stage="filtered"` for the filter alone. ASR-only replay expects data in
 the effective pre-ASR reference. When ASR was deliberately omitted, call
 `capture.skip_asr(reason)`; full replay then applies just the earlier corrections.
-Insufficient calibration keeps the ordinary ELBO exception and records the
-reason in the capture. An applied ASR correction with no corrected samples is
+The Step 2 workflow records a skipped ASR if calibration support is insufficient.
+Direct callers of the lower-level ASR function receive a ValueError with the
+available and required durations. An applied ASR correction with no corrected samples is
 an identity transformation. If its matrices cannot be verified, the EEG keeps
 the ordinary correction, the archive records `asr_status="unavailable"`, and
 ASR replay reports the reason.
 
+## Recovery and handoff
+
+During initial preparation, call `assess_persistent_flatness(raw, flatlines=flatlines)`
+after bridging local flat intervals and annotating global dropouts. The default
+uses the existing BAD annotations. With the optional `voltage_mask=True`, the
+voltage screen subtracts each channel's median in a temporary calculation.
+Thresholds, voltage data, and reference-channel identification are unchanged.
+If no samples qualify, the original intervals remain available and
+`flatlines["persistent_flatness"]` records the warning.
+
+If a native-reference channel check has no usable samples or windows, Step 2
+records which check was unanswered. Once the robust average-reference assessment
+succeeds, ELBO retries those checks on a repaired and reference-corrected copy.
+Any new bad channel triggers a fresh repair from the filtered samples, with
+that channel excluded from the donor pool. The final repairs are applied once
+to the working EEG and checked against that settled copy. The capture excludes
+all provisional operations. The report lists any check that is still unanswered.
+
+To save checkpoints and a report, pass a **new directory** as `output_dir` to
+`bad_ch_time_detection_inplace`. It writes double-precision FIFs for completed
+stages and a `step2_report.json`. The report is also returned in
+`details["step2_report"]` when running in memory. On completion,
+`report["handoff"]` identifies the stage and `report["checkpoints"][stage]`
+identifies the saved EEG file. Use `report["reference_channel"]` for Step 3.
+With less than 60 seconds of candidate or automatically selected calibration
+data, the handoff is the full pre-ASR recording. The report states which
+calibration step fell short and by how much. If ASR applied a correction but
+its replay could not be verified, the handoff is the actual post-ASR recording
+and replay is marked unavailable.
+
+A missing diagnostic figure gets its own warning. A failed numerical operation
+outside the documented recovery cases raises an exception. The report retains
+the last completed checkpoint and identifies the failed stage; such a run has
+no completed Step 3 handoff. Repair bounds in the report are half-open sample
+offsets from the start of the recording.
+
 ## Timing at the ends of the recording
 
 Capture uses the public `process_asr(..., store_reconstruction_matrices=True)`
-diagnostics for standard ASR. Each blend uses the original update width before
+diagnostics for standard ASR. Capture was tested with MNE 1.13.2 and mne-denoise
+0.0.3. If the installed processor has no matrix-export option, ordinary ASR still
+runs once and the report marks ASR replay unavailable. Each blend uses the original update width before
 clipping to the output sample grid. If a correction is active at the first
 visible sample, a preceding update can fall entirely in the library's lookahead
 padding. In that case only, a second diagnostic pass on the same real signal
@@ -60,4 +99,4 @@ processing. FIR replay uses MNE's overlap-add implementation; MNE and
 mne-denoise versions are saved with the archive.
 
 Run the artificial checks from this checkout with
-`python -m pytest tests/test_step2_capture.py`.
+`python -m pytest tests/test_step2_capture.py tests/test_step2_recovery.py`.

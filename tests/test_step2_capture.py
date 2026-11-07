@@ -156,6 +156,27 @@ class TestCapture(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "capture unavailable"):
             cap.replay(raw.get_data())
 
+    def test_processor_without_matrix_export_runs_ordinary_asr_once(self):
+        from test_asr import FakeASR
+        raw = make_raw(seconds=75)
+        capture = Step2Capture(raw, "Cz")
+        fake = FakeASR()
+        calls = []
+
+        def old_process(data, sfreq, state):
+            calls.append(1)
+            return fake.process(data, sfreq, state)
+
+        with patch.object(step2, "calibrate_asr", side_effect=fake.calibrate), \
+                patch.object(step2, "process_asr", old_process), \
+                patch.object(step2, "plot_asr_calibration"), patch.object(step2, "plot_asr_effect"), \
+                patch.object(mne.time_frequency.Spectrum, "plot_topomap"), \
+                self.assertWarnsRegex(UserWarning, "cannot export"):
+            step2.apply_asr_inplace(raw, "Cz", flatlines_for(raw, {}), {}, capture=capture)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(capture.asr_status, "unavailable")
+        np.testing.assert_array_equal(raw.get_data(picks=step2._mask_eeg_picks(raw, "Cz")), fake.corrected)
+
 
 if __name__ == "__main__":
     unittest.main()

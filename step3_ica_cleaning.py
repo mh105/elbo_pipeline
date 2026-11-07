@@ -36,7 +36,7 @@ from step1_line_noise_removal import (
 from step2_capture import filter_step2_inplace
 from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
-    bad_ch_by_flatline,
+    assess_persistent_flatness,
     detect_flatline_inplace,
     mask_segment_by_flatline,
     bad_ch_time_detection_inplace,
@@ -375,7 +375,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_nan(raw))
     flatlines = detect_flatline_inplace(raw)
     mask_segment_by_flatline(raw, flatlines)
-    bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
+    bad_ch_report.update(assess_persistent_flatness(raw, flatlines=flatlines))
 
     # %% Line noise removal
     raw_prep = raw.copy()
