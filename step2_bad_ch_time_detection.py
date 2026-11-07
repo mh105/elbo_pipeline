@@ -114,6 +114,8 @@ shared full-range axes. plot_asr_calibration shows accepted support, a channel
 trace and spectrogram, and the calibrated covariance before correction.
 """
 
+import hashlib
+import inspect
 from collections import defaultdict
 from dataclasses import replace
 from functools import partial
@@ -134,6 +136,9 @@ from scipy.linalg import eigh, solve
 from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import fftconvolve, firwin, firwin2, minimum_phase, oaconvolve
 from somata.multitaper.multitaper_spectrogram_python import multitaper_spectrogram
+from step2_recovery import (Checkpoints, InsufficientASRCalibration, NoScorableSupport,
+                            collect_plot_warnings, diagnostic, warn_missing_plot)
+from step2_capture import filter_step2_inplace, repair_piece
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (  # noqa: F401
     ZapLine_notch,
@@ -239,7 +244,7 @@ def _prepare_channel_windows(
         raise ValueError("window_length must cover at least two samples.")
     n_windows = raw.n_times // window_samples
     if n_windows == 0:
-        raise ValueError("Data must contain at least one complete window.")
+        raise NoScorableSupport("Data must contain at least one complete window.")
     reference_channel = _reference_channel(
         raw, reference, reference_channel, known_zeros
     )
@@ -842,7 +847,7 @@ def mask_segment_by_voltage(
     _add_bad_annotations(raw, spans, "BAD_voltage_mask")
 
 
-def _voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples):
+def _voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples, *, center=False):
     """Whether each picked channel is finite, and whether each of its
     window_samples windows (the last one possibly partial) has a sample
     strictly outside +/-voltage_threshold_uv.
@@ -854,6 +859,8 @@ def _voltage_exceedances(raw, picks, voltage_threshold_uv, window_samples):
     for row, i in enumerate(picks):
         data = raw.get_data(picks=[i], reject_by_annotation=None)[0]
         finite[row] = np.isfinite(data).all()
+        if center and finite[row]:
+            data = data - np.median(data)
         exceeds[row] = np.logical_or.reduceat(
             np.abs(data) > voltage_threshold_uv / 1e6, starts
         )
@@ -881,7 +888,7 @@ def _voltage_mask_spans(
 
 def _voltage_mask_inputs(
     raw, voltage_threshold_uv=_VOLTAGE_MASK_THRESHOLD_UV,
-    window_length=_VOLTAGE_MASK_WINDOW_LENGTH,
+    window_length=_VOLTAGE_MASK_WINDOW_LENGTH, *, center=False,
 ):
     """Compute reusable reference and voltage-mask
     inputs from every EEG channel, bad or not.
@@ -903,7 +910,7 @@ def _voltage_mask_inputs(
     if window_samples < 1:
         raise ValueError("window_length must cover at least one sample.")
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
-    finite, exceeds = _voltage_exceedances(raw, eeg, voltage_threshold_uv, window_samples)
+    finite, exceeds = _voltage_exceedances(raw, eeg, voltage_threshold_uv, window_samples, center=center)
     return {"eeg": eeg, "zeros": set(_zero_eeg_channels(raw, eeg)),
             "finite": finite, "exceeds": exceeds, "window_samples": window_samples}
 
@@ -1072,7 +1079,7 @@ def _noisy_window_bads(raw, picks, counts, n_scorable, occurrence_cutoff):
 
 def _require_retained_windows(n_retained):
     if n_retained == 0:
-        raise ValueError("No complete unmasked windows remain for channel detection.")
+        raise NoScorableSupport("No complete unmasked windows remain for channel detection.")
 
 
 def plot_voltage_traces(
@@ -1544,16 +1551,14 @@ def plot_bad_ch_topo_traces(raw, bad_ch_report):
     sfreq = raw.info["sfreq"]
     window_samples = int(round(10 * sfreq))
     if raw.n_times < window_samples:
-        warnings.warn("No unmasked 10-s window; scalp traces not plotted.",
-                      stacklevel=2)
+        warn_missing_plot("channel scalp traces", "No unmasked 10-s window; scalp traces not plotted.")
         return None
     mask_spans, _ = _temporary_voltage_mask(raw)
     good = ~_rejected_samples(raw, mask_spans)
     runs = np.flatnonzero(np.diff(np.r_[False, good, False])).reshape(-1, 2)
     counts = np.maximum(runs[:, 1] - runs[:, 0] - window_samples + 1, 0)
     if not counts.sum():
-        warnings.warn("No unmasked 10-s window; scalp traces not plotted.",
-                      stacklevel=2)
+        warn_missing_plot("channel scalp traces", "No unmasked 10-s window; scalp traces not plotted.")
         return None
     draw = np.random.default_rng().integers(counts.sum())
     run = np.searchsorted(counts.cumsum(), draw, side="right")
@@ -2090,6 +2095,7 @@ def bad_ch_by_flatline(
     *,
     flatlines,
     voltage_mask=False,
+    center_voltage_mask=False,
     return_details=False,
 ):
     """Return {"flatline": names} for channels whose exact flat samples exceed
@@ -2113,7 +2119,8 @@ def bad_ch_by_flatline(
     Add detections to info['bads']; leave data/annotations unchanged. With
     return_details=True, return (report, details): ch_names of the evaluated
     channels and flat_fraction, each one's fraction of retained samples in
-    exact flatline intervals.
+    exact flatline intervals. center_voltage_mask removes per-channel medians
+    from the temporary voltage screen only. Reference detection uses raw data.
     """
     if not np.isfinite(occurrence_cutoff) or not 0 <= occurrence_cutoff <= 1:
         raise ValueError("occurrence_cutoff must be between 0 and 1.")
@@ -2121,7 +2128,7 @@ def bad_ch_by_flatline(
         raise ValueError(
             "flatlines is required: pass the dictionary from detect_flatline_inplace."
         )
-    shared = _voltage_mask_inputs(raw) if voltage_mask else None
+    shared = _voltage_mask_inputs(raw, center=center_voltage_mask) if voltage_mask else None
     reference_channel = _reference_channel(
         raw, "native", reference_channel,
         known_zeros=shared["zeros"] if voltage_mask else None,
@@ -2136,7 +2143,7 @@ def bad_ch_by_flatline(
     retained_samples = ~_rejected_samples(raw, spans)
     n_retained = np.count_nonzero(retained_samples)
     if not n_retained:
-        raise ValueError("No unmasked samples remain for channel detection.")
+        raise NoScorableSupport("No unmasked samples remain for channel detection.")
     exact = dict(zip(flatlines["ch_names"], flatlines["segments_exact"]))
     flat_fraction = np.zeros(len(picks))
     for row, pick in enumerate(picks):
@@ -2153,6 +2160,24 @@ def bad_ch_by_flatline(
         }
         return report, details
     return report
+
+
+def assess_persistent_flatness(raw, *, flatlines, voltage_mask=False):
+    """Record an incomplete screen separately from a successful empty flag list."""
+    try:
+        flags = bad_ch_by_flatline(
+            raw, flatlines=flatlines, voltage_mask=voltage_mask, center_voltage_mask=voltage_mask,
+            reference_channel=flatlines["reference_channel"],
+        )
+    except NoScorableSupport as exc:
+        flatlines["persistent_flatness"] = dict(status="unavailable", reason=str(exc),
+                                                voltage_mask=voltage_mask, scorable_samples=0)
+        warnings.warn(f"Persistent flatness could not be assessed: {exc}", RuntimeWarning,
+                      stacklevel=2)
+        return {}
+    flatlines["persistent_flatness"] = dict(status="completed", flags=flags["flatline"],
+                                            voltage_mask=voltage_mask)
+    return flags
 
 
 def bad_ch_by_voltage(
@@ -2212,7 +2237,7 @@ def bad_ch_by_voltage(
     picks = mne.pick_types(raw.info, eeg=True, exclude=exclude)
     retained_samples = ~_rejected_samples(raw, spans)
     if not retained_samples.any():
-        raise ValueError("No unmasked samples remain for channel detection.")
+        raise NoScorableSupport("No unmasked samples remain for channel detection.")
     exceed_fraction = np.empty(len(picks))
     if return_details:
         details = {
@@ -2234,8 +2259,8 @@ def bad_ch_by_voltage(
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + bad_names))
     report = {"voltage": bad_names}
     if plot:
-        plot_voltage_traces(
-            raw, voltage_threshold_uv, bad_names=bad_names, exclude=bads_before,
+        diagnostic(
+            "channel voltage traces", plot_voltage_traces, raw, voltage_threshold_uv, bad_names=bad_names, exclude=bads_before,
             voltage_spans=spans,
         )
     if return_details:
@@ -2697,7 +2722,7 @@ def bad_ch_by_pop(
     rejected_samples = _rejected_samples(raw, spans)
     retained_min = (~rejected_samples).sum() / sfreq / 60
     if retained_min == 0:
-        raise ValueError("No unmasked samples remain for channel detection.")
+        raise NoScorableSupport("No unmasked samples remain for channel detection.")
     _validate_flatlines(raw, flatlines)
     local_flat = {} if flatlines is None else dict(
         zip(flatlines["ch_names"], flatlines["segments_bridged"])
@@ -3430,15 +3455,15 @@ def bad_ch_under_robust_ref(
         )
 
     # Before listing the flags, so that only the existing bads are gray.
-    plot_bad_ch_report(raw, robust_bad_ch_report)
+    diagnostic("robust-reference channel report", plot_bad_ch_report, raw, robust_bad_ch_report)
     raw.info["bads"] = list(dict.fromkeys(raw.info["bads"] + flagged))
     # The median Welch PSD shows persistent channel power; brief large
     # events barely count.
-    raw.compute_psd(
+    diagnostic("voltage spectrum topomap", lambda: raw.compute_psd(
         fmax=45.0, average="median", verbose=False,
         exclude=raw.info["bads"] + [reference_channel],
-    ).plot_topomap(dB=True)
-    plot_voltage_traces(raw)
+    ).plot_topomap(dB=True))
+    diagnostic("robust-reference voltage traces", plot_voltage_traces, raw)
 
     if bad_ch_report is not None:
         for criterion, names in robust_bad_ch_report.items():
@@ -3456,7 +3481,7 @@ def bad_ch_under_robust_ref(
 
 def interpolate_local_artifacts_inplace(
     raw, flatlines, *, pop_intervals=None, reference_channel=None,
-    pop_repair_width=4.0,
+    pop_repair_width=4.0, capture=None,
 ):
     """Jointly repair local flats and pops; return detected pop intervals.
 
@@ -3591,8 +3616,13 @@ def interpolate_local_artifacts_inplace(
         ])
         for name in {*local_flat, *pop_intervals}
     }
-    _interpolate_local_intervals_inplace(raw, targets, {}, global_flat)
+    if capture is not None:
+        capture.check_raw(raw)
+    _interpolate_local_intervals_inplace(raw, targets, {}, global_flat, capture=capture)
     re_reference_inplace(raw, reference_channel)
+    if capture is not None:
+        capture.record_reference(reference_channel)
+        capture.repairs_observed = True
     if detect_pops:
         print(f"Pops repaired: {n_pops_avg.get(final_reference, 0)} on the final "
               f"reference {final_reference} "
@@ -3601,7 +3631,7 @@ def interpolate_local_artifacts_inplace(
         return pop_intervals
 
 
-def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
+def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat, *, capture=None):
     """Repair channel intervals using the shared spherical-spline plan.
 
     targets and invalid map EEG names to half-open sample intervals. Only
@@ -3611,8 +3641,6 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
     blend with its input. Read all estimates before writing any target so no
     repaired samples feed another target's estimate in that piece.
     """
-    # Bound temporary donor-data copies (8 MiB for 128 float64 channels).
-    sample_chunk = 8192
     geometry = _spline_geometry(raw)
     bads = tuple(i for i in geometry["picks"] if raw.ch_names[i] in raw.info["bads"])
     good = geometry["picks"][~np.isin(geometry["picks"], bads)]
@@ -3626,22 +3654,18 @@ def _interpolate_local_intervals_inplace(raw, targets, invalid, global_flat):
         donors = good[~np.isin(good, excluded)]
         weights = _spline_weights(geometry, donors, repair)
         common_rows = [row for row, target in enumerate(repair) if target in other]
+        other_donors, other_weights = None, None
         if weight is not None and common_rows:
             other_donors = good[~np.isin(good, other_excluded)]
             other_weights = _spline_weights(
                 geometry, other_donors, [repair[row] for row in common_rows],
             )
-        for first in range(start, stop, sample_chunk):
-            last = min(first + sample_chunk, stop)
-            projected = weights @ raw._data[donors, first:last]
-            if weight is None:
-                raw._data[repair, first:last] = projected
-            else:
-                previous = raw._data[repair, first:last]
-                if common_rows:
-                    previous[common_rows] = other_weights @ raw._data[other_donors, first:last]
-                part = weight[first - start:last - start]
-                raw._data[repair, first:last] = part * projected + (1 - part) * previous
+        piece = dict(start=start, stop=stop, targets=repair, donors=donors, weights=weights,
+                     common=common_rows, other_donors=other_donors,
+                     other_weights=other_weights, fade=weight)
+        repair_piece(raw._data, **piece)
+        if capture is not None:
+            capture.operations.append(dict(kind="repair", **piece))
 
 
 def _candidate_reference_replacement(raw, reference_channel):
@@ -3663,7 +3687,7 @@ def _candidate_reference_replacement(raw, reference_channel):
     return good[0], candidates
 
 
-def validate_reference_inplace(raw, flatlines):
+def validate_reference_inplace(raw, flatlines, *, capture=None):
     """Keep a good native reference; re-reference a bad one in place to the
     nearest good electrode among its five nearest.
     Return the reference channel name in effect.
@@ -3689,7 +3713,12 @@ def validate_reference_inplace(raw, flatlines):
     reference_channel = _reference_channel(
         raw, "native", flatlines["reference_channel"]
     )
+    if capture is not None:
+        capture.check_raw(raw)
+        capture.bad_channels = list(raw.info["bads"])
     if reference_channel not in raw.info["bads"]:
+        if capture is not None:
+            capture.reference_check_observed = True
         return reference_channel
     replacement, candidates = _candidate_reference_replacement(raw, reference_channel)
     eeg = mne.pick_types(raw.info, eeg=True, exclude=[])
@@ -3697,6 +3726,9 @@ def validate_reference_inplace(raw, flatlines):
     # Row by row, so that no full EEG temporary is made.
     for i in eeg:
         raw._data[i] -= new_reference
+    if capture is not None:
+        capture.record_reference(replacement)
+        capture.reference_check_observed = True
     warnings.warn(
         f"The native reference {reference_channel} is bad; re-referenced every "
         f"EEG channel to {replacement}, the nearest good electrode of {candidates}.",
@@ -3917,7 +3949,7 @@ def _asr_filter_channels(data, b, a, zi=None):
 
 def apply_asr_inplace(
     raw, reference_channel=None, flatlines=None, pop_intervals=None,
-    *, calibration_cutoff=20.0,
+    *, calibration_cutoff=20.0, capture=None,
 ):
     """Correct good EEG channels with ASR in place; return details.
 
@@ -3962,12 +3994,16 @@ def apply_asr_inplace(
     """
     if not raw.preload:
         raise ValueError("raw must be preloaded.")
+    if capture is not None:
+        capture.check_raw(raw)
     if pop_intervals is None:
         pop_intervals = {}
     if flatlines is None:
         raise ValueError("Pass the flatlines dictionary from detect_flatline_inplace.")
     _validate_flatlines(raw, flatlines)
     reference_channel = _reference_channel(raw, "native", reference_channel)
+    if capture is not None:
+        capture.output_reference = reference_channel
     if reference_channel in raw.info["bads"]:
         raise ValueError("The reference is bad; run validate_reference_inplace first.")
     picks = _mask_eeg_picks(raw, reference_channel)
@@ -3985,14 +4021,15 @@ def apply_asr_inplace(
     calibration_input = np.flatnonzero(~excluded)
     minimum_samples = int(np.ceil(60 * sfreq))
 
-    def require_calibration(n_samples):
+    def require_calibration(n_samples, phase):
         if n_samples < minimum_samples:
-            raise ValueError(
-                f"ASR requires at least 60 seconds of retained calibration data; "
-                f"only {n_samples / sfreq:.3f} seconds remain."
-            )
+            error = InsufficientASRCalibration(phase, n_samples, len(calibration_input),
+                                               sfreq, minimum_samples)
+            if capture is not None:
+                capture.skip_asr(str(error))
+            raise error
 
-    require_calibration(len(calibration_input))
+    require_calibration(len(calibration_input), "candidate")
     data = raw.get_data(picks=picks, reject_by_annotation=None)
     if not np.isfinite(data).all():
         raise ValueError("Nonfinite data in ASR channels; run bad_ch_by_nan first.")
@@ -4001,7 +4038,7 @@ def apply_asr_inplace(
 
     def filter_calibration(data, b, a, zi=None):
         # This input is the subset retained by native automatic selection.
-        require_calibration(data.shape[1])
+        require_calibration(data.shape[1], "auto_selected")
         return _asr_filter_channels(data, b, a, zi)
 
     # mne-denoise has no coefficient argument; restore its
@@ -4018,7 +4055,7 @@ def apply_asr_inplace(
             method="standard",
         )
     calibration_indices = calibration_input[calibration["clean_sample_mask"]]
-    plot_asr_calibration(raw, data, names, state, calibration_indices)
+    diagnostic("ASR calibration", plot_asr_calibration, raw, data, names, state, calibration_indices)
 
     def update_initial_state(state, data):
         """Initialize the statistics filter
@@ -4034,13 +4071,31 @@ def apply_asr_inplace(
 
     state = update_initial_state(state, data)
     with patch.object(_reconstruction, "_lfilter_channels", side_effect=_asr_filter_channels):
-        corrected, processing = process_asr(data, sfreq, state)
+        options = {}
+        if capture is not None:
+            parameters = inspect.signature(process_asr).parameters
+            if ("store_reconstruction_matrices" in parameters or
+                    any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())):
+                options["store_reconstruction_matrices"] = True
+            else:
+                capture.asr_status = "unavailable"
+                capture.asr_reason = "Installed process_asr cannot export reconstruction matrices."
+                warnings.warn(f"ASR replay unavailable: {capture.asr_reason}", stacklevel=2)
+        corrected, processing = process_asr(data, sfreq, state, **options)
+        if options:
+            try:
+                capture.record_asr(data, corrected, picks, state, processing, process_asr)
+            except (ValueError, KeyError, AssertionError) as error:
+                capture.asr_status, capture.asr_reason = "unavailable", str(error)
+                warnings.warn(f"ASR corrected the EEG; replay is unavailable: {error}", stacklevel=2)
+            # The capture owns the applied matrices; keep the ordinary report compact.
+            processing.pop("reconstruction_matrices", None)
     raw._data[picks] = corrected
-    plot_asr_effect(raw, data, names)
-    raw.compute_psd(
+    diagnostic("ASR effect", plot_asr_effect, raw, data, names)
+    diagnostic("voltage spectrum topomap", lambda: raw.compute_psd(
         fmax=45.0, average="median", verbose=False,
         exclude=raw.info["bads"] + [reference_channel],
-    ).plot_topomap(dB=True)
+    ).plot_topomap(dB=True))
 
     corrected_segments = np.flatnonzero(
         np.diff(np.r_[False, processing["sample_mask"], False])
@@ -4076,30 +4131,137 @@ def apply_asr_inplace(
     return details
 
 
-def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines):
-    """Detect bad channels, repair the good channels' electrode pops, and apply
-    ASR in place; return ASR details and the effective reference channel.
+def _channel_check(name, detector, raw, flatlines, bad_ch_report, *, reference=None):
+    kwargs = {"flatlines": flatlines}
+    if name == "small_signal" and reference is not None:
+        kwargs["reference_channel"] = reference
+    try:
+        flags = detector(raw, **kwargs)
+    except NoScorableSupport as exc:
+        warnings.warn(f"{name} check unavailable: {exc}", RuntimeWarning, stacklevel=2)
+        return {"status": "unavailable", "reason": str(exc)}
+    if reference is None:
+        bad_ch_report.update(flags)
+    else:
+        for criterion, names in flags.items():
+            bad_ch_report[criterion] = list(dict.fromkeys(bad_ch_report.get(criterion, []) + names))
+    return {"status": "completed", "flags": flags}
 
-    Supply preloaded native-reference data. Line-noise removal and filtering
-    remain the caller's responsibility. Require the initial bad_ch_report and
-    flatlines detected before filtering. Update the supplied report in place.
-    Retain the detectors' existing plots.
+
+def _plan_reference_recovery(raw, flatlines, deferred, bad_ch_report, passes):
+    """Retry on repaired copies; any new bad label requires new repair donors."""
+    labels = list(raw.info["bads"])
+    while True:
+        with raw.copy() as trial:
+            trial.info["bads"] = list(labels)
+            entry = {"donor_exclusions": list(labels), "checks": {}}
+            passes.append(entry)
+            interpolate_local_artifacts_inplace(trial, flatlines)
+            reference = validate_reference_inplace(trial, flatlines)
+            entry["reference"] = reference
+            for name, detector in deferred.items():
+                entry["checks"][name] = _channel_check(
+                    name, detector, trial, flatlines, bad_ch_report, reference=reference,
+                )
+            new_labels = [name for name in trial.info["bads"] if name not in labels]
+            entry["new_bad_channels"] = new_labels
+            if not new_labels:
+                raw.info["bads"] = labels
+                # Keep only a digest of the settled scratch data for the check
+                # against production, never an extra production repair.
+                return reference, _signal_digest(trial)
+            labels.extend(new_labels)
+
+
+def _signal_digest(raw):
+    digest = hashlib.sha256()
+    for row in raw._data:
+        digest.update(np.ascontiguousarray(row))
+    return digest.digest()
+
+
+def bad_ch_time_detection_inplace(raw, bad_ch_report, flatlines, *, capture=None, output_dir=None):
+    """Detect, repair, reference and optionally apply ASR to filtered EEG in place.
+
+    Return (ASR details including step2_report, effective reference). If
+    calibration is insufficient, return the pre-ASR EEG with an explicit skip.
+    A new output_dir saves completed checkpoints and the JSON report.
     """
-    bad_ch_report.update(bad_ch_by_voltage(raw, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_HFnoise(raw, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_pop(raw, flatlines=flatlines))
-    bad_ch_report.update(bad_ch_by_small(raw, flatlines=flatlines))
-    plot_bad_ch_report(raw, bad_ch_report)
-
-    bad_ch_under_robust_ref(raw, bad_ch_report, flatlines=flatlines)
-
-    pop_intervals = interpolate_local_artifacts_inplace(raw, flatlines)
-    reference_channel = validate_reference_inplace(raw, flatlines)
-    mask_segment_by_voltage(raw, reference_channel=reference_channel)
-    asr_details = apply_asr_inplace(
-        raw, reference_channel, flatlines, pop_intervals,
-    )
-    return asr_details, reference_channel
+    detectors = {"voltage": bad_ch_by_voltage, "high_frequency": bad_ch_by_HFnoise,
+                 "pop": bad_ch_by_pop, "small_signal": bad_ch_by_small}
+    report = {"status": "started", "stage": "filtered", "checkpoints": {},
+              "persistent_flatness": flatlines.get("persistent_flatness", {"status": "not_reported"}),
+              "input_reference": flatlines.get("reference_channel"),
+              "channel_order": list(raw.ch_names), "sfreq": raw.info["sfreq"],
+              "first_samp": raw.first_samp, "n_times": raw.n_times,
+              "initial_checks": {}, "reference_recovery_passes": [],
+              "diagnostic_warnings": [], "channel_flags": bad_ch_report}
+    checkpoints = Checkpoints(output_dir, report)
+    try:
+        with collect_plot_warnings(report["diagnostic_warnings"]):
+            checkpoints.save("filtered", raw)
+            report["stage"] = "initial_checks"
+            deferred = {}
+            for name, detector in detectors.items():
+                result = _channel_check(name, detector, raw, flatlines, bad_ch_report)
+                report["initial_checks"][name] = result
+                if result["status"] == "unavailable":
+                    deferred[name] = detector
+            diagnostic("initial channel report", plot_bad_ch_report, raw, bad_ch_report)
+            report["stage"] = "robust_reference"
+            bad_ch_under_robust_ref(raw, bad_ch_report, flatlines=flatlines)
+            if deferred:
+                report["stage"] = "reference_recovery"
+                planned_reference, planned_digest = _plan_reference_recovery(
+                    raw, flatlines, deferred, bad_ch_report, report["reference_recovery_passes"],
+                )
+                final_checks = report["reference_recovery_passes"][-1]["checks"]
+            else:
+                final_checks = {}
+            report["unanswered_channel_checks"] = [name for name, result in final_checks.items()
+                                                   if result["status"] == "unavailable"]
+            report["bad_channels"] = list(raw.info["bads"])
+            checkpoints.save("channels", raw)
+            report["stage"] = "repair_and_reference"
+            capture_kwargs = {} if capture is None else {"capture": capture}
+            pops = interpolate_local_artifacts_inplace(raw, flatlines, **capture_kwargs)
+            reference = validate_reference_inplace(raw, flatlines, **capture_kwargs)
+            if deferred:
+                matches = (reference == planned_reference and raw.info["bads"] == report["bad_channels"]
+                           and _signal_digest(raw) == planned_digest)
+                report["production_matches_recovery_plan"] = matches
+                if not matches:
+                    raise RuntimeError("Production repairs differ from the settled reference recovery pass.")
+            report["reference_channel"] = reference
+            report["pop_intervals"] = pops
+            report["bridged_flat_intervals"] = dict(zip(flatlines.get("ch_names", ()),
+                                                        flatlines.get("segments_bridged", ())))
+            mask_segment_by_voltage(raw, reference_channel=reference)
+            checkpoints.save("pre_asr", raw)
+            report["stage"] = "asr"
+            try:
+                details = apply_asr_inplace(raw, reference, flatlines, pops, **capture_kwargs)
+            except InsufficientASRCalibration as exc:
+                warnings.warn(f"ASR skipped: {exc}", RuntimeWarning, stacklevel=2)
+                report["asr"] = exc.details
+                details = dict(exc.details)
+                handoff = "pre_asr"
+            else:
+                report["asr"] = {"status": "applied",
+                                 "corrected_duration_s": details["corrected_duration_s"]}
+                checkpoints.save("post_asr", raw)
+                handoff = "post_asr"
+            if capture is not None:
+                report["asr"]["replay_status"] = capture.asr_status
+                report["asr"]["replay_reason"] = capture.asr_reason
+            report.update(stage="finished", status="completed", handoff=handoff)
+            checkpoints.write_report()
+    except Exception as exc:
+        report.update(status="failed", error_type=type(exc).__name__, reason=str(exc))
+        checkpoints.write_report()
+        raise
+    details["step2_report"] = report
+    return details, reference
 
 
 if __name__ == "__main__":
@@ -4112,7 +4274,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_nan(raw))
     flatlines = detect_flatline_inplace(raw)
     mask_segment_by_flatline(raw, flatlines)
-    bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
+    bad_ch_report.update(assess_persistent_flatness(raw, flatlines=flatlines))
 
     # %% Line noise removal
     raw_prep = raw.copy()
@@ -4127,7 +4289,7 @@ if __name__ == "__main__":
 
     # %% High-pass filter at 0.3 Hz for bad-channel detection
     raw_bads = raw.copy()
-    raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+    filter_step2_inplace(raw_bads)
 
     # %% Bad-channel detection and ASR correction in validated native reference
     asr_details, reference_channel = bad_ch_time_detection_inplace(

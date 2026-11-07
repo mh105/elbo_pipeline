@@ -19,9 +19,10 @@ from step1_line_noise_removal import (
     Interpolate_fft,
     remove_line_noise_inplace,
 )
+from step2_capture import filter_step2_inplace
 from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
-    bad_ch_by_flatline,
+    assess_persistent_flatness,
     detect_flatline_inplace,
     mask_segment_by_flatline,
     bad_ch_time_detection_inplace,
@@ -29,8 +30,7 @@ from step2_bad_ch_time_detection import (
 from step3_ica_cleaning import (
     fit_ica,
     prepare_ica_viewer,
-    load_ica_exclusions,
-    summarize_ica_exclusions,
+    apply_reviewed_ica,
 )
 
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
         bad_ch_report.update(bad_ch_by_nan(raw))
         flatlines = detect_flatline_inplace(raw)
         mask_segment_by_flatline(raw, flatlines)
-        bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
+        bad_ch_report.update(assess_persistent_flatness(raw, flatlines=flatlines))
 
         # %% Line noise removal
         raw_prep = raw.copy()
@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
         # %% High-pass filter at 0.3 Hz for bad-channel detection
         raw_bads = raw.copy()
-        raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+        filter_step2_inplace(raw_bads)
 
         # Bad-channel detection and ASR correction in validated native reference
         asr_details, reference_channel = bad_ch_time_detection_inplace(
@@ -231,9 +231,8 @@ if __name__ == "__main__":
         )
 
         # Run these after reviewing; loading replaces, rather than unions, exclusions
-        ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-        exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
-        ica.apply(raw_bads)
+        raw_bads, exclusion_figure = apply_reviewed_ica(
+            raw_bads, ica, fit_epochs, viewer_dir, reference_channel=reference_channel)
 
         # %% Epoching
         epochs = prepare_epochs(raw_bads, behavior)

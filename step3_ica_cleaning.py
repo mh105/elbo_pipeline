@@ -27,15 +27,17 @@ from mne_icalabel.iclabel.features import (
     _eeg_rpsd,
     _eeg_topoplot,
 )
+from step3_capture import reconstruct_ica_report
 from step0_data_quality_check import load_raw_data
 from step1_line_noise_removal import (
     ZapLine_notch,
     Interpolate_fft,
     remove_line_noise_inplace,
 )
+from step2_capture import filter_step2_inplace
 from step2_bad_ch_time_detection import (
     bad_ch_by_nan,
-    bad_ch_by_flatline,
+    assess_persistent_flatness,
     detect_flatline_inplace,
     mask_segment_by_flatline,
     bad_ch_time_detection_inplace,
@@ -360,6 +362,28 @@ def summarize_ica_exclusions(ica, fit_epochs, raw_bads):
     return fig
 
 
+def apply_reviewed_ica(raw, ica, fit_epochs, viewer_dir, *, reference_channel, version=None):
+    """Apply a saved decision to a copy and save its transformation and EEG change report.
+
+    As in the interactive workflow, update the live ICA's exclude list for
+    inspection. The archived fit, all review versions and the input Raw are unchanged.
+    """
+    cleaned, capture, report_dir = reconstruct_ica_report(
+        Path(viewer_dir) / "reconstructions", raw, ica, viewer_dir=viewer_dir,
+        version=version, reference_channel=reference_channel)
+    print(f"ICA transformation and recorded EEG change: {report_dir}")
+    ica.exclude = list(capture.metadata["exclude"])
+    try:
+        figure = summarize_ica_exclusions(ica, fit_epochs, raw)
+    except Exception as exc:
+        # Reconstruction and its numerical checks have already completed.
+        message = f"ICA exclusion summary unavailable: {type(exc).__name__}: {exc}"
+        (report_dir / "summary_warning.txt").write_text(message + "\n", encoding="utf-8")
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        figure = None
+    return cleaned, figure
+
+
 if __name__ == "__main__":
     # %% Load example data
     subject_id = "sub-26"
@@ -374,7 +398,7 @@ if __name__ == "__main__":
     bad_ch_report.update(bad_ch_by_nan(raw))
     flatlines = detect_flatline_inplace(raw)
     mask_segment_by_flatline(raw, flatlines)
-    bad_ch_report.update(bad_ch_by_flatline(raw, flatlines=flatlines))
+    bad_ch_report.update(assess_persistent_flatness(raw, flatlines=flatlines))
 
     # %% Line noise removal
     raw_prep = raw.copy()
@@ -395,7 +419,7 @@ if __name__ == "__main__":
 
     # %% High-pass filter at 0.3 Hz for bad-channel detection
     raw_bads = raw.copy()
-    raw_bads.filter(l_freq=0.3, h_freq=None, verbose=False)
+    filter_step2_inplace(raw_bads)
 
     # %% Bad-channel detection and ASR correction in validated native reference
     asr_details, reference_channel = bad_ch_time_detection_inplace(
@@ -420,9 +444,6 @@ if __name__ == "__main__":
     # %% Run this cell after reviewing; loading replaces, rather than unions, exclusions
     input("Review ICs in the interactive viewer,"
           "then press [Enter] to load the saved exclusions: ")
-    ica.exclude = load_ica_exclusions(viewer_dir, ica=ica)
-    exclusion_figure = summarize_ica_exclusions(ica, fit_epochs, raw_bads)
-
-    # Apply reviewed ICA exclusion and view the cleaned data
-    ica.apply(raw_bads)
+    raw_bads, exclusion_figure = apply_reviewed_ica(
+        raw_bads, ica, fit_epochs, viewer_dir, reference_channel=reference_channel)
     raw_bads.plot(title="After ICA cleaning")
